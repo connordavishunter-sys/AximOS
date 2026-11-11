@@ -1,6 +1,7 @@
 #pragma once
 
 #include <key_event.h>
+#include <stddef.h>
 #include <stdint.h>
 
 // Programs draw windows through wm, the compositor. Each window's pixels are shared
@@ -17,6 +18,7 @@ enum gui_message_type {
     GUI_CREATE = 1,
     GUI_DAMAGE, // x, y, width and height of what changed
     GUI_DESTROY,
+    GUI_BUFFER, // new pixels, width by height, named in buffer, after a resize
 
     // From wm. Mouse positions are inside the window.
     GUI_CREATED,
@@ -26,6 +28,7 @@ enum gui_message_type {
     GUI_KEY,          // key
     GUI_FOCUS,        // focused is whether the window now has the keyboard
     GUI_CLOSE,        // the close button was clicked, or Super+Q pressed
+    GUI_RESIZE,       // width and height wm would like the window to be
 };
 
 struct gui_message {
@@ -50,6 +53,11 @@ struct gui_canvas {
 struct gui_window {
     uint32_t id;
     struct gui_canvas canvas;
+
+    // A new buffer from gui_resize, which wm switches to with the next update.
+    char pending[GUI_TITLE_MAX];
+    uint32_t *old_pixels;
+    size_t old_size;
 };
 
 // Connects to wm, returning false if it isn't running. The connection is closed
@@ -62,6 +70,11 @@ int gui_fd(void);
 // Returns NULL if wm refused or memory ran out.
 struct gui_window *gui_create_window(const char *title, int width, int height);
 void gui_destroy_window(struct gui_window *window);
+
+// Gives the window a new size, usually when GUI_RESIZE asks, with new pixels to draw
+// on. wm goes on showing the old ones until the next update, so draw first. Returns
+// false, leaving the window as it was, if memory ran out.
+bool gui_resize(struct gui_window *window, int width, int height);
 
 // Shows what was drawn in part of a window, or all of it with gui_show.
 void gui_update(struct gui_window *window, int x, int y, int width, int height);

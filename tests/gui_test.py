@@ -4,6 +4,7 @@ import time
 from vm import VM, check, finish
 
 DESKTOP, FOCUSED, PAPER, INK, TERMINAL = 0x1E2430, 0x3D63DD, 0xF4F1EA, 0x26282E, 0x161A22
+TASKBAR, TASKBAR_BUTTON, TASKBAR_MINIMIZED = 0x141821, 0x2E3646, 0x1D222C
 
 
 def count(px, x0, y0, x1, y1, color):
@@ -74,6 +75,84 @@ try:
     o = v.run('echo back'); check('the shell has the keyboard again', '\nback\n' in o, o)
     w, h, px = v.screenshot()
     check('the console has the screen again', px(5, 5) != DESKTOP, hex(px(5, 5)))
+finally:
+    v.close()
+
+
+class Pointer:
+    """Moves the mouse to places on the screen, from the middle where it starts."""
+    def __init__(self, v):
+        self.v, self.x, self.y = v, 640, 400
+
+    def to(self, x, y, buttons=None):
+        self.v.mouse(x - self.x, y - self.y, buttons)
+        self.x, self.y = x, y
+
+    def click(self, x, y):
+        self.to(x, y, 1)
+        self.v.mouse(buttons=0)
+
+
+# Resizing, maximizing, tiling, minimizing and the taskbar.
+v = VM()
+try:
+    check('prompt at boot', v.wait('/$ ', 30), v.text())
+    at = v.mark()
+    v.type('wm guidemo\n')
+    check('wm starts guidemo', v.wait('guidemo: window 1', 10, at), v.text(at))
+    time.sleep(0.5)
+    mouse = Pointer(v)
+
+    w, h, px = v.screenshot()
+    bar = h - 28
+    check('taskbar', px(2, bar + 2) == TASKBAR and px(8, bar + 6) == TASKBAR_BUTTON, hex(px(2, bar + 2)))
+    check('taskbar button for the focused window', px(150, bar + 6) == FOCUSED, hex(px(150, bar + 6)))
+    check('clock', count(px, w - 60, bar + 10, w - 10, bar + 18, 0xFFFFFF) > 20, 'no clock')
+
+    # The 360x200 contents end at 440, 284, and the frame's border just past them.
+    at = v.mark()
+    mouse.to(442, 286, 1); mouse.to(562, 366); v.mouse(buttons=0)
+    check('dragging the corner resizes', v.wait('guidemo: size 480 280', 5, at), v.text(at))
+    w, h, px = v.screenshot()
+    check('the window is bigger', px(550, 350) == PAPER, hex(px(550, 350)))
+
+    # Maximize is the middle button, left of close.
+    at = v.mark()
+    mouse.click(528, 72)
+    check('maximize fills the desktop', v.wait('guidemo: size 1278 746', 5, at), v.text(at))
+    w, h, px = v.screenshot()
+    check('maximized', px(1200, 700) == PAPER and px(1200, bar + 2) == TASKBAR, hex(px(1200, 700)))
+    at = v.mark()
+    v.key('meta_l-down')
+    check('Super+Down goes back', v.wait('guidemo: size 480 280', 5, at), v.text(at))
+    at = v.mark()
+    v.key('meta_l-right')
+    check('Super+Right takes the right half', v.wait('guidemo: size 638 746', 5, at), v.text(at))
+    w, h, px = v.screenshot()
+    check('on the right half', px(1000, 400) == PAPER and px(300, 400) == DESKTOP, hex(px(1000, 400)))
+
+    # Minimize is the third button from the right, now at the top right of the screen.
+    at = v.mark()
+    mouse.click(1227, 13)
+    check('minimizing takes the focus away', v.wait('guidemo: focus 0', 5, at), v.text(at))
+    w, h, px = v.screenshot()
+    check('minimized window is hidden', px(1000, 400) == DESKTOP, hex(px(1000, 400)))
+    check('and dim on the taskbar', px(150, bar + 6) == TASKBAR_MINIMIZED, hex(px(150, bar + 6)))
+    at = v.mark()
+    mouse.click(150, bar + 6)
+    check('clicking it on the taskbar brings it back', v.wait('guidemo: focus 1', 5, at), v.text(at))
+    w, h, px = v.screenshot()
+    check('shown again', px(1000, 400) == PAPER, hex(px(1000, 400)))
+
+    at = v.mark()
+    mouse.click(50, bar + 14)
+    check('the launcher opens a terminal', v.wait('guidemo: focus 0', 10, at), v.text(at))
+    time.sleep(1)
+    w, h, px = v.screenshot()
+    check('which gets a taskbar button', px(300, bar + 6) == FOCUSED, hex(px(300, bar + 6)))
+
+    v.key('meta_l-shift-q')
+    o = v.run('echo back'); check('quits', '\nback\n' in o, o)
 finally:
     v.close()
 finish()

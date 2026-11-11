@@ -24,7 +24,7 @@ LIBC_SO_OBJS := $(patsubst user/libc/%,$(BUILD)/user/libc_pic/%.o,$(basename $(f
 # /system/lib/libgui.so, for programs with windows, which GUI_PROGRAMS are linked against.
 LIBGUI_SO := $(BUILD)/user/libgui.so
 LIBGUI_SO_OBJS := $(patsubst user/libgui/%.c,$(BUILD)/user/libgui_pic/%.o,$(wildcard user/libgui/*.c))
-GUI_PROGRAMS := wm guidemo term
+GUI_PROGRAMS := wm guidemo term fbdemo
 
 # Programs from elsewhere, built by ports/build.sh.
 DASH := $(BUILD)/ports/dash-0.5.12/src/dash

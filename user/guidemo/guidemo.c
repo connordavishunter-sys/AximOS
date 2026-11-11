@@ -16,14 +16,16 @@ static void draw(struct gui_window *w) {
     struct gui_canvas *c = &w->canvas;
     char line[64];
 
-    gui_fill(c, 0, 0, WIDTH, HEIGHT, BACKGROUND);
-    gui_fill(c, 0, 0, WIDTH, 6, focused ? ACCENT : 0xB8BCC6);
+    gui_fill(c, 0, 0, c->width, c->height, BACKGROUND);
+    gui_fill(c, 0, 0, c->width, 6, focused ? ACCENT : 0xB8BCC6);
     gui_text(c, 20, 28, "Hello from AximOS", INK, 2);
     snprintf(line, sizeof(line), "clicks: %d", clicks);
     gui_text(c, 20, 80, line, INK, 2);
     snprintf(line, sizeof(line), "last key: %s", last_key);
     gui_text(c, 20, 112, line, INK, 2);
-    gui_text(c, 20, 168, "Click, type, or Esc to close", 0x6B7080, 1);
+    snprintf(line, sizeof(line), "%dx%d", c->width, c->height);
+    gui_text(c, 20, 144, line, 0x6B7080, 1);
+    gui_text(c, 20, c->height - 32, "Click, type, or Esc to close", 0x6B7080, 1);
     gui_show(w);
 }
 
@@ -56,6 +58,8 @@ int main(int argc, char **argv) {
         } else if (e.type == GUI_KEY && e.key.pressed && e.key.text >= ' ' && e.key.text < 127) {
             snprintf(last_key, sizeof(last_key), "%c", (char)e.key.text);
             printf("guidemo: key %s\n", last_key);
+        } else if (e.type == GUI_RESIZE && gui_resize(w, e.width, e.height)) {
+            printf("guidemo: size %d %d\n", e.width, e.height);
         } else if (e.type == GUI_FOCUS) {
             focused = e.focused;
             printf("guidemo: focus %u\n", e.focused);

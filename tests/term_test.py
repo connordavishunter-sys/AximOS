@@ -5,6 +5,7 @@ from vm import VM, WORK, check, compile_program, disk_copy, finish, program_chec
 P = os.path.dirname(os.path.abspath(__file__)) + '/programs/'
 img = disk_copy('term')
 put(img, compile_program(P + 'pty.c', WORK + '/pty'), '/system/bin/pty')
+put(img, compile_program(P + 'winsize.c', WORK + '/winsize'), '/system/bin/winsize')
 
 # The font's glyphs, to read characters back from the screen.
 FONT = {}
@@ -17,15 +18,15 @@ for code, glyph in enumerate(re.findall(r'\{((?:\s*0x[0-9A-Fa-f]{2},?){8})\s*\}'
 LEFT, TOP, COLS, ROWS = 84, 88, 80, 25
 
 
-def screen_text(v, shift=0):
-    """The terminal's 25 lines, with anything unreadable as ?. Each window after the
+def screen_text(v, shift=0, left=LEFT, top=TOP, rows=ROWS, cols=COLS):
+    """The terminal's lines, with anything unreadable as ?. Each window after the
     first opens shift pixels further right and down."""
     w, h, px = v.screenshot()
     lines = []
-    for r in range(ROWS):
+    for r in range(rows):
         line = ''
-        for c in range(COLS):
-            x0, y0 = LEFT + shift + c * 8, TOP + shift + r * 16
+        for c in range(cols):
+            x0, y0 = left + shift + c * 8, top + shift + r * 16
             samples = [[px(x0 + bit, y0 + 2 * row) for bit in range(8)] for row in range(8)]
             background = px(x0 + 7, y0 + 15) # no glyph reaches the bottom right
             glyph = tuple(sum(1 << bit for bit in range(8) if row[bit] != background) for row in samples)
@@ -34,11 +35,11 @@ def screen_text(v, shift=0):
     return lines
 
 
-def wait_screen(v, want, secs=5, shift=0):
+def wait_screen(v, want, secs=5, **where):
     """Waits until the terminal shows want somewhere, returning its lines."""
     deadline = time.time() + secs
     while True:
-        lines = screen_text(v, shift)
+        lines = screen_text(v, **where)
         if any(want in line for line in lines) or time.time() > deadline:
             return lines
         time.sleep(0.3)
@@ -96,6 +97,19 @@ try:
     v.type('seq=1; while [ $seq -le 40 ]; do echo line$seq; seq=$((seq+1)); done\n')
     lines = wait_screen(v, 'line40')
     check('scrolls', lines[23] == 'line40' and lines[22] == 'line39' and lines[24].startswith('/$'), '\n'.join(lines))
+
+    # Maximized, it fills the screen above the taskbar, from 1, 25, and tells the
+    # program running in it.
+    v.type('clear; winsize -w\n'); time.sleep(1)
+    v.key('meta_l-up'); time.sleep(1.5)
+    big = dict(left=5, top=29, rows=46, cols=158)
+    lines = wait_screen(v, 'rows 46 cols 158', **big)
+    check('maximizing resizes the terminal', shown(lines, 'rows 25 cols 80') and shown(lines, 'rows 46 cols 158'),
+          '\n'.join(lines))
+    v.key('meta_l-down'); time.sleep(1.5)
+    lines = wait_screen(v, 'rows 25 cols 80')
+    check('and going back', lines[2] == 'rows 25 cols 80' if len(lines) > 2 else False, '\n'.join(lines))
+    v.key('ctrl-c'); time.sleep(0.5)
 
     # Closing the window hangs up what's running in it.
     v.type('sleep 100\n'); time.sleep(0.5)

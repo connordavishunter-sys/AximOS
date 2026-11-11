@@ -1,5 +1,7 @@
 #include <errno.h>
 #include <fcntl.h>
+#include <gui.h>
+#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,10 +19,58 @@ static long now_ns(void) {
     return t.tv_sec * 1000000000L + t.tv_nsec;
 }
 
-// Bounces a box over a colour gradient until Ctrl+C.
+static uint32_t gradient(int x, int y, int w, int h) {
+    return (uint32_t)(x * 255 / w) << 16 | (uint32_t)(y * 255 / h) << 8 | 0x40;
+}
+
+static void draw_frame(struct gui_canvas *c, int x, int y) {
+    for (int row = 0; row < c->height; row++) {
+        for (int col = 0; col < c->width; col++)
+            c->pixels[row * c->stride + col] = gradient(col, row, c->width, c->height);
+    }
+    gui_fill(c, x, y, BOX_SIZE, BOX_SIZE, 0xFFFFFF);
+}
+
+// The same in a window, which can be resized, until it's closed.
+static int bounce_in_window(void) {
+    struct gui_window *window = gui_create_window("fbdemo", 480, 320);
+    int x = 0, y = 0, dx = 5, dy = 3;
+
+    if (!window) {
+        dprintf(STDERR_FILENO, "fbdemo: couldn't make a window\n");
+        return 1;
+    }
+    for (;;) {
+        struct gui_canvas *c = &window->canvas;
+        struct pollfd p = {.fd = gui_fd(), .events = POLLIN};
+        struct gui_message e;
+
+        if (x + dx < 0 || x + dx + BOX_SIZE > c->width)
+            dx = -dx;
+        if (y + dy < 0 || y + dy + BOX_SIZE > c->height)
+            dy = -dy;
+        x += dx;
+        y += dy;
+        draw_frame(c, x, y);
+        gui_show(window);
+
+        while (poll(&p, 1, FRAME_NS / 1000000) > 0) {
+            if (!gui_next_event(&e) || e.type == GUI_CLOSE || (e.type == GUI_KEY && e.key.code == KEY_ESCAPE))
+                return 0;
+            if (e.type == GUI_RESIZE && gui_resize(window, e.width, e.height)) {
+                x = x + BOX_SIZE > e.width ? 0 : x;
+                y = y + BOX_SIZE > e.height ? 0 : y;
+            }
+        }
+    }
+}
+
+// Bounces a box over a colour gradient until Ctrl+C, or in a window under wm.
 int main(int argc, char **argv) {
     help_option(argc, argv, "usage: fbdemo\n"
-                            "Bounces a box across the screen until Ctrl+C.\n");
+                            "Bounces a box across the screen until Ctrl+C, or in a window if wm is running.\n");
+    if (gui_connect())
+        return bounce_in_window();
 
     int fd = open("/dev/fb0", O_RDWR);
     struct fb_info info;
@@ -41,7 +91,7 @@ int main(int argc, char **argv) {
 
     for (int y = 0; y < h; y++) {
         for (int x = 0; x < w; x++)
-            back[y * w + x] = (uint32_t)(x * 255 / w) << 16 | (uint32_t)(y * 255 / h) << 8 | 0x40;
+            back[y * w + x] = gradient(x, y, w, h);
     }
     for (int i = 0; i < BOX_SIZE * BOX_SIZE; i++)
         box[i] = 0xFFFFFF;

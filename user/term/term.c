@@ -6,10 +6,13 @@
 #include <signal.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <unistd.h>
 
-#define COLS 80
+#define COLS 80 // to start with
 #define ROWS 25
+#define MAX_COLS 320
+#define MAX_ROWS 200
 #define CELL_WIDTH 8
 #define CELL_HEIGHT 16 // the font's rows each drawn twice
 #define PADDING 4
@@ -33,8 +36,9 @@ struct cell {
 };
 
 static struct gui_window *window;
-static struct cell cells[ROWS][COLS];
-static bool dirty[ROWS];
+static struct cell cells[MAX_ROWS][MAX_COLS];
+static bool dirty[MAX_ROWS];
+static int cols = COLS, rows = ROWS;
 static int row, col;
 static bool cursor_hidden, focused;
 
@@ -59,12 +63,12 @@ static void clear_cells(int r, int from, int to) {
 
 static void new_line(void) {
     col = 0;
-    if (++row < ROWS)
+    if (++row < rows)
         return;
-    row = ROWS - 1;
-    memmove(cells[0], cells[1], sizeof(cells) - sizeof(cells[0]));
-    clear_cells(ROWS - 1, 0, COLS);
-    for (int r = 0; r < ROWS; r++)
+    row = rows - 1;
+    memmove(cells[0], cells[1], (rows - 1) * sizeof(cells[0]));
+    clear_cells(rows - 1, 0, cols);
+    for (int r = 0; r < rows; r++)
         dirty[r] = true;
 }
 
@@ -119,37 +123,37 @@ static void run_csi(char final) {
 
     switch (final) {
     case 'A':
-        row = clamp(row - param_or_one(0), 0, ROWS - 1);
+        row = clamp(row - param_or_one(0), 0, rows - 1);
         break;
     case 'B':
-        row = clamp(row + param_or_one(0), 0, ROWS - 1);
+        row = clamp(row + param_or_one(0), 0, rows - 1);
         break;
     case 'C':
-        col = clamp(col + param_or_one(0), 0, COLS - 1);
+        col = clamp(col + param_or_one(0), 0, cols - 1);
         break;
     case 'D':
-        col = clamp(col - param_or_one(0), 0, COLS - 1);
+        col = clamp(col - param_or_one(0), 0, cols - 1);
         break;
     case 'G':
-        col = clamp(param_or_one(0) - 1, 0, COLS - 1);
+        col = clamp(param_or_one(0) - 1, 0, cols - 1);
         break;
     case 'H':
     case 'f':
-        row = clamp(param_or_one(0) - 1, 0, ROWS - 1);
-        col = clamp(param_or_one(1) - 1, 0, COLS - 1);
+        row = clamp(param_or_one(0) - 1, 0, rows - 1);
+        col = clamp(param_or_one(1) - 1, 0, cols - 1);
         break;
     case 'J':
         if (mode == 2) {
-            for (int r = 0; r < ROWS; r++)
-                clear_cells(r, 0, COLS);
+            for (int r = 0; r < rows; r++)
+                clear_cells(r, 0, cols);
             break;
         }
-        clear_cells(row, col, COLS);
-        for (int r = row + 1; r < ROWS; r++)
-            clear_cells(r, 0, COLS);
+        clear_cells(row, col, cols);
+        for (int r = row + 1; r < rows; r++)
+            clear_cells(r, 0, cols);
         break;
     case 'K':
-        clear_cells(row, mode == 2 ? 0 : mode == 1 ? 0 : col, mode == 1 ? col + 1 : COLS);
+        clear_cells(row, mode == 2 ? 0 : mode == 1 ? 0 : col, mode == 1 ? col + 1 : cols);
         break;
     case 'm':
         set_graphics();
@@ -173,7 +177,7 @@ static void put_text(char c) {
     case '\t':
         do {
             set_cell(row, col, ' ');
-            if (++col == COLS)
+            if (++col == cols)
                 new_line();
         } while (col % TAB_WIDTH != 0);
         return;
@@ -186,7 +190,7 @@ static void put_text(char c) {
 
     // Other control characters and non-ASCII bytes have no glyph here.
     set_cell(row, col, (uint8_t)c >= 0x20 && (uint8_t)c < 0x7F ? c : '?');
-    if (++col == COLS)
+    if (++col == cols)
         new_line();
 }
 
@@ -249,19 +253,19 @@ static void draw_cell(int r, int c) {
 }
 
 static void draw(void) {
-    int first = ROWS, last = -1;
+    int first = rows, last = -1;
 
-    for (int r = 0; r < ROWS; r++) {
+    for (int r = 0; r < rows; r++) {
         if (!dirty[r])
             continue;
-        for (int c = 0; c < COLS; c++)
+        for (int c = 0; c < cols; c++)
             draw_cell(r, c);
         dirty[r] = false;
         first = r < first ? r : first;
         last = r;
     }
     if (last >= 0)
-        gui_update(window, PADDING, PADDING + first * CELL_HEIGHT, COLS * CELL_WIDTH, (last - first + 1) * CELL_HEIGHT);
+        gui_update(window, PADDING, PADDING + first * CELL_HEIGHT, cols * CELL_WIDTH, (last - first + 1) * CELL_HEIGHT);
 }
 
 static void write_all(int fd, const char *s, size_t len) {
@@ -303,8 +307,47 @@ static void send_key(int master, const struct key_event *key) {
     }
 }
 
+static void paint_background(void) {
+    gui_fill(&window->canvas, 0, 0, window->canvas.width, window->canvas.height, palette[DEFAULT_BACKGROUND]);
+    for (int r = 0; r < rows; r++)
+        dirty[r] = true;
+}
+
+// Fits as many cells as the new size holds, keeping the cursor's line on the
+// screen, and tells the programs on the terminal.
+static void resize(int master, int width, int height) {
+    int new_cols = clamp((width - 2 * PADDING) / CELL_WIDTH, 1, MAX_COLS);
+    int new_rows = clamp((height - 2 * PADDING) / CELL_HEIGHT, 1, MAX_ROWS);
+    int lost = row - (new_rows - 1);
+
+    if (!gui_resize(window, width, height))
+        return;
+    if (lost > 0) {
+        memmove(cells[0], cells[lost], (rows - lost) * sizeof(cells[0]));
+        row -= lost;
+    }
+
+    // What comes into view is blank.
+    int kept = lost > 0 ? rows - lost : rows;
+
+    for (int r = 0; r < new_rows; r++) {
+        for (int c = r < kept ? cols : 0; c < new_cols; c++)
+            cells[r][c] = (struct cell){' ', DEFAULT_FOREGROUND, DEFAULT_BACKGROUND};
+    }
+    cols = new_cols;
+    rows = new_rows;
+    col = clamp(col, 0, cols - 1);
+
+    struct winsize size = {.ws_row = rows, .ws_col = cols, .ws_xpixel = cols * CELL_WIDTH, .ws_ypixel = rows * CELL_HEIGHT};
+
+    ioctl(master, TIOCSWINSZ, &size);
+    paint_background();
+    draw();
+    gui_show(window);
+}
+
 static pid_t start_shell(int *master, char **command) {
-    struct winsize size = {.ws_row = ROWS, .ws_col = COLS, .ws_xpixel = COLS * CELL_WIDTH, .ws_ypixel = ROWS * CELL_HEIGHT};
+    struct winsize size = {.ws_row = rows, .ws_col = cols, .ws_xpixel = cols * CELL_WIDTH, .ws_ypixel = rows * CELL_HEIGHT};
     int slave;
 
     if (openpty(master, &slave, NULL, NULL, &size) < 0)
@@ -336,18 +379,18 @@ int main(int argc, char **argv) {
 
     int master;
 
-    window = gui_create_window("Terminal", COLS * CELL_WIDTH + 2 * PADDING, ROWS * CELL_HEIGHT + 2 * PADDING);
+    window = gui_create_window("Terminal", cols * CELL_WIDTH + 2 * PADDING, rows * CELL_HEIGHT + 2 * PADDING);
     pid_t child = window ? start_shell(&master, argv + 1) : -1;
 
     if (child < 0) {
         dprintf(STDERR_FILENO, "term: %s\n", window ? strerror(errno) : "couldn't make a window");
         return 1;
     }
-    gui_fill(&window->canvas, 0, 0, window->canvas.width, window->canvas.height, palette[DEFAULT_BACKGROUND]);
-    gui_show(window);
-    for (int r = 0; r < ROWS; r++)
-        clear_cells(r, 0, COLS);
+    for (int r = 0; r < rows; r++)
+        clear_cells(r, 0, cols);
+    paint_background();
     draw();
+    gui_show(window);
 
     bool running = true;
 
@@ -376,6 +419,8 @@ int main(int argc, char **argv) {
             } else if (e.type == GUI_FOCUS) {
                 focused = e.focused;
                 dirty[row] = true;
+            } else if (e.type == GUI_RESIZE) {
+                resize(master, e.width, e.height);
             } else if (e.type == GUI_CLOSE) {
                 running = false;
             }
