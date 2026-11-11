@@ -1,3 +1,4 @@
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <gui.h>
@@ -25,13 +26,20 @@
 #define BORDER 1
 #define BUTTON_SIZE 16
 #define CASCADE 32
-#define RESIZE_MARGIN 6 // past the right and bottom edges, where dragging resizes
+#define RESIZE_MARGIN 6 // outside the frame, where dragging resizes
+#define CORNER 16       // how far along an edge from a corner dragging moves both edges
 #define MIN_WIDTH 120
 #define MIN_HEIGHT 48
 
 #define TASKBAR_HEIGHT 28
 #define TASKBAR_BUTTON_WIDTH 160
-#define LAUNCHER_WIDTH 96
+#define LAUNCHER_WIDTH 64
+
+#define APPS_DIR "/system/bin/gui"
+#define MAX_APPS 32
+#define MENU_WIDTH 200
+#define ITEM_HEIGHT 24 // in the start menu and the Alt+Tab switcher
+#define SWITCHER_WIDTH 360
 
 #define DESKTOP_COLOR 0x1E2430
 #define HINT_COLOR 0x5C677D
@@ -49,7 +57,8 @@
 
 // Super+Enter runs this.
 #define LAUNCH_COMMAND "term"
-#define HINT "Super+Enter: terminal   Super+Q: close   Super+arrows: tile   Super+Shift+Q: quit"
+#define HINT "Super: apps   Super+Enter: terminal   Alt+Tab: switch   Super+Q: close   Super+arrows: tile   " \
+             "Super+Shift+Q: quit"
 
 struct rect {
     int x, y, width, height;
@@ -82,10 +91,14 @@ struct window {
     // Where it was before being maximized or tiled, to go back to.
     bool tiled;
     struct rect restore;
+
+    // The edges being dragged by a resize. When the left or top one moves, the
+    // window moves with each new size so the opposite edge stays still.
+    int resize_edges;
 };
 
 enum part { PART_NONE, PART_CONTENT, PART_TITLE, PART_CLOSE, PART_MAXIMIZE, PART_MINIMIZE, PART_RESIZE };
-enum { EDGE_RIGHT = 1, EDGE_BOTTOM = 2 };
+enum { EDGE_LEFT = 1, EDGE_RIGHT = 2, EDGE_TOP = 4, EDGE_BOTTOM = 8 };
 
 static struct gui_canvas screen; // composed here, then copied to the framebuffer
 static uint8_t *framebuffer;
@@ -106,8 +119,18 @@ static struct window *dragging; // by its title bar
 static int drag_x, drag_y;
 static struct window *grabbed; // pressed in its contents, so it gets the mouse until release
 static struct window *resizing;
-static int resize_edges, resize_x, resize_y, resize_width, resize_height;
+static int resize_x, resize_y, resize_width, resize_height;
+static int resize_room; // above the frame, which it can't grow into
 static bool quitting;
+
+// The start menu, and what's highlighted in it.
+static bool menu_open;
+static char apps[MAX_APPS][GUI_TITLE_MAX];
+static int app_count, menu_choice;
+static bool super_down, super_alone; // Super pressed, and nothing else since
+
+// The Alt+Tab switcher, while Alt is held: which window it's on, counting from the top.
+static int switch_choice = -1;
 
 static const char *const cursor[] = {
     "X           ", "XX          ", "X.X         ", "X..X        ", "X...X       ",
@@ -138,6 +161,34 @@ static struct rect desktop(void) {
 
 static struct rect taskbar(void) {
     return (struct rect){0, screen.height - TASKBAR_HEIGHT, screen.width, TASKBAR_HEIGHT};
+}
+
+static struct rect launcher(void) {
+    return (struct rect){4, taskbar().y + 4, LAUNCHER_WIDTH, TASKBAR_HEIGHT - 8};
+}
+
+// Just above the launcher, as tall as its apps.
+static struct rect menu(void) {
+    int height = (app_count ? app_count : 1) * ITEM_HEIGHT + 8;
+
+    return (struct rect){launcher().x, taskbar().y - height, MENU_WIDTH, height};
+}
+
+static struct rect menu_item(int index) {
+    struct rect m = menu();
+
+    return (struct rect){m.x + 4, m.y + 4 + index * ITEM_HEIGHT, m.width - 8, ITEM_HEIGHT};
+}
+
+// In the middle of the desktop, with every window.
+static struct rect switcher(void) {
+    int height = window_count * ITEM_HEIGHT + 8;
+
+    return (struct rect){(screen.width - SWITCHER_WIDTH) / 2, (desktop().height - height) / 2, SWITCHER_WIDTH, height};
+}
+
+static struct window *switcher_window(int index) {
+    return windows[window_count - 1 - index];
 }
 
 static bool contains(struct rect r, int x, int y) {
@@ -237,10 +288,6 @@ static struct rect taskbar_button(int index, int count) {
     return (struct rect){start + index * width, taskbar().y + 4, width - 4, TASKBAR_HEIGHT - 8};
 }
 
-static struct rect launcher(void) {
-    return (struct rect){4, taskbar().y + 4, LAUNCHER_WIDTH, TASKBAR_HEIGHT - 8};
-}
-
 // Text cut to fit a width, which is how titles go on the taskbar.
 static void fitted_text(struct gui_canvas *c, int x, int y, int width, const char *text, uint32_t color) {
     char shown[GUI_TITLE_MAX];
@@ -261,7 +308,7 @@ static void draw_taskbar(struct gui_canvas *c, int ox, int oy) {
     gui_fill(c, bar.x - ox, bar.y - oy, bar.width, bar.height, TASKBAR_COLOR);
     gui_fill(c, bar.x - ox, bar.y - oy, bar.width, 1, TASKBAR_LINE);
     gui_fill(c, l.x - ox, l.y - oy, l.width, l.height, TASKBAR_BUTTON);
-    gui_text(c, l.x + 8 - ox, text_y, "+ Terminal", TITLE_TEXT, 1);
+    gui_text(c, l.x + (l.width - gui_text_width("Apps", 1)) / 2 - ox, text_y, "Apps", TITLE_TEXT, 1);
 
     for (int i = 0; i < count; i++) {
         struct rect b = taskbar_button(i, count);
@@ -274,6 +321,38 @@ static void draw_taskbar(struct gui_canvas *c, int ox, int oy) {
 
     strftime(clock, sizeof(clock), "%H:%M", localtime(&now));
     gui_text(c, bar.width - gui_text_width(clock, 1) - 12 - ox, text_y, clock, TITLE_TEXT, 1);
+}
+
+static void draw_panel(struct gui_canvas *c, struct rect r, int ox, int oy) {
+    gui_fill(c, r.x - ox, r.y - oy, r.width, r.height, TASKBAR_LINE);
+    gui_fill(c, r.x + 1 - ox, r.y + 1 - oy, r.width - 2, r.height - 2, TASKBAR_COLOR);
+}
+
+static void draw_item(struct gui_canvas *c, struct rect r, const char *text, bool chosen, uint32_t color, int ox,
+                      int oy) {
+    if (chosen)
+        gui_fill(c, r.x - ox, r.y - oy, r.width, r.height, TITLE_FOCUSED);
+    fitted_text(c, r.x + 8 - ox, r.y + (r.height - GUI_CHAR_HEIGHT) / 2 - oy, r.width - 16, text, color);
+}
+
+static void draw_menu(struct gui_canvas *c, int ox, int oy) {
+    draw_panel(c, menu(), ox, oy);
+    if (!app_count)
+        draw_item(c, menu_item(0), "No apps in " APPS_DIR, false, TASKBAR_DIM_TEXT, ox, oy);
+    for (int i = 0; i < app_count; i++)
+        draw_item(c, menu_item(i), apps[i], i == menu_choice, TITLE_TEXT, ox, oy);
+}
+
+static void draw_switcher(struct gui_canvas *c, int ox, int oy) {
+    struct rect s = switcher();
+
+    draw_panel(c, s, ox, oy);
+    for (int i = 0; i < window_count; i++) {
+        struct window *w = switcher_window(i);
+
+        draw_item(c, (struct rect){s.x + 4, s.y + 4 + i * ITEM_HEIGHT, s.width - 8, ITEM_HEIGHT}, w->title,
+                  i == switch_choice, w->minimized ? TASKBAR_DIM_TEXT : TITLE_TEXT, ox, oy);
+    }
 }
 
 static void draw_cursor(struct gui_canvas *c, int ox, int oy) {
@@ -305,6 +384,10 @@ static void compose(struct rect r) {
     }
     if (r.y + r.height > bar.y)
         draw_taskbar(&c, r.x, r.y);
+    if (menu_open)
+        draw_menu(&c, r.x, r.y);
+    if (switch_choice >= 0)
+        draw_switcher(&c, r.x, r.y);
     draw_cursor(&c, r.x, r.y);
 }
 
@@ -441,6 +524,10 @@ static void remove_window(struct window *w) {
     int i = index_of(w);
 
     add_damage(frame_of(w));
+    if (switch_choice >= 0) {
+        add_damage(switcher());
+        switch_choice = window_count > 1 ? switch_choice % (window_count - 1) : -1;
+    }
     damage_taskbar();
     memmove(&windows[i], &windows[i + 1], (window_count - i - 1) * sizeof(*windows));
     window_count--;
@@ -489,6 +576,8 @@ static void create_window(struct client *client, const struct gui_message *m) {
     w->title[sizeof(w->title) - 1] = '\0';
     windows[window_count++] = w;
     damage_taskbar();
+    if (switch_choice >= 0)
+        add_damage(switcher());
     queue_message(client, &reply);
     add_damage(frame_of(w));
     set_focus(w);
@@ -515,6 +604,10 @@ static void take_buffer(struct window *w, const struct gui_message *m) {
     if (!map_buffer(m, &c))
         return;
     add_damage(frame_of(w));
+    if (w->resize_edges & EDGE_LEFT)
+        w->x += w->canvas.width - c.width;
+    if (w->resize_edges & EDGE_TOP)
+        w->y += w->canvas.height - c.height;
     unmap_buffer(&w->canvas);
     w->canvas = c;
     add_damage(frame_of(w));
@@ -595,16 +688,34 @@ static void accept_client(int listener) {
     clients[i]->fd = fd;
 }
 
+// Which edges of a frame a resize from a point would move: those it's on, or near
+// the end of.
+static int edges_at(struct rect f, int x, int y) {
+    bool left = x < f.x + BORDER, right = x >= f.x + f.width - BORDER;
+    bool top = y < f.y + BORDER, bottom = y >= f.y + f.height - BORDER;
+
+    if (left || right) {
+        top |= y < f.y + CORNER;
+        bottom |= y >= f.y + f.height - CORNER;
+    } else if (top || bottom) {
+        left = x < f.x + CORNER;
+        right = x >= f.x + f.width - CORNER;
+    }
+    return (left ? EDGE_LEFT : 0) | (right ? EDGE_RIGHT : 0) | (top ? EDGE_TOP : 0) | (bottom ? EDGE_BOTTOM : 0);
+}
+
 // Which window is at a point, and which part of it. edges says which edges a
 // resize there would move.
 static struct window *window_at(int x, int y, enum part *part, int *edges) {
     for (int i = window_count - 1; i >= 0; i--) {
         struct window *w = windows[i];
         struct rect f = frame_of(w);
+        struct rect grab = {f.x - RESIZE_MARGIN, f.y - RESIZE_MARGIN, f.width + 2 * RESIZE_MARGIN,
+                            f.height + 2 * RESIZE_MARGIN};
 
-        if (w->minimized || !contains((struct rect){f.x, f.y, f.width + RESIZE_MARGIN, f.height + RESIZE_MARGIN}, x, y))
+        if (w->minimized || !contains(grab, x, y))
             continue;
-        *edges = (x >= f.x + f.width - BORDER ? EDGE_RIGHT : 0) | (y >= f.y + f.height - BORDER ? EDGE_BOTTOM : 0);
+        *edges = edges_at(f, x, y);
         *part = *edges ? PART_RESIZE
               : contains(button_of(w, 0), x, y) ? PART_CLOSE
               : contains(button_of(w, 1), x, y) ? PART_MAXIMIZE
@@ -631,6 +742,50 @@ static void launch(const char *command) {
     }
 }
 
+static void launch_app(const char *name) {
+    char path[sizeof(APPS_DIR) + GUI_TITLE_MAX];
+
+    snprintf(path, sizeof(path), APPS_DIR "/%s", name);
+    if (fork() == 0) {
+        execl(path, name, (char *)NULL);
+        _exit(127);
+    }
+}
+
+static int compare_names(const void *a, const void *b) {
+    return strcmp(a, b);
+}
+
+// Lists the apps afresh each time, so new ones show up.
+static void open_menu(void) {
+    DIR *dir = opendir(APPS_DIR);
+    struct dirent *entry;
+
+    app_count = 0;
+    while (dir && app_count < MAX_APPS && (entry = readdir(dir))) {
+        if (entry->d_name[0] != '.')
+            snprintf(apps[app_count++], GUI_TITLE_MAX, "%s", entry->d_name);
+    }
+    if (dir)
+        closedir(dir);
+    qsort(apps, app_count, sizeof(*apps), compare_names);
+    menu_open = true;
+    menu_choice = 0;
+    add_damage(menu());
+}
+
+static void close_menu(void) {
+    if (menu_open)
+        add_damage(menu());
+    menu_open = false;
+}
+
+static void choose_app(int index) {
+    if (index >= 0 && index < app_count)
+        launch_app(apps[index]);
+    close_menu();
+}
+
 static void move_window(struct window *w, int x, int y) {
     add_damage(frame_of(w));
     w->x = x;
@@ -643,6 +798,7 @@ static void place(struct window *w, struct rect frame) {
     if (!w->tiled)
         w->restore = frame_of(w);
     w->tiled = true;
+    w->resize_edges = 0;
     move_window(w, frame.x + BORDER, frame.y + TITLE_HEIGHT + BORDER);
     ask_size(w, frame.width - 2 * BORDER, frame.height - TITLE_HEIGHT - 2 * BORDER);
 }
@@ -651,6 +807,7 @@ static void untile(struct window *w) {
     struct rect r = w->restore;
 
     w->tiled = false;
+    w->resize_edges = 0;
     move_window(w, r.x + BORDER, r.y + TITLE_HEIGHT + BORDER);
     ask_size(w, r.width - 2 * BORDER, r.height - TITLE_HEIGHT - 2 * BORDER);
 }
@@ -673,7 +830,7 @@ static void taskbar_click(void) {
     int count = windows_by_age(list);
 
     if (contains(launcher(), cursor_x, cursor_y))
-        launch(LAUNCH_COMMAND);
+        open_menu();
     for (int i = 0; i < count; i++) {
         if (!contains(taskbar_button(i, count), cursor_x, cursor_y))
             continue;
@@ -689,6 +846,20 @@ static void press(uint32_t changed) {
     int edges;
     struct window *w = window_at(cursor_x, cursor_y, &part, &edges);
 
+    super_alone = false;
+
+    // A click anywhere closes the menu, and does what it would have done unless it
+    // was in the menu or on the launcher.
+    if (menu_open) {
+        struct rect m = menu();
+        bool in_menu = contains(m, cursor_x, cursor_y);
+
+        if (in_menu && (changed & MOUSE_BUTTON_LEFT))
+            choose_app((cursor_y - m.y - 4) / ITEM_HEIGHT);
+        close_menu();
+        if (in_menu || contains(launcher(), cursor_x, cursor_y))
+            return;
+    }
     if (contains(taskbar(), cursor_x, cursor_y)) {
         if (changed & MOUSE_BUTTON_LEFT)
             taskbar_click();
@@ -711,11 +882,12 @@ static void press(uint32_t changed) {
         minimize(w);
     } else if (part == PART_RESIZE && (changed & MOUSE_BUTTON_LEFT)) {
         resizing = w;
-        resize_edges = edges;
+        w->resize_edges = edges;
         resize_x = cursor_x;
         resize_y = cursor_y;
         resize_width = w->canvas.width;
         resize_height = w->canvas.height;
+        resize_room = frame_of(w).y;
         w->tiled = false;
     } else if (changed & MOUSE_BUTTON_LEFT) {
         w->tiled = false;
@@ -746,9 +918,24 @@ static void handle_mouse(const struct mouse_event *e) {
 
         move_window(dragging, cursor_x - drag_x, y < TITLE_HEIGHT ? TITLE_HEIGHT : y > bottom ? bottom : y);
     }
-    if (resizing && (e->dx || e->dy))
-        ask_size(resizing, resize_width + (resize_edges & EDGE_RIGHT ? cursor_x - resize_x : 0),
-                 resize_height + (resize_edges & EDGE_BOTTOM ? cursor_y - resize_y : 0));
+    if (resizing && (e->dx || e->dy)) {
+        int edges = resizing->resize_edges, dx = cursor_x - resize_x, dy = cursor_y - resize_y;
+
+        if (edges & EDGE_TOP && dy < -resize_room)
+            dy = -resize_room;
+        ask_size(resizing, resize_width + (edges & EDGE_RIGHT ? dx : edges & EDGE_LEFT ? -dx : 0),
+                 resize_height + (edges & EDGE_BOTTOM ? dy : edges & EDGE_TOP ? -dy : 0));
+    }
+
+    // The menu highlights what's under the mouse.
+    if (menu_open && (e->dx || e->dy) && contains(menu(), cursor_x, cursor_y) && app_count) {
+        int choice = (cursor_y - menu().y - 4) / ITEM_HEIGHT;
+
+        if (choice >= 0 && choice < app_count && choice != menu_choice) {
+            menu_choice = choice;
+            add_damage(menu());
+        }
+    }
 
     struct window *target = grabbed ? grabbed : dragging || resizing ? NULL : window_at(cursor_x, cursor_y, &part, &edges);
 
@@ -770,10 +957,81 @@ static void handle_mouse(const struct mouse_event *e) {
     }
 }
 
+static void finish_switch(bool chosen) {
+    struct window *w = switcher_window(switch_choice);
+
+    add_damage(switcher());
+    switch_choice = -1;
+    if (chosen)
+        show(w);
+}
+
+// Alt+Tab goes down the windows, from the one under the focused one, and Shift goes
+// back up. Letting go of Alt picks the one it's on, and Escape stays where it was.
+static bool switch_key(const struct key_event *e) {
+    if (e->code == KEY_TAB && (e->modifiers & KEY_MOD_ALT)) {
+        if (e->pressed && window_count) {
+            int step = e->modifiers & KEY_MOD_SHIFT ? -1 : 1;
+
+            switch_choice = ((switch_choice < 0 ? 0 : switch_choice) + step + window_count) % window_count;
+            add_damage(switcher());
+        }
+        return true;
+    }
+    if (switch_choice < 0)
+        return false;
+    if (e->code == KEY_ESCAPE && e->pressed) {
+        finish_switch(false);
+        return true;
+    }
+    if (!(e->modifiers & KEY_MOD_ALT))
+        finish_switch(true);
+    return false;
+}
+
+// Up and Down move through the menu, Enter runs what's highlighted, and Escape closes it.
+static bool menu_key(const struct key_event *e) {
+    if (!menu_open || (e->modifiers & KEY_MOD_SUPER)
+        || !(e->code == KEY_UP || e->code == KEY_DOWN || e->code == KEY_ENTER || e->code == KEY_ESCAPE))
+        return false;
+    if (!e->pressed)
+        return true;
+    if (e->code == KEY_ENTER)
+        choose_app(menu_choice);
+    else if (e->code == KEY_ESCAPE)
+        close_menu();
+    else if (app_count) {
+        menu_choice = (menu_choice + (e->code == KEY_DOWN ? 1 : app_count - 1)) % app_count;
+        add_damage(menu());
+    }
+    return true;
+}
+
+// Super pressed and let go on its own opens or closes the menu.
+static void super_key(const struct key_event *e) {
+    bool is_super = e->code == KEY_LEFT_SUPER || e->code == KEY_RIGHT_SUPER;
+
+    if (is_super && e->pressed && !super_down)
+        super_alone = true;
+    else if (!is_super && e->pressed)
+        super_alone = false;
+    if (is_super)
+        super_down = e->pressed;
+    if (is_super && !e->pressed && super_alone) {
+        if (menu_open)
+            close_menu();
+        else
+            open_menu();
+    }
+}
+
 // Super with something else is for wm, and every other key goes to the focused window.
 static void handle_key(const struct key_event *e) {
     bool super = e->modifiers & KEY_MOD_SUPER;
 
+    super_key(e);
+    if (switch_key(e) || menu_key(e))
+        return;
     if (super && e->code == 0x10) {
         if (e->pressed && (e->modifiers & KEY_MOD_SHIFT))
             quitting = true;

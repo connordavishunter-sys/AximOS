@@ -95,9 +95,9 @@ void gui_fill(struct gui_canvas *canvas, int x, int y, int width, int height, ui
 void gui_copy(struct gui_canvas *canvas, int x, int y, const struct gui_canvas *from, int from_x, int from_y,
               int width, int height);
 
-// Text in the 8x8 font, scaled up by scale. Each character is 8 * scale wide.
+// Text in the 8x16 font, scaled up by scale. Each character is 8 * scale wide.
 #define GUI_CHAR_WIDTH 8
-#define GUI_CHAR_HEIGHT 8
+#define GUI_CHAR_HEIGHT 16
 void gui_text(struct gui_canvas *canvas, int x, int y, const char *text, uint32_t color, int scale);
 int gui_text_width(const char *text, int scale);
 

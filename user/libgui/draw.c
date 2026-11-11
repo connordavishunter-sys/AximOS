@@ -1,4 +1,4 @@
-#include <font8x8_basic.h>
+#include <font8x16.h>
 #include <gui.h>
 #include <string.h>
 
@@ -59,7 +59,7 @@ void gui_text(struct gui_canvas *canvas, int x, int y, const char *text, uint32_
 
         for (int row = 0; row < GUI_CHAR_HEIGHT; row++) {
             for (int col = 0; col < GUI_CHAR_WIDTH; col++) {
-                if (font8x8_basic[c][row] >> col & 1)
+                if (font8x16[c][row] & 0x80 >> col)
                     gui_fill(canvas, x + col * scale, y + row * scale, scale, scale, color);
             }
         }

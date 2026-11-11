@@ -1,5 +1,5 @@
 #include <errno.h>
-#include <font8x8_basic.h>
+#include <font8x16.h>
 #include <gui.h>
 #include <poll.h>
 #include <pty.h>
@@ -14,7 +14,7 @@
 #define MAX_COLS 320
 #define MAX_ROWS 200
 #define CELL_WIDTH 8
-#define CELL_HEIGHT 16 // the font's rows each drawn twice
+#define CELL_HEIGHT 16
 #define PADDING 4
 #define TAB_WIDTH 8
 #define MAX_PARAMS 8
@@ -238,10 +238,10 @@ static void draw_cell(int r, int c) {
         bg = swap;
     }
     gui_fill(&window->canvas, x, y, CELL_WIDTH, CELL_HEIGHT, bg);
-    for (int line = 0; line < 8; line++) {
-        for (int bit = 0; bit < 8; bit++) {
-            if (font8x8_basic[(uint8_t)cell.c][line] >> bit & 1)
-                gui_fill(&window->canvas, x + bit, y + 2 * line, 1, 2, fg);
+    for (int line = 0; line < CELL_HEIGHT; line++) {
+        for (int bit = 0; bit < CELL_WIDTH; bit++) {
+            if (font8x16[(uint8_t)cell.c & 0x7F][line] & 0x80 >> bit)
+                gui_fill(&window->canvas, x + bit, y + line, 1, 1, fg);
         }
     }
     if (cursor && !focused) {

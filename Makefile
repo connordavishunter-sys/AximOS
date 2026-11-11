@@ -21,10 +21,11 @@ LIBC_OBJS := $(filter-out $(CRT0) $(BUILD)/user/libc/ld.o,$(patsubst user/%,$(BU
 LIBC_SO := $(BUILD)/user/libc.so
 LIBC_SO_OBJS := $(patsubst user/libc/%,$(BUILD)/user/libc_pic/%.o,$(basename $(filter-out user/libc/crt0.S,$(wildcard user/libc/*.c user/libc/*.S))))
 
-# /system/lib/libgui.so, for programs with windows, which GUI_PROGRAMS are linked against.
+# /system/lib/libgui.so, for programs with windows, which wm and GUI_APPS are linked
+# against. The apps go in /system/bin/gui, where wm's start menu finds them.
 LIBGUI_SO := $(BUILD)/user/libgui.so
 LIBGUI_SO_OBJS := $(patsubst user/libgui/%.c,$(BUILD)/user/libgui_pic/%.o,$(wildcard user/libgui/*.c))
-GUI_PROGRAMS := wm guidemo term fbdemo widgets
+GUI_APPS := guidemo term fbdemo widgets
 
 # The time zones, from the host's tz database, without its copies under posix/ and
 # right/ and anything that isn't a zone.
@@ -36,8 +37,8 @@ DASH := $(BUILD)/ports/dash-0.5.12/src/dash
 MBEDTLS := $(BUILD)/ports/mbedtls-3.6.7
 MBEDTLS_LIBS := $(MBEDTLS)/library/libmbedtls.a $(MBEDTLS)/library/libmbedx509.a $(MBEDTLS)/library/libmbedcrypto.a
 
-# Every folder in user/ but the libraries is a program. init goes in /system/boot and
-# the others in /system/bin. rootfs/ is copied onto the disk as it is.
+# Every folder in user/ but the libraries is a program. init goes in /system/boot, the
+# GUI apps in /system/bin/gui and the others in /system/bin. rootfs/ is copied onto the disk as it is.
 PROGRAMS := $(filter-out libc libgui,$(notdir $(wildcard user/*)))
 PROGRAM_ELFS := $(PROGRAMS:%=$(BUILD)/user/%.elf)
 PROGRAM_OBJS := $(patsubst user/%.c,$(BUILD)/user/%.o,$(foreach p,$(PROGRAMS),$(wildcard user/$(p)/*.c)))
@@ -129,7 +130,7 @@ $(BUILD)/user/$(1).elf: $(CRT0) $(patsubst user/%.c,$(BUILD)/user/%.o,$(wildcard
 	$$(LD) $$(USER_LDFLAGS) $$(DYNAMIC_LDFLAGS) $$+ -o $$@
 endef
 $(foreach p,$(filter-out init,$(PROGRAMS)),$(eval $(call PROGRAM,$(p))))
-$(GUI_PROGRAMS:%=$(BUILD)/user/%.elf): $(LIBGUI_SO)
+$(addprefix $(BUILD)/user/,$(addsuffix .elf,wm $(GUI_APPS))): $(LIBGUI_SO)
 
 $(BUILD)/user/init.elf: $(CRT0) $(patsubst user/%.c,$(BUILD)/user/%.o,$(wildcard user/init/*.c)) $(LIBC)
 	$(LD) $(USER_LDFLAGS) -static $+ -o $@
@@ -154,12 +155,13 @@ $(DISK): $(PROGRAM_ELFS) $(LIBC_SO) $(LIBGUI_SO) $(ROOTFS_FILES) $(DASH) | $(ZON
 	rm -f $@
 	mkfs.fat -F 32 -C $@ $$(($(DISK_SIZE_MB) * 1024))
 	mcopy -s -i $@ rootfs/system ::/
-	mmd -i $@ ::/system/boot ::/system/bin ::/system/lib ::/system/share ::/tmp
+	mmd -i $@ ::/system/boot ::/system/bin ::/system/bin/gui ::/system/lib ::/system/share ::/tmp
 	mcopy -s -i $@ $(ZONES) ::/system/share/
 	$(call install_stripped,$(LIBC_SO),/system/lib/libc.so)
 	$(call install_stripped,$(LIBGUI_SO),/system/lib/libgui.so)
 	$(call install_stripped,$(BUILD)/user/init.elf,/system/boot/init)
-	for p in $(filter-out init,$(PROGRAMS)); do $(call install_stripped,$(BUILD)/user/$$p.elf,/system/bin/$$p); done
+	for p in $(filter-out init $(GUI_APPS),$(PROGRAMS)); do $(call install_stripped,$(BUILD)/user/$$p.elf,/system/bin/$$p); done
+	for p in $(GUI_APPS); do $(call install_stripped,$(BUILD)/user/$$p.elf,/system/bin/gui/$$p); done
 	$(call install_stripped,$(DASH),/system/bin/dash)
 	rm $(BUILD)/stripped
 

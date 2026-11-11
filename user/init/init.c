@@ -13,7 +13,7 @@ int main(void) {
 
         if (shell == 0) {
             char *const argv[] = {SHELL_PATH, NULL};
-            char *const env[] = {"PATH=/system/bin", "HOME=/", "SHELL=" SHELL_PATH, "PS1=$PWD$ ", NULL};
+            char *const env[] = {"PATH=/system/bin:/system/bin/gui", "HOME=/", "SHELL=" SHELL_PATH, "PS1=$PWD$ ", NULL};
 
             // Its own group and the terminal to go with it, which it waits for otherwise.
             setpgid(0, 0);

@@ -69,7 +69,7 @@ try:
 
     at = v.mark()
     x, y, w_, h_ = where('textbox')
-    check('hiding the progress bar moves what was under it up', y == places['textbox'][1] - 30, (y, places['textbox']))
+    check('hiding the progress bar moves what was under it up', y == places['textbox'][1] - places['slider'][3] - 8, (y, places['textbox']))
     mouse.click(LEFT + x + 20, TOP + y + h_ // 2)
     v.type('Grace'); v.key('backspace'); v.key('home'); v.type('X'); v.key('end'); v.type('!')
     check('text box', v.wait('widgets: name XGrac!', 5, at), v.text(at))

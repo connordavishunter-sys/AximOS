@@ -27,7 +27,7 @@ try:
     w, h, px = v.screenshot()
     check('desktop', px(5, 5) == DESKTOP and px(w - 5, h // 2) == DESKTOP, hex(px(5, 5)))
     check('focused title bar', px(300, 65) == FOCUSED, hex(px(300, 65)))
-    check('window contents', px(300, 260) == PAPER, hex(px(300, 260)))
+    check('window contents', px(300, 240) == PAPER, hex(px(300, 240)))
     check('window text', count(px, 100, 110, 400, 128, INK) > 300, count(px, 100, 110, 400, 128, INK))
 
     # The cursor starts in the middle of the screen.
@@ -116,15 +116,32 @@ try:
     w, h, px = v.screenshot()
     check('the window is bigger', px(550, 350) == PAPER, hex(px(550, 350)))
 
+    # The left edge of the frame is at 79, and dragging it leaves the right edge where
+    # it was. Then the top edge, at 59 above the title bar.
+    at = v.mark()
+    mouse.to(76, 200, 1); mouse.to(36, 200); v.mouse(buttons=0)
+    check('dragging the left edge resizes', v.wait('guidemo: size 520 280', 5, at), v.text(at))
+    time.sleep(0.5)
+    w, h, px = v.screenshot()
+    check('and moves the window left', px(42, 200) == PAPER and px(562, 200) == DESKTOP,
+          f'{px(42, 200):x} {px(562, 200):x}')
+    at = v.mark()
+    mouse.to(300, 56, 1); mouse.to(300, 26); v.mouse(buttons=0)
+    check('dragging the top edge resizes', v.wait('guidemo: size 520 310', 5, at), v.text(at))
+    time.sleep(0.5)
+    w, h, px = v.screenshot()
+    check('and moves the window up', px(400, 32) == FOCUSED and px(300, 360) == PAPER,
+          f'{px(400, 32):x} {px(300, 360):x}')
+
     # Maximize is the middle button, left of close.
     at = v.mark()
-    mouse.click(528, 72)
+    mouse.click(528, 42)
     check('maximize fills the desktop', v.wait('guidemo: size 1278 746', 5, at), v.text(at))
     w, h, px = v.screenshot()
     check('maximized', px(1200, 700) == PAPER and px(1200, bar + 2) == TASKBAR, hex(px(1200, 700)))
     at = v.mark()
     v.key('meta_l-down')
-    check('Super+Down goes back', v.wait('guidemo: size 480 280', 5, at), v.text(at))
+    check('Super+Down goes back', v.wait('guidemo: size 520 310', 5, at), v.text(at))
     at = v.mark()
     v.key('meta_l-right')
     check('Super+Right takes the right half', v.wait('guidemo: size 638 746', 5, at), v.text(at))
@@ -144,12 +161,41 @@ try:
     w, h, px = v.screenshot()
     check('shown again', px(1000, 400) == PAPER, hex(px(1000, 400)))
 
+    # The menu lists /system/bin/gui above the launcher, 24 pixels an app: fbdemo,
+    # guidemo, term, widgets.
+    menu_top = bar - 4 * 24 - 8
+    mouse.click(36, bar + 14)
+    time.sleep(0.5)
+    w, h, px = v.screenshot()
+    check('the launcher opens the menu', px(150, menu_top + 10) == FOCUSED, hex(px(150, menu_top + 10)))
     at = v.mark()
-    mouse.click(50, bar + 14)
-    check('the launcher opens a terminal', v.wait('guidemo: focus 0', 10, at), v.text(at))
+    mouse.click(100, menu_top + 4 + 2 * 24 + 12)
+    check('clicking term in the menu opens a terminal', v.wait('guidemo: focus 0', 10, at), v.text(at))
     time.sleep(1)
     w, h, px = v.screenshot()
     check('which gets a taskbar button', px(300, bar + 6) == FOCUSED, hex(px(300, bar + 6)))
+    check('and the menu closes', px(150, menu_top + 10) != FOCUSED, hex(px(150, menu_top + 10)))
+
+    v.key('meta_l')
+    time.sleep(0.5)
+    w, h, px = v.screenshot()
+    check('Super on its own opens the menu', px(150, menu_top + 10) == FOCUSED, hex(px(150, menu_top + 10)))
+    v.key('esc')
+    time.sleep(0.5)
+    w, h, px = v.screenshot()
+    check('Escape closes it', px(150, menu_top + 10) != FOCUSED, hex(px(150, menu_top + 10)))
+
+    at = v.mark()
+    v.key('alt-tab')
+    check('Alt+Tab switches to the window under', v.wait('guidemo: focus 1', 5, at), v.text(at))
+    at = v.mark()
+    v.key('alt-tab')
+    check('and again switches back', v.wait('guidemo: focus 0', 5, at), v.text(at))
+    at = v.mark()
+    v.key('alt-shift-tab')
+    check('Alt+Shift+Tab goes the other way', v.wait('guidemo: focus 1', 5, at), v.text(at))
+    w, h, px = v.screenshot()
+    check('the switched to window comes to the top', px(1000, 400) == PAPER, hex(px(1000, 400)))
 
     v.key('meta_l-shift-q')
     o = v.run('echo back'); check('quits', '\nback\n' in o, o)

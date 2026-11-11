@@ -5,9 +5,9 @@
 
 #define MARGIN 10
 #define SPACING 8
-#define PADDING 7 // around text in a frame
+#define PADDING 5 // around text in a frame
 #define FRAME_HEIGHT (GUI_CHAR_HEIGHT + 2 * PADDING)
-#define CHECK_SIZE 14
+#define CHECK_SIZE 16
 #define GRAB_WIDTH 10
 
 #define BACKGROUND 0x1E2129

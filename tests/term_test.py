@@ -9,8 +9,8 @@ put(img, compile_program(P + 'winsize.c', WORK + '/winsize'), '/system/bin/winsi
 
 # The font's glyphs, to read characters back from the screen.
 FONT = {}
-source = open(os.path.dirname(P[:-1]) + '/../abi/font8x8_basic.h').read()
-for code, glyph in enumerate(re.findall(r'\{((?:\s*0x[0-9A-Fa-f]{2},?){8})\s*\}', source)):
+source = open(os.path.dirname(P[:-1]) + '/../abi/font8x16.h').read()
+for code, glyph in enumerate(re.findall(r'\{((?:\s*0x[0-9A-Fa-f]{2},?){16})\s*\}', source)):
     if 32 <= code < 127:
         FONT.setdefault(tuple(int(b, 16) for b in re.findall(r'0x(\w\w)', glyph)), chr(code))
 
@@ -27,9 +27,9 @@ def screen_text(v, shift=0, left=LEFT, top=TOP, rows=ROWS, cols=COLS):
         line = ''
         for c in range(cols):
             x0, y0 = left + shift + c * 8, top + shift + r * 16
-            samples = [[px(x0 + bit, y0 + 2 * row) for bit in range(8)] for row in range(8)]
+            samples = [[px(x0 + bit, y0 + row) for bit in range(8)] for row in range(16)]
             background = px(x0 + 7, y0 + 15) # no glyph reaches the bottom right
-            glyph = tuple(sum(1 << bit for bit in range(8) if row[bit] != background) for row in samples)
+            glyph = tuple(sum(0x80 >> bit for bit in range(8) if row[bit] != background) for row in samples)
             line += FONT.get(glyph, '?')
         lines.append(line.rstrip())
     return lines

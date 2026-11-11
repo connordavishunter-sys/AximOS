@@ -20,11 +20,11 @@ static void draw(struct gui_window *w) {
     gui_fill(c, 0, 0, c->width, 6, focused ? ACCENT : 0xB8BCC6);
     gui_text(c, 20, 28, "Hello from AximOS", INK, 2);
     snprintf(line, sizeof(line), "clicks: %d", clicks);
-    gui_text(c, 20, 80, line, INK, 2);
+    gui_text(c, 20, 80, line, INK, 1);
     snprintf(line, sizeof(line), "last key: %s", last_key);
-    gui_text(c, 20, 112, line, INK, 2);
+    gui_text(c, 20, 104, line, INK, 1);
     snprintf(line, sizeof(line), "%dx%d", c->width, c->height);
-    gui_text(c, 20, 144, line, 0x6B7080, 1);
+    gui_text(c, 20, 128, line, 0x6B7080, 1);
     gui_text(c, 20, c->height - 32, "Click, type, or Esc to close", 0x6B7080, 1);
     gui_show(w);
 }
