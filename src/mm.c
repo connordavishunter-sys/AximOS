@@ -1,4 +1,5 @@
 #include <cpu.h>
+#include <elf.h>
 #include <errno_values.h>
 #include <limine.h>
 #include <mm.h>
@@ -143,6 +144,9 @@ static uint64_t next_unused_page(void) {
 }
 
 uint64_t mm_alloc_page(void) {
+    if (free_pages == 0 && elf_reclaim())
+        return mm_alloc_page();
+
     uint64_t phys = free_list;
 
     if (phys)

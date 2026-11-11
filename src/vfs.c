@@ -1,4 +1,5 @@
 #include <block.h>
+#include <elf.h>
 #include <fat32.h>
 #include <iso9660.h>
 #include <process.h>
@@ -352,13 +353,25 @@ int vfs_refresh(struct vfs_node *node) {
 int64_t vfs_write(struct vfs_node *node, uint64_t offset, const void *buf, size_t len) {
     const struct vfs_ops *ops = node->mount->ops;
 
-    return ops->write ? ops->write(node->mount->volume, node, offset, buf, len) : -EROFS;
+    if (!ops->write)
+        return -EROFS;
+
+    int64_t written = ops->write(node->mount->volume, node, offset, buf, len);
+
+    elf_forget(node);
+    return written;
 }
 
 int vfs_truncate(struct vfs_node *node, uint64_t size) {
     const struct vfs_ops *ops = node->mount->ops;
 
-    return ops->truncate ? ops->truncate(node->mount->volume, node, size) : -EROFS;
+    if (!ops->truncate)
+        return -EROFS;
+
+    int status = ops->truncate(node->mount->volume, node, size);
+
+    elf_forget(node);
+    return status;
 }
 
 // Finds the directory a path would go in and the name it would have there.
@@ -415,7 +428,9 @@ int vfs_rename(const struct vfs_node *node, const char *cwd, const char *path) {
         return status;
     }
 
-    return node->mount->ops->rename(node->mount->volume, node, &parent, name);
+    status = node->mount->ops->rename(node->mount->volume, node, &parent, name);
+    elf_forget(node);
+    return status;
 }
 
 int vfs_create(const char *cwd, const char *path, bool is_dir, struct vfs_node *node) {
@@ -443,7 +458,10 @@ int vfs_remove(const struct vfs_node *node) {
         return node->mount == &dev_mount ? -EBUSY : -EROFS;
     if (node->entry_lba == 0)
         return -EBUSY;
-    return ops->remove(node->mount->volume, node);
+    int status = ops->remove(node->mount->volume, node);
+
+    elf_forget(node);
+    return status;
 }
 
 void vfs_fill_stat(const struct vfs_node *node, struct stat *out) {

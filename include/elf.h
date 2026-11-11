@@ -15,3 +15,9 @@ struct elf_image {
 // Loads an x86-64 program as user pages, and the dynamic linker its PT_INTERP names.
 // Returns 0 or a negative errno.
 int elf_load(const struct vfs_node *file, struct elf_image *image);
+
+// Drops what's cached of a file, which has changed or gone.
+void elf_forget(const struct vfs_node *file);
+
+// Gives back the cache's pages, returning false if there were none.
+bool elf_reclaim(void);
