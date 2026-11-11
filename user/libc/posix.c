@@ -67,14 +67,6 @@ pid_t getsid(pid_t pid) {
     return getpgid(pid);
 }
 
-pid_t setsid(void) {
-    if (getpgrp() == getpid()) {
-        errno = EPERM;
-        return -1;
-    }
-    return setpgid(0, 0) < 0 ? -1 : getpid();
-}
-
 int fstat(int fd, struct stat *out) {
     return checked(syscall3(SYS_FSTAT, fd, (long)out, 0));
 }

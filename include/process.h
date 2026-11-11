@@ -72,14 +72,17 @@ bool process_can_sleep(void);
 // 0 means the caller for pid, and the process's own pid for pgid.
 int process_set_group(int pid, int pgid);
 
-int process_foreground(void);
+// Sends a signal to a process group, which may be 0 for none. Safe to call from
+// an interrupt. Returns false if the group has no live processes.
+bool process_signal_group(int pgid, int signal);
 
-// Sets the group that Ctrl+C ends. 0 means none, leaving Ctrl+C an ordinary key.
-void process_set_foreground(int pgid);
+// Starts a new session: its own process group, and no terminal until it opens one.
+int process_new_session(void);
 
-// Sends SIGINT to the foreground group. Safe to call from an interrupt. Returns
-// false if the group has no live processes.
-bool process_interrupt_foreground(void);
+// The calling process's terminal, or NULL. A process without one gets the first
+// terminal it asks for with TIOCSCTTY.
+struct tty *process_tty(void);
+int process_set_tty(struct tty *tty);
 
 // Sends a signal to the calling process.
 void process_signal_self(int signal);

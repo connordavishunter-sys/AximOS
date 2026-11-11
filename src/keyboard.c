@@ -4,6 +4,7 @@
 #include <keyboard.h>
 #include <mouse.h>
 #include <process.h>
+#include <signal_numbers.h>
 #include <string.h>
 #include <tty.h>
 #include <stdint.h>
@@ -198,8 +199,10 @@ static void to_console(uint16_t code) {
         return;
 
     // With nothing in the foreground, Ctrl+C reaches the shell like any other key.
-    if (c == CTRL_C && tty_signals_enabled() && process_interrupt_foreground()) {
-        tty_echo_interrupt();
+    struct tty *console = tty_console();
+
+    if (c == CTRL_C && tty_signals_enabled(console) && process_signal_group(tty_foreground(console), SIGINT)) {
+        tty_echo_interrupt(console);
         return;
     }
     push(&c, 1);

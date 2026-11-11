@@ -72,6 +72,7 @@ void _start(void) {
     vfs_add_device(VFS_DEVICE_NULL);
     vfs_add_device(VFS_DEVICE_ZERO);
     vfs_add_device(VFS_DEVICE_TTY);
+    vfs_add_device(VFS_DEVICE_PTMX);
     vfs_add_device(VFS_DEVICE_RANDOM);
     vfs_add_device(VFS_DEVICE_URANDOM);
     if (fb_drawable())

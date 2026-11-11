@@ -14,6 +14,9 @@ struct inet_socket;
 
 struct file *file_console(void);
 
+// Opens the slave of a pseudo-terminal's master, for TIOCGPTPEER.
+int file_open_peer(struct file *master, int flags, struct file **out);
+
 // flags are the O_ values.
 int file_open(const char *cwd, const char *path, int flags, struct file **out);
 

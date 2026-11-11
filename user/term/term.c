@@ -1,0 +1,392 @@
+#include <errno.h>
+#include <font8x8_basic.h>
+#include <gui.h>
+#include <poll.h>
+#include <pty.h>
+#include <signal.h>
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+
+#define COLS 80
+#define ROWS 25
+#define CELL_WIDTH 8
+#define CELL_HEIGHT 16 // the font's rows each drawn twice
+#define PADDING 4
+#define TAB_WIDTH 8
+#define MAX_PARAMS 8
+#define PARAM_HIDE_CURSOR 25
+
+// The console's colours, then the defaults, which aren't any of them.
+#define BRIGHT 8
+#define DEFAULT_FOREGROUND 16
+#define DEFAULT_BACKGROUND 17
+static const uint32_t palette[18] = {
+    0x000000, 0xCC3333, 0x33AA33, 0xCCAA33, 0x3366CC, 0xAA44AA, 0x33AAAA, 0xC0C0C0,
+    0x666666, 0xFF6666, 0x66DD66, 0xFFDD66, 0x6699FF, 0xDD77DD, 0x66DDDD, 0xFFFFFF,
+    0xD8DEE9, 0x161A22,
+};
+
+struct cell {
+    char c;
+    uint8_t foreground, background;
+};
+
+static struct gui_window *window;
+static struct cell cells[ROWS][COLS];
+static bool dirty[ROWS];
+static int row, col;
+static bool cursor_hidden, focused;
+
+// What the next character is drawn in.
+static uint8_t foreground = DEFAULT_FOREGROUND, background = DEFAULT_BACKGROUND;
+static bool bold, reverse;
+
+static enum { PARSE_TEXT, PARSE_ESCAPE, PARSE_CSI } state;
+static int params[MAX_PARAMS], param_count;
+static bool private_sequence;
+
+static void set_cell(int r, int c, char ch) {
+    cells[r][c] = (struct cell){ch, reverse ? background : foreground, reverse ? foreground : background};
+    dirty[r] = true;
+}
+
+static void clear_cells(int r, int from, int to) {
+    for (int c = from; c < to; c++)
+        cells[r][c] = (struct cell){' ', foreground, background};
+    dirty[r] = true;
+}
+
+static void new_line(void) {
+    col = 0;
+    if (++row < ROWS)
+        return;
+    row = ROWS - 1;
+    memmove(cells[0], cells[1], sizeof(cells) - sizeof(cells[0]));
+    clear_cells(ROWS - 1, 0, COLS);
+    for (int r = 0; r < ROWS; r++)
+        dirty[r] = true;
+}
+
+static int clamp(int value, int low, int high) {
+    return value < low ? low : value > high ? high : value;
+}
+
+static int param_or_one(int index) {
+    return index < param_count && params[index] > 0 ? params[index] : 1;
+}
+
+// Bold shows as the bright version, as the font has no heavier one.
+static void set_graphics(void) {
+    for (int i = 0; i < (param_count ? param_count : 1); i++) {
+        int p = params[i];
+
+        if (p == 0) {
+            foreground = DEFAULT_FOREGROUND;
+            background = DEFAULT_BACKGROUND;
+            bold = reverse = false;
+        } else if (p == 1 || p == 22) {
+            bold = p == 1;
+        } else if (p == 7 || p == 27) {
+            reverse = p == 7;
+        } else if (p >= 30 && p <= 37) {
+            foreground = p - 30 + (bold ? BRIGHT : 0);
+        } else if (p == 39) {
+            foreground = DEFAULT_FOREGROUND;
+        } else if (p >= 40 && p <= 47) {
+            background = p - 40;
+        } else if (p == 49) {
+            background = DEFAULT_BACKGROUND;
+        } else if (p >= 90 && p <= 97) {
+            foreground = p - 90 + BRIGHT;
+        } else if (p >= 100 && p <= 107) {
+            background = p - 100 + BRIGHT;
+        } else if (p == 38 || p == 48) {
+            return; // what follows says which of the many colours there's no room for
+        }
+    }
+}
+
+static void run_csi(char final) {
+    int mode = param_count > 0 ? params[0] : 0;
+
+    dirty[row] = true; // where the cursor was
+    if (private_sequence) {
+        if (mode == PARAM_HIDE_CURSOR && (final == 'h' || final == 'l'))
+            cursor_hidden = final == 'l';
+        return;
+    }
+
+    switch (final) {
+    case 'A':
+        row = clamp(row - param_or_one(0), 0, ROWS - 1);
+        break;
+    case 'B':
+        row = clamp(row + param_or_one(0), 0, ROWS - 1);
+        break;
+    case 'C':
+        col = clamp(col + param_or_one(0), 0, COLS - 1);
+        break;
+    case 'D':
+        col = clamp(col - param_or_one(0), 0, COLS - 1);
+        break;
+    case 'G':
+        col = clamp(param_or_one(0) - 1, 0, COLS - 1);
+        break;
+    case 'H':
+    case 'f':
+        row = clamp(param_or_one(0) - 1, 0, ROWS - 1);
+        col = clamp(param_or_one(1) - 1, 0, COLS - 1);
+        break;
+    case 'J':
+        if (mode == 2) {
+            for (int r = 0; r < ROWS; r++)
+                clear_cells(r, 0, COLS);
+            break;
+        }
+        clear_cells(row, col, COLS);
+        for (int r = row + 1; r < ROWS; r++)
+            clear_cells(r, 0, COLS);
+        break;
+    case 'K':
+        clear_cells(row, mode == 2 ? 0 : mode == 1 ? 0 : col, mode == 1 ? col + 1 : COLS);
+        break;
+    case 'm':
+        set_graphics();
+        break;
+    }
+}
+
+static void put_text(char c) {
+    dirty[row] = true;
+    switch (c) {
+    case '\n':
+        new_line();
+        return;
+    case '\r':
+        col = 0;
+        return;
+    case '\b':
+        if (col > 0)
+            col--;
+        return;
+    case '\t':
+        do {
+            set_cell(row, col, ' ');
+            if (++col == COLS)
+                new_line();
+        } while (col % TAB_WIDTH != 0);
+        return;
+    case '\a':
+        return;
+    case '\x1b':
+        state = PARSE_ESCAPE;
+        return;
+    }
+
+    // Other control characters and non-ASCII bytes have no glyph here.
+    set_cell(row, col, (uint8_t)c >= 0x20 && (uint8_t)c < 0x7F ? c : '?');
+    if (++col == COLS)
+        new_line();
+}
+
+static void put_byte(char c) {
+    switch (state) {
+    case PARSE_TEXT:
+        put_text(c);
+        break;
+    case PARSE_ESCAPE:
+        state = c == '[' ? PARSE_CSI : PARSE_TEXT;
+        param_count = 0;
+        private_sequence = false;
+        memset(params, 0, sizeof(params));
+        break;
+    case PARSE_CSI:
+        if (c == '?') {
+            private_sequence = true;
+        } else if (c >= '0' && c <= '9') {
+            if (param_count == 0)
+                param_count = 1;
+            params[param_count - 1] = params[param_count - 1] * 10 + (c - '0');
+        } else if (c == ';') {
+            if (param_count == 0)
+                param_count = 1;
+            if (param_count < MAX_PARAMS)
+                param_count++;
+        } else {
+            run_csi(c);
+            state = PARSE_TEXT;
+        }
+        break;
+    }
+}
+
+static void draw_cell(int r, int c) {
+    struct cell cell = cells[r][c];
+    bool cursor = r == row && c == col && !cursor_hidden;
+    uint32_t fg = palette[cell.foreground], bg = palette[cell.background];
+    int x = PADDING + c * CELL_WIDTH, y = PADDING + r * CELL_HEIGHT;
+
+    // A solid block when focused, an outline when not.
+    if (cursor && focused) {
+        uint32_t swap = fg;
+        fg = bg;
+        bg = swap;
+    }
+    gui_fill(&window->canvas, x, y, CELL_WIDTH, CELL_HEIGHT, bg);
+    for (int line = 0; line < 8; line++) {
+        for (int bit = 0; bit < 8; bit++) {
+            if (font8x8_basic[(uint8_t)cell.c][line] >> bit & 1)
+                gui_fill(&window->canvas, x + bit, y + 2 * line, 1, 2, fg);
+        }
+    }
+    if (cursor && !focused) {
+        gui_fill(&window->canvas, x, y, CELL_WIDTH, 1, fg);
+        gui_fill(&window->canvas, x, y + CELL_HEIGHT - 1, CELL_WIDTH, 1, fg);
+        gui_fill(&window->canvas, x, y, 1, CELL_HEIGHT, fg);
+        gui_fill(&window->canvas, x + CELL_WIDTH - 1, y, 1, CELL_HEIGHT, fg);
+    }
+}
+
+static void draw(void) {
+    int first = ROWS, last = -1;
+
+    for (int r = 0; r < ROWS; r++) {
+        if (!dirty[r])
+            continue;
+        for (int c = 0; c < COLS; c++)
+            draw_cell(r, c);
+        dirty[r] = false;
+        first = r < first ? r : first;
+        last = r;
+    }
+    if (last >= 0)
+        gui_update(window, PADDING, PADDING + first * CELL_HEIGHT, COLS * CELL_WIDTH, (last - first + 1) * CELL_HEIGHT);
+}
+
+static void write_all(int fd, const char *s, size_t len) {
+    while (len > 0) {
+        ssize_t n = write(fd, s, len);
+
+        if (n < 0 && errno == EINTR)
+            continue;
+        if (n <= 0)
+            return;
+        s += n;
+        len -= n;
+    }
+}
+
+// What a key sends, as the console's keyboard would. Alt adds an escape first.
+static void send_key(int master, const struct key_event *key) {
+    const char *sequence = NULL;
+    char text = key->text;
+
+    switch (key->code) {
+    case KEY_UP: sequence = "\x1b[A"; break;
+    case KEY_DOWN: sequence = "\x1b[B"; break;
+    case KEY_RIGHT: sequence = "\x1b[C"; break;
+    case KEY_LEFT: sequence = "\x1b[D"; break;
+    case KEY_HOME: sequence = "\x1b[H"; break;
+    case KEY_END: sequence = "\x1b[F"; break;
+    case KEY_INSERT: sequence = "\x1b[2~"; break;
+    case KEY_DELETE: sequence = "\x1b[3~"; break;
+    case KEY_PAGE_UP: sequence = "\x1b[5~"; break;
+    case KEY_PAGE_DOWN: sequence = "\x1b[6~"; break;
+    }
+    if (sequence) {
+        write_all(master, sequence, strlen(sequence));
+    } else if (text) {
+        if (key->modifiers & KEY_MOD_ALT)
+            write_all(master, "\x1b", 1);
+        write_all(master, &text, 1);
+    }
+}
+
+static pid_t start_shell(int *master, char **command) {
+    struct winsize size = {.ws_row = ROWS, .ws_col = COLS, .ws_xpixel = COLS * CELL_WIDTH, .ws_ypixel = ROWS * CELL_HEIGHT};
+    int slave;
+
+    if (openpty(master, &slave, NULL, NULL, &size) < 0)
+        return -1;
+
+    pid_t child = fork();
+
+    if (child == 0) {
+        close(*master);
+        close(gui_fd());
+        login_tty(slave);
+        if (*command)
+            execvp(command[0], command);
+        else
+            execl("/system/bin/sh", "sh", (char *)NULL);
+        _exit(127);
+    }
+    close(slave);
+    return child;
+}
+
+int main(int argc, char **argv) {
+    help_option(argc, argv, "usage: term [command [argument]...]\n"
+                            "Opens a terminal window running the shell, or the command.\n");
+    if (!gui_connect()) {
+        dprintf(STDERR_FILENO, "term: wm isn't running\n");
+        return 1;
+    }
+
+    int master;
+
+    window = gui_create_window("Terminal", COLS * CELL_WIDTH + 2 * PADDING, ROWS * CELL_HEIGHT + 2 * PADDING);
+    pid_t child = window ? start_shell(&master, argv + 1) : -1;
+
+    if (child < 0) {
+        dprintf(STDERR_FILENO, "term: %s\n", window ? strerror(errno) : "couldn't make a window");
+        return 1;
+    }
+    gui_fill(&window->canvas, 0, 0, window->canvas.width, window->canvas.height, palette[DEFAULT_BACKGROUND]);
+    gui_show(window);
+    for (int r = 0; r < ROWS; r++)
+        clear_cells(r, 0, COLS);
+    draw();
+
+    bool running = true;
+
+    while (running) {
+        struct pollfd fds[2] = {{.fd = gui_fd(), .events = POLLIN}, {.fd = master, .events = POLLIN}};
+        char buf[4096];
+
+        if (poll(fds, 2, -1) < 0 && errno != EINTR)
+            break;
+
+        // The shell's output, ending when everything on the terminal has exited.
+        if (fds[1].revents & (POLLIN | POLLHUP)) {
+            ssize_t n = read(master, buf, sizeof(buf));
+
+            running = n > 0 || (n < 0 && (errno == EINTR || errno == EAGAIN));
+            for (ssize_t i = 0; i < n; i++)
+                put_byte(buf[i]);
+            dirty[row] = true; // where the cursor is now
+        }
+
+        struct gui_message e;
+
+        if ((fds[0].revents & (POLLIN | POLLHUP)) && gui_next_event(&e)) {
+            if (e.type == GUI_KEY && e.key.pressed) {
+                send_key(master, &e.key);
+            } else if (e.type == GUI_FOCUS) {
+                focused = e.focused;
+                dirty[row] = true;
+            } else if (e.type == GUI_CLOSE) {
+                running = false;
+            }
+        } else if (fds[0].revents & (POLLIN | POLLHUP)) {
+            running = false; // wm has gone
+        }
+        draw();
+    }
+
+    // Closing the master hangs up whatever is still running on the terminal.
+    close(master);
+    gui_destroy_window(window);
+    return 0;
+}

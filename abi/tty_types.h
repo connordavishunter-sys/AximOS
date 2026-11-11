@@ -75,5 +75,8 @@ struct winsize {
 #define TCSETSF 0x5404 // with TCSAFLUSH, which also discards unread input
 #define TIOCGPGRP 0x540F
 #define TIOCSPGRP 0x5410
+#define TIOCSCTTY 0x540E   // makes it the terminal of a process that has none
 #define TIOCGWINSZ 0x5413
+#define TIOCSWINSZ 0x5414
 #define FIONREAD 0x541B
+#define TIOCGPTPEER 0x5441 // on a pseudo-terminal's master, opens the slave with these flags

@@ -14,6 +14,7 @@
 #include <shm.h>
 #include <signal_numbers.h>
 #include <string.h>
+#include <tty.h>
 #include <syscall_numbers.h>
 
 // The unmapped pages either side of the stack catch overflows. Only the top pages,
@@ -88,6 +89,7 @@ struct shared {
     char exe[PATH_MAX];    // the program it's running
     char cmdline[CMDLINE_MAX]; // its arguments with spaces between, cut short if need be
     int pgid;
+    struct tty *tty;       // its controlling terminal, or NULL
     uint64_t alarm_tick;   // when to raise SIGALRM, or 0
     uint64_t handlers[NSIG];
     uint32_t handler_masks[NSIG];
@@ -144,7 +146,6 @@ static struct process *init;
 static struct process *next_to_try; // where the scheduler looks first
 static bool scheduler_running;
 static int next_pid = 1;
-static int foreground_pgid;
 
 // What a new program starts with.
 static uint8_t fpu_initial[FPU_STATE_SIZE] __attribute__((aligned(16)));
@@ -448,6 +449,7 @@ int process_spawn_init(const struct vfs_node *file, const char *path) {
     p->s->mmap_next = MMAP_TOP;
     for (int fd = 0; fd <= 2; fd++)
         p->s->files[fd] = file_console();
+    p->s->tty = tty_console();
     p->s->cwd[0] = '/';
     memcpy(p->fpu, fpu_initial, FPU_STATE_SIZE);
     prepare_stack(p, &frame);
@@ -618,12 +620,25 @@ int process_set_group(int pid, int pgid) {
     return -ESRCH;
 }
 
-int process_foreground(void) {
-    return foreground_pgid;
+int process_new_session(void) {
+    if (current->s->pgid == current->s->pid)
+        return -EPERM;
+    current->s->pgid = current->s->pid;
+    tty_unref(current->s->tty);
+    current->s->tty = NULL;
+    return current->s->pid;
 }
 
-void process_set_foreground(int pgid) {
-    foreground_pgid = pgid;
+struct tty *process_tty(void) {
+    return current->s->tty;
+}
+
+int process_set_tty(struct tty *tty) {
+    if (current->s->tty)
+        return current->s->tty == tty ? 0 : -EPERM;
+    current->s->tty = tty_ref(tty);
+    tty_set_foreground(tty, current->s->pgid);
+    return 0;
 }
 
 // There's no job control, so what would stop or continue a process does nothing.
@@ -675,17 +690,17 @@ static void send_to_process(struct shared *s, int signal) {
         send_signal(fallback, signal);
 }
 
-bool process_interrupt_foreground(void) {
+bool process_signal_group(int pgid, int signal) {
     bool found = false;
 
-    if (foreground_pgid == 0)
+    if (pgid == 0)
         return false;
 
     for (struct process *p = processes; p; p = p->next) {
-        if (p->s->pgid != foreground_pgid || p->pid != p->s->pid || p->s->threads == 0)
+        if (p->s->pgid != pgid || p->pid != p->s->pid || p->s->threads == 0)
             continue;
 
-        send_to_process(p->s, SIGINT);
+        send_to_process(p->s, signal);
         found = true;
     }
     return found;
@@ -966,6 +981,7 @@ int process_fork(const struct interrupt_frame *frame) {
     memcpy(child->s->exe, current->s->exe, strlen(current->s->exe) + 1);
     memcpy(child->s->cmdline, current->s->cmdline, CMDLINE_MAX);
     child->s->pgid = current->s->pgid;
+    child->s->tty = tty_ref(current->s->tty);
     child->signals_masked = current->signals_masked;
     child->s->restorer = current->s->restorer;
     memcpy(child->s->handlers, current->s->handlers, sizeof(child->s->handlers));
@@ -1508,6 +1524,8 @@ static void finish_thread(void) {
             file_close(s->files[fd]);
         s->files[fd] = NULL;
     }
+    tty_unref(s->tty);
+    s->tty = NULL;
 
     // This thread keeps running on its kernel stack, which isn't part of the
     // address space, until it switches away for the last time.

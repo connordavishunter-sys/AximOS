@@ -123,9 +123,13 @@ class VM:
         self.command(f'sendkey {name}')
 
     def mouse(self, dx=0, dy=0, buttons=None):
-        """Moves the mouse by dx, dy, then sets which buttons are held (1 left, 2 right, 4 middle)."""
-        if dx or dy:
-            self.command(f'mouse_move {dx} {dy}')
+        """Moves the mouse by dx, dy, then sets which buttons are held (1 left, 2 right, 4 middle).
+        QEMU only queues a little PS/2 movement, so a long move goes in steps."""
+        while dx or dy:
+            step_x, step_y = max(-100, min(100, dx)), max(-100, min(100, dy))
+            self.command(f'mouse_move {step_x} {step_y}')
+            dx, dy = dx - step_x, dy - step_y
+            time.sleep(0.02)
         if buttons is not None:
             self.command(f'mouse_button {buttons}')
         time.sleep(0.2)

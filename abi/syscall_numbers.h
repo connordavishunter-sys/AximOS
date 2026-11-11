@@ -78,6 +78,7 @@
 #define SYS_NET_INFO 72  // net_info(info): 0
 #define SYS_NET_SET 73   // net_set(address, netmask, gateway, dns): 0
 #define SYS_GETRANDOM 74 // getrandom(buf, len, flags): bytes written
+#define SYS_SETSID 75    // setsid(): the new session and group, which is the caller's pid
 
 #define O_RDONLY 0
 #define O_WRONLY 1

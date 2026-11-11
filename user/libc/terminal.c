@@ -1,4 +1,6 @@
 #include <errno.h>
+#include <fcntl.h>
+#include <pty.h>
 #include <poll.h>
 #include <stdarg.h>
 #include <string.h>
@@ -192,4 +194,34 @@ int select(int count, fd_set *read_set, fd_set *write_set, fd_set *error_set, st
         }
     }
     return bits;
+}
+
+int openpty(int *master, int *slave, char *name, const struct termios *settings, const struct winsize *size) {
+    (void)name;
+    *master = open("/dev/ptmx", O_RDWR | O_NOCTTY);
+    if (*master < 0)
+        return -1;
+    *slave = ioctl(*master, TIOCGPTPEER, O_RDWR | O_NOCTTY);
+    if (*slave >= 0 && (!settings || tcsetattr(*slave, TCSANOW, settings) == 0)
+        && (!size || ioctl(*master, TIOCSWINSZ, size) == 0))
+        return 0;
+
+    int saved = errno;
+
+    close(*master);
+    if (*slave >= 0)
+        close(*slave);
+    errno = saved;
+    return -1;
+}
+
+int login_tty(int fd) {
+    setsid();
+    if (ioctl(fd, TIOCSCTTY, 0) < 0)
+        return -1;
+    for (int i = 0; i <= 2; i++)
+        dup2(fd, i);
+    if (fd > 2)
+        close(fd);
+    return 0;
 }

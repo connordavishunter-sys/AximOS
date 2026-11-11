@@ -177,7 +177,10 @@ static size_t ioctl_arg_size(uint64_t request) {
     case TCSETSF:
         return sizeof(struct termios);
     case TIOCGWINSZ:
+    case TIOCSWINSZ:
         return sizeof(struct winsize);
+    case TIOCSCTTY:
+        return 0;
     }
     return sizeof(int);
 }
@@ -187,6 +190,15 @@ static int64_t sys_ioctl(uint64_t fd, uint64_t request, uint64_t arg) {
 
     if (!file)
         return -EBADF;
+    // Its argument is the flags themselves, and it makes a descriptor.
+    if (request == TIOCGPTPEER) {
+        int fd = fd_find_free(0);
+        int status = fd < 0 ? fd : file_open_peer(file, arg, &process_files()[fd]);
+
+        if (status == 0 && (arg & O_CLOEXEC))
+            *process_close_on_exec() |= 1ull << fd;
+        return status < 0 ? status : fd;
+    }
     if (!mm_user_range_ok(arg, ioctl_arg_size(request), true))
         return -EFAULT;
     return file_ioctl(file, request, (void *)arg);
@@ -1533,6 +1545,9 @@ void syscall_dispatch(struct interrupt_frame *frame) {
         break;
     case SYS_SOCKET_INFO:
         result = sys_socket_info(frame->rdi, frame->rsi);
+        break;
+    case SYS_SETSID:
+        result = process_new_session();
         break;
     case SYS_GETRANDOM:
         result = sys_getrandom(frame->rdi, frame->rsi, frame->rdx);

@@ -34,8 +34,8 @@
 #define CLOSE_COLOR 0xE5484D
 
 // Super+Enter runs this.
-#define LAUNCH_COMMAND "guidemo"
-#define HINT "Super+Enter: new window   Super+Q: close   Super+Shift+Q: quit"
+#define LAUNCH_COMMAND "term"
+#define HINT "Super+Enter: terminal   Super+Q: close   Super+Shift+Q: quit"
 
 struct rect {
     int x, y, width, height;

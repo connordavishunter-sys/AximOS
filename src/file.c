@@ -34,6 +34,8 @@ enum file_kind {
     FILE_URANDOM,
     FILE_SOCKET,
     FILE_INET,
+    FILE_TTY,        // a pseudo-terminal's slave
+    FILE_PTY_MASTER,
 };
 
 // How much one read gets, so that a big one can't hold up the kernel for long.
@@ -49,6 +51,7 @@ struct file {
     struct shm *shm;
     struct socket *socket;
     struct inet_socket *inet;
+    struct tty *tty;
     struct file *next_open; // the list of open nodes
     struct file *prev_open;
 };
@@ -60,6 +63,26 @@ static struct file *open_nodes;
 
 struct file *file_console(void) {
     return file_ref(&console);
+}
+
+static struct tty *tty_of(const struct file *file) {
+    return file->kind == FILE_CONSOLE ? tty_console() : file->kind == FILE_TTY ? file->tty : NULL;
+}
+
+static struct file *new_tty_file(struct file *file, enum file_kind kind, struct tty *tty, int flags) {
+    *file = (struct file){.refs = 1, .kind = kind, .flags = flags, .tty = tty};
+    return file;
+}
+
+int file_open_peer(struct file *master, int flags, struct file **out) {
+    struct file *file;
+
+    if (master->kind != FILE_PTY_MASTER)
+        return -ENOTTY;
+    if (!(file = kmalloc(sizeof(*file))))
+        return -ENOMEM;
+    *out = new_tty_file(file, FILE_TTY, tty_open_slave(master->tty), (flags & O_NONBLOCK) | O_RDWR);
+    return 0;
 }
 
 static int file_open_locked(const char *cwd, const char *path, int flags, struct file **out) {
@@ -108,9 +131,25 @@ static int file_open_locked(const char *cwd, const char *path, int flags, struct
         *out = file;
         return 0;
     }
-    if (status == VFS_OK && vfs_device_of(&file->node) == VFS_DEVICE_TTY) {
-        kfree(file);
-        *out = file_console();
+    if (device == VFS_DEVICE_PTMX) {
+        struct tty *tty = tty_open_pty();
+
+        if (!tty) {
+            kfree(file);
+            return -ENOMEM;
+        }
+        *out = new_tty_file(file, FILE_PTY_MASTER, tty, (flags & ~O_ACCMODE) | O_RDWR);
+        return 0;
+    }
+    if (device == VFS_DEVICE_TTY) {
+        struct tty *tty = process_tty();
+
+        if (!tty || tty == tty_console()) {
+            kfree(file);
+            *out = tty ? file_console() : NULL;
+            return tty ? 0 : -ENXIO;
+        }
+        *out = new_tty_file(file, FILE_TTY, tty_open_slave(tty), (flags & ~O_ACCMODE) | O_RDWR);
         return 0;
     }
     if (status == VFS_OK && (vfs_device_of(&file->node) == VFS_DEVICE_RANDOM
@@ -304,35 +343,48 @@ int file_ioctl(struct file *file, uint64_t request, void *arg) {
         *(int *)arg = inet_available(file->inet);
         return 0;
     }
-    if (request == FIONREAD && file->kind == FILE_CONSOLE) {
-        *(int *)arg = tty_pending();
-        return 0;
+    // The master speaks for its terminal as a whole.
+    if (file->kind == FILE_PTY_MASTER) {
+        switch (request) {
+        case TIOCSWINSZ:
+            return tty_set_size(file->tty, arg);
+        case TIOCGWINSZ:
+            tty_get_size(file->tty, arg);
+            return 0;
+        }
+        return -ENOTTY;
     }
-    if (file->kind != FILE_CONSOLE)
+
+    struct tty *tty = tty_of(file);
+
+    if (!tty)
         return -ENOTTY;
 
     switch (request) {
+    case FIONREAD:
+        *(int *)arg = tty_pending(tty);
+        return 0;
     case TCGETS:
-        tty_get_settings(arg);
+        tty_get_settings(tty, arg);
         return 0;
     case TCSETS:
     case TCSETSW:
     case TCSETSF:
-        tty_set_settings(arg, request == TCSETSF);
+        tty_set_settings(tty, arg, request == TCSETSF);
         return 0;
     case TIOCGPGRP:
-        *(int *)arg = process_foreground();
+        *(int *)arg = tty_foreground(tty);
         return 0;
     case TIOCSPGRP:
-        process_set_foreground(*(const int *)arg);
+        tty_set_foreground(tty, *(const int *)arg);
         return 0;
-    case TIOCGWINSZ: {
-        int rows, cols;
-
-        console_size(&rows, &cols);
-        *(struct winsize *)arg = (struct winsize){.ws_row = rows, .ws_col = cols};
+    case TIOCGWINSZ:
+        tty_get_size(tty, arg);
         return 0;
-    }
+    case TIOCSWINSZ:
+        return tty_set_size(tty, arg);
+    case TIOCSCTTY:
+        return process_set_tty(tty);
     }
     return -ENOTTY;
 }
@@ -342,7 +394,11 @@ int file_poll(struct file *file, int events) {
 
     switch (file->kind) {
     case FILE_CONSOLE:
-        ready = POLLOUT | (tty_readable() ? POLLIN : 0);
+    case FILE_TTY:
+        ready = (tty_writable(tty_of(file)) ? POLLOUT : 0) | (tty_readable(tty_of(file)) ? POLLIN : 0);
+        break;
+    case FILE_PTY_MASTER:
+        ready = tty_master_poll(file->tty);
         break;
     case FILE_PIPE_READ:
         if (pipe_available(file->pipe) > 0)
@@ -414,6 +470,10 @@ void file_close(struct file *file) {
         socket_close(file->socket);
     } else if (file->kind == FILE_INET) {
         inet_close(file->inet);
+    } else if (file->kind == FILE_TTY) {
+        tty_close_slave(file->tty);
+    } else if (file->kind == FILE_PTY_MASTER) {
+        tty_close_master(file->tty);
     } else if (file->kind == FILE_KEYBOARD) {
         keyboard_close_events();
     } else if (file->kind == FILE_SHM) {
@@ -429,7 +489,10 @@ int64_t file_read(struct file *file, void *buf, size_t len) {
 
     switch (file->kind) {
     case FILE_CONSOLE:
-        return tty_read(buf, len, nonblocking);
+    case FILE_TTY:
+        return tty_read(tty_of(file), buf, len, nonblocking);
+    case FILE_PTY_MASTER:
+        return tty_master_read(file->tty, buf, len, nonblocking);
     case FILE_PIPE_READ:
         return pipe_read(file->pipe, buf, len, nonblocking);
     case FILE_PIPE_WRITE:
@@ -486,8 +549,10 @@ int64_t file_read(struct file *file, void *buf, size_t len) {
 int64_t file_write(struct file *file, const void *buf, size_t len) {
     switch (file->kind) {
     case FILE_CONSOLE:
-        console_write(buf, len);
-        return len;
+    case FILE_TTY:
+        return tty_write(tty_of(file), buf, len, file->flags & O_NONBLOCK);
+    case FILE_PTY_MASTER:
+        return tty_master_write(file->tty, buf, len);
     case FILE_PIPE_WRITE:
         return pipe_write(file->pipe, buf, len, file->flags & O_NONBLOCK, true);
     case FILE_SOCKET:

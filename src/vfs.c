@@ -44,6 +44,7 @@ static const char *const device_names[VFS_DEVICE_COUNT] = {
     [VFS_DEVICE_NULL] = "null",
     [VFS_DEVICE_ZERO] = "zero",
     [VFS_DEVICE_TTY] = "tty",
+    [VFS_DEVICE_PTMX] = "ptmx",
     [VFS_DEVICE_RANDOM] = "random",
     [VFS_DEVICE_URANDOM] = "urandom",
 };

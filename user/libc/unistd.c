@@ -209,6 +209,10 @@ int mkdir(const char *path, unsigned mode) {
     return checked(syscall3(SYS_MKDIR, (long)path, 0, 0));
 }
 
+pid_t setsid(void) {
+    return checked(syscall3(SYS_SETSID, 0, 0, 0));
+}
+
 int setpgid(pid_t pid, pid_t pgid) {
     return checked(syscall3(SYS_SETPGID, pid, pgid, 0));
 }

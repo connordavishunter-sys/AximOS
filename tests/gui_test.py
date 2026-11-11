@@ -3,7 +3,7 @@ moves, raises and closes them, and gives the console back when it quits."""
 import time
 from vm import VM, check, finish
 
-DESKTOP, FOCUSED, UNFOCUSED, PAPER, INK = 0x1E2430, 0x3D63DD, 0x3A4150, 0xF4F1EA, 0x26282E
+DESKTOP, FOCUSED, PAPER, INK, TERMINAL = 0x1E2430, 0x3D63DD, 0xF4F1EA, 0x26282E, 0x161A22
 
 
 def count(px, x0, y0, x1, y1, color):
@@ -45,16 +45,19 @@ try:
     check('drag moves the window', px(300, 65) == DESKTOP and px(600, 265) == FOCUSED,
           f'{px(300, 65):x} {px(600, 265):x}')
 
-    # A second window takes the focus, and Super+Q closes it.
+    # A terminal takes the focus, and Super+Q closes it.
     at = v.mark()
     v.key('meta_l-ret')
-    check('Super+Enter opens a window', v.wait('guidemo: window 2', 10, at), v.text(at))
-    check('the first loses focus', v.wait('guidemo: focus 0', 5, at), v.text(at))
+    check('Super+Enter opens a terminal, taking the focus', v.wait('guidemo: focus 0', 10, at), v.text(at))
+    time.sleep(1)
     w, h, px = v.screenshot()
-    check('the first title bar dims', px(600, 265) == UNFOCUSED, hex(px(600, 265)))
+    check('the terminal opens on top', px(600, 265) == TERMINAL, hex(px(600, 265)))
+    at = v.mark()
     v.key('meta_l-q')
-    check('Super+Q closes the focused window', v.wait('guidemo: closed', 5, at), v.text(at))
-    check('focus goes back', v.wait('guidemo: focus 1', 5, v.text().rfind('guidemo: closed')), v.text(at))
+    check('Super+Q closes the focused window, and focus goes back', v.wait('guidemo: focus 1', 5, at), v.text(at))
+    time.sleep(0.5)
+    w, h, px = v.screenshot()
+    check('the title bar shows the focus again', px(600, 265) == FOCUSED, hex(px(600, 265)))
 
     # The close button is at the right of the title bar, now from 720, 264, and the
     # cursor is at 500, 270 after the drag.
