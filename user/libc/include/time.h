@@ -18,10 +18,12 @@ struct tm {
     int tm_year; // years since 1900
     int tm_wday; // 0 is Sunday
     int tm_yday; // 0 is 1 January
-    int tm_isdst; // always 0
+    int tm_isdst; // whether it's summer time, or for mktime negative if unknown
+    long tm_gmtoff; // seconds east of UTC
+    const char *tm_zone; // the time zone's abbreviation, such as GMT or BST
 };
 
-// Seconds since 1970 in UTC, which is the only time zone there is for now.
+// Seconds since 1970 in UTC.
 time_t time(time_t *out);
 
 // CLOCK_MONOTONIC counts from boot and suits measuring and pacing. CLOCK_REALTIME
@@ -40,7 +42,10 @@ clock_t clock(void);
 // signal ends it with EINTR, leaving what was left in remaining, which may be NULL.
 int nanosleep(const struct timespec *request, struct timespec *remaining);
 
-// Returns result.
+// Returns result. Local time is in the zone TZ names, which is a name such as
+// Europe/London from /system/share/zoneinfo, a file after a colon, or a POSIX rule
+// such as EST5EDT,M3.2.0,M11.1.0. Without TZ, /system/etc/localtime is the zone,
+// as the tz command sets it, and without that it's UTC.
 struct tm *gmtime_r(const time_t *when, struct tm *result);
 struct tm *localtime_r(const time_t *when, struct tm *result);
 
@@ -57,7 +62,9 @@ time_t mktime(struct tm *t);
 
 double difftime(time_t end, time_t start);
 
-// The only time zone is UTC, so tzset has nothing to do.
+// The zone's standard and summer time abbreviations, how far west of UTC its
+// standard time is, and whether it has summer time. tzset sets them, and the local
+// time functions call it, rereading the zone when TZ or its file has changed.
 extern char *tzname[2];
 extern long timezone;
 extern int daylight;

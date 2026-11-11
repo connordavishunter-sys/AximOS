@@ -67,9 +67,9 @@ try:
     check('output shows in the window', lines[1] == 'only-in-term', '\n'.join(lines))
     check("and not on the console", 'only-in-term\n' not in v.text(at), v.text(at)[-300:])
 
-    v.type('ls /system | wc -l; echo x > /dev/tty\n')
+    v.type('echo a b c | wc -w; echo x > /dev/tty\n')
     lines = wait_screen(v, 'x')
-    check('pipes, and /dev/tty is the window', lines[3].strip() == '4' and lines[4] == 'x', '\n'.join(lines))
+    check('pipes, and /dev/tty is the window', lines[3].strip() == '3' and lines[4] == 'x', '\n'.join(lines))
 
     v.type('sleep 30\n'); time.sleep(1); v.key('ctrl-c'); time.sleep(0.5)
     v.type('echo status $?\n')

@@ -112,6 +112,9 @@ struct tm *gmtime_r(const time_t *when, struct tm *t) {
     t->tm_hour = rest / 3600;
     t->tm_min = rest % 3600 / 60;
     t->tm_sec = rest % 60;
+    t->tm_isdst = 0;
+    t->tm_gmtoff = 0;
+    t->tm_zone = "UTC";
     return t;
 }
 
@@ -119,15 +122,6 @@ struct tm *gmtime(const time_t *when) {
     static struct tm result;
 
     return gmtime_r(when, &result);
-}
-
-// The only time zone is UTC.
-struct tm *localtime_r(const time_t *when, struct tm *result) {
-    return gmtime_r(when, result);
-}
-
-struct tm *localtime(const time_t *when) {
-    return gmtime(when);
 }
 
 // The other direction of gmtime_r, again by Howard Hinnant. Fields out of range
@@ -152,10 +146,6 @@ time_t timegm(struct tm *t) {
 
     gmtime_r(&when, t);
     return when;
-}
-
-time_t mktime(struct tm *t) {
-    return timegm(t);
 }
 
 double difftime(time_t end, time_t start) {
@@ -218,8 +208,13 @@ size_t strftime(char *out, size_t size, const char *fmt, const struct tm *t) {
             case 'w': snprintf(text, sizeof(text), "%d", t->tm_wday); break;
             case 'y': snprintf(text, sizeof(text), "%02d", ((t->tm_year % 100) + 100) % 100); break;
             case 'Y': snprintf(text, sizeof(text), "%d", t->tm_year + 1900); break;
-            case 'z': strcpy(text, "+0000"); break;
-            case 'Z': strcpy(text, "UTC"); break;
+            case 'z': {
+                long offset = t->tm_gmtoff < 0 ? -t->tm_gmtoff : t->tm_gmtoff;
+
+                snprintf(text, sizeof(text), "%c%02ld%02ld", t->tm_gmtoff < 0 ? '-' : '+', offset / 3600, offset / 60 % 60);
+                break;
+            }
+            case 'Z': snprintf(text, sizeof(text), "%s", t->tm_zone ? t->tm_zone : tzname[t->tm_isdst > 0]); break;
             case '%': strcpy(text, "%"); break;
             default: snprintf(text, sizeof(text), "%%%c", *fmt); break;
             }
@@ -245,14 +240,7 @@ char *asctime(const struct tm *t) {
 }
 
 char *ctime(const time_t *when) {
-    return asctime(gmtime(when));
-}
-
-char *tzname[2] = {"UTC", "UTC"};
-long timezone;
-int daylight;
-
-void tzset(void) {
+    return asctime(localtime(when));
 }
 
 int clock_getres(int clock, struct timespec *out) {
@@ -272,7 +260,7 @@ char *asctime_r(const struct tm *t, char *out) {
 char *ctime_r(const time_t *when, char *out) {
     struct tm t;
 
-    return asctime_r(gmtime_r(when, &t), out);
+    return asctime_r(localtime_r(when, &t), out);
 }
 
 // Reads up to max digits as a number between low and high.

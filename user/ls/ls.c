@@ -66,7 +66,7 @@ static void print_long(const char *dir, const char *name) {
 
     struct tm t;
     time_t when = st.st_mtime;
-    gmtime_r(&when, &t);
+    localtime_r(&when, &t);
     printf(" %d-%02d-%02d %02d:%02d  %s\n", t.tm_year + 1900, t.tm_mon + 1, t.tm_mday,
            t.tm_hour, t.tm_min, name);
 }

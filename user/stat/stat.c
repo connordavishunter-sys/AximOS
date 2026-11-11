@@ -39,8 +39,8 @@ int main(int argc, char **argv) {
         time_t when = st.st_mtime;
         char date[32];
 
-        gmtime_r(&when, &t);
-        strftime(date, sizeof(date), "%Y-%m-%d %H:%M:%S UTC", &t);
+        localtime_r(&when, &t);
+        strftime(date, sizeof(date), "%Y-%m-%d %H:%M:%S %Z", &t);
 
         printf("  Name: %s\n  Type: %s\n  Size: %lu bytes", argv[i], kind_of(st.st_mode), (unsigned long)st.st_size);
         if (st.st_size >= 1024) {

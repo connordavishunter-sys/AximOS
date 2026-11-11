@@ -1,19 +1,39 @@
 #include <stdio.h>
+#include <string.h>
 #include <time.h>
 #include <unistd.h>
 
 int main(int argc, char **argv) {
-    help_option(argc, argv, "usage: date\n"
-                            "Prints the date and time in UTC.\n");
+    help_option(argc, argv, "usage: date [-u] [+format]\n"
+                            "Prints the date and time in the local time zone, or in UTC with -u. format is\n"
+                            "as strftime's, \"%a %b %e %H:%M:%S %Z %Y\" unless given.\n");
 
-    static const char *const days[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
-    static const char *const months[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
-                                         "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+    const char *format = "%a %b %e %H:%M:%S %Z %Y";
+    bool utc = false;
+
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-u") == 0) {
+            utc = true;
+        } else if (argv[i][0] == '+') {
+            format = argv[i] + 1;
+        } else {
+            dprintf(STDERR_FILENO, "date: unknown argument %s\n", argv[i]);
+            return 1;
+        }
+    }
+
     time_t now = time(NULL);
     struct tm t;
+    char text[256];
 
-    gmtime_r(&now, &t);
-    printf("%s %s %2d %02d:%02d:%02d UTC %d\n", days[t.tm_wday], months[t.tm_mon], t.tm_mday,
-           t.tm_hour, t.tm_min, t.tm_sec, t.tm_year + 1900);
+    if (utc)
+        gmtime_r(&now, &t);
+    else
+        localtime_r(&now, &t);
+    if (!strftime(text, sizeof(text), format, &t) && *format) {
+        dprintf(STDERR_FILENO, "date: format too long\n");
+        return 1;
+    }
+    puts(text);
     return 0;
 }

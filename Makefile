@@ -26,6 +26,11 @@ LIBGUI_SO := $(BUILD)/user/libgui.so
 LIBGUI_SO_OBJS := $(patsubst user/libgui/%.c,$(BUILD)/user/libgui_pic/%.o,$(wildcard user/libgui/*.c))
 GUI_PROGRAMS := wm guidemo term fbdemo
 
+# The time zones, from the host's tz database, without its copies under posix/ and
+# right/ and anything that isn't a zone.
+ZONEINFO := /usr/share/zoneinfo
+ZONES := $(BUILD)/zoneinfo
+
 # Programs from elsewhere, built by ports/build.sh.
 DASH := $(BUILD)/ports/dash-0.5.12/src/dash
 MBEDTLS := $(BUILD)/ports/mbedtls-3.6.7
@@ -140,11 +145,17 @@ $(MBEDTLS_LIBS) &: $(LIBC) $(CRT0) ports/build.sh ports/aximos-cc ports/mbedtls_
 $(DASH): $(LIBC_SO) $(CRT0) ports/build.sh ports/aximos-cc ports/dash.patch
 	ports/build.sh dash
 
-$(DISK): $(PROGRAM_ELFS) $(LIBC_SO) $(LIBGUI_SO) $(ROOTFS_FILES) $(DASH)
+$(ZONES):
+	mkdir -p $@
+	tar -C $(ZONEINFO) -chf - --exclude=./posix --exclude=./right . | tar -C $@ -xf -
+	find $@ -type f | while read -r f; do [ "$$(head -c 4 "$$f")" = TZif ] || rm "$$f"; done
+
+$(DISK): $(PROGRAM_ELFS) $(LIBC_SO) $(LIBGUI_SO) $(ROOTFS_FILES) $(DASH) | $(ZONES)
 	rm -f $@
 	mkfs.fat -F 32 -C $@ $$(($(DISK_SIZE_MB) * 1024))
 	mcopy -s -i $@ rootfs/system ::/
-	mmd -i $@ ::/system/boot ::/system/bin ::/system/lib ::/tmp
+	mmd -i $@ ::/system/boot ::/system/bin ::/system/lib ::/system/share ::/tmp
+	mcopy -s -i $@ $(ZONES) ::/system/share/
 	$(call install_stripped,$(LIBC_SO),/system/lib/libc.so)
 	$(call install_stripped,$(LIBGUI_SO),/system/lib/libgui.so)
 	$(call install_stripped,$(BUILD)/user/init.elf,/system/boot/init)
