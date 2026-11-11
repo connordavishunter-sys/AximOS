@@ -225,6 +225,12 @@ static struct vfs_mount *find_mount(const char *device, size_t len) {
     return NULL;
 }
 
+// FAT32 has no links, so names that other systems' programs expect are mapped here.
+static const char *const aliases[][2] = {
+    {"/bin/sh", "/system/bin/dash"},
+    {"/system/bin/sh", "/system/bin/dash"},
+};
+
 int vfs_lookup(const char *cwd, const char *path, struct vfs_node *node) {
     char full[PATH_MAX];
 
@@ -232,6 +238,10 @@ int vfs_lookup(const char *cwd, const char *path, struct vfs_node *node) {
         return -ENOENT;
     if (!vfs_normalize(cwd, path, full))
         return -ENAMETOOLONG;
+    for (size_t i = 0; i < sizeof aliases / sizeof *aliases; i++) {
+        if (strcmp(full, aliases[i][0]) == 0)
+            memcpy(full, aliases[i][1], strlen(aliases[i][1]) + 1);
+    }
 
     struct vfs_mount *mount = root_mount;
     const char *rest = full + 1;

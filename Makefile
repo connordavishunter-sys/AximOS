@@ -60,7 +60,7 @@ QEMU := $(QEMU_BASE) -M pc -drive file=$(DISK),format=raw,if=ide,index=0
 QEMU_Q35 := $(QEMU_BASE) -M q35 -drive file=$(DISK),format=raw,if=none,id=disk \
 	-device ide-hd,drive=disk,bus=ide.1
 
-.PHONY: all help built run run-uefi run-ide run-ide-uefi build-run clean
+.PHONY: all help built run run-uefi run-ide run-ide-uefi build-run test clean
 
 all: $(ISO) $(DISK)
 
@@ -160,6 +160,10 @@ run-ide-uefi: built
 build-run: all
 	$(QEMU_Q35)
 
+# Each tests/*_test.py boots its own VM from a snapshot, so the disk stays as it was.
+test: built
+	@for t in tests/*_test.py; do echo "== $$t"; python3 $$t || exit 1; done
+
 help:
 	@echo "make                build whatever has changed (same as make all)"
 	@echo "make run            run what's already built, using AHCI"
@@ -167,6 +171,7 @@ help:
 	@echo "make run-ide        run what's already built, using the slower IDE controller"
 	@echo "make run-ide-uefi   the same, booting with UEFI"
 	@echo "make build-run      build whatever has changed, then run"
+	@echo "make test           run the tests in tests/ against what's already built"
 	@echo "make clean          delete everything that was built"
 	@echo "make help           show this list"
 
