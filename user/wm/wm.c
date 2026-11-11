@@ -10,6 +10,7 @@
 #include <string.h>
 #include <sys/fb.h>
 #include <sys/mman.h>
+#include <sys/reboot.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -39,6 +40,7 @@
 #define MAX_APPS 32
 #define MENU_WIDTH 200
 #define ITEM_HEIGHT 24 // in the start menu and the Alt+Tab switcher
+#define MENU_GAP 9     // between the apps and the power items
 #define SWITCHER_WIDTH 360
 
 #define DESKTOP_COLOR 0x1E2430
@@ -167,17 +169,28 @@ static struct rect launcher(void) {
     return (struct rect){4, taskbar().y + 4, LAUNCHER_WIDTH, TASKBAR_HEIGHT - 8};
 }
 
-// Just above the launcher, as tall as its apps.
+// The menu's items are the apps, then these.
+static const char *const power_items[] = {"Reboot", "Shut down"};
+#define POWER_ITEMS 2
+
+static int menu_items(void) {
+    return app_count + POWER_ITEMS;
+}
+
+// Just above the launcher, as tall as its apps, with a line for "no apps" if there
+// are none.
 static struct rect menu(void) {
-    int height = (app_count ? app_count : 1) * ITEM_HEIGHT + 8;
+    int height = ((app_count ? app_count : 1) + POWER_ITEMS) * ITEM_HEIGHT + MENU_GAP + 8;
 
     return (struct rect){launcher().x, taskbar().y - height, MENU_WIDTH, height};
 }
 
 static struct rect menu_item(int index) {
     struct rect m = menu();
+    int y = index < app_count ? index * ITEM_HEIGHT
+                              : ((app_count ? app_count : 1) + index - app_count) * ITEM_HEIGHT + MENU_GAP;
 
-    return (struct rect){m.x + 4, m.y + 4 + index * ITEM_HEIGHT, m.width - 8, ITEM_HEIGHT};
+    return (struct rect){m.x + 4, m.y + 4 + y, m.width - 8, ITEM_HEIGHT};
 }
 
 // In the middle of the desktop, with every window.
@@ -193,6 +206,14 @@ static struct window *switcher_window(int index) {
 
 static bool contains(struct rect r, int x, int y) {
     return x >= r.x && y >= r.y && x < r.x + r.width && y < r.y + r.height;
+}
+
+static int menu_item_at(int x, int y) {
+    for (int i = 0; i < menu_items(); i++) {
+        if (contains(menu_item(i), x, y))
+            return i;
+    }
+    return -1;
 }
 
 static struct rect bounds(struct rect a, struct rect b) {
@@ -336,11 +357,15 @@ static void draw_item(struct gui_canvas *c, struct rect r, const char *text, boo
 }
 
 static void draw_menu(struct gui_canvas *c, int ox, int oy) {
-    draw_panel(c, menu(), ox, oy);
+    struct rect m = menu(), first_power = menu_item(app_count);
+
+    draw_panel(c, m, ox, oy);
     if (!app_count)
         draw_item(c, menu_item(0), "No apps in " APPS_DIR, false, TASKBAR_DIM_TEXT, ox, oy);
-    for (int i = 0; i < app_count; i++)
-        draw_item(c, menu_item(i), apps[i], i == menu_choice, TITLE_TEXT, ox, oy);
+    for (int i = 0; i < menu_items(); i++)
+        draw_item(c, menu_item(i), i < app_count ? apps[i] : power_items[i - app_count], i == menu_choice, TITLE_TEXT,
+                  ox, oy);
+    gui_fill(c, m.x + 8 - ox, first_power.y - MENU_GAP / 2 - 1 - oy, m.width - 16, 1, TASKBAR_LINE);
 }
 
 static void draw_switcher(struct gui_canvas *c, int ox, int oy) {
@@ -780,9 +805,11 @@ static void close_menu(void) {
     menu_open = false;
 }
 
-static void choose_app(int index) {
+static void choose(int index) {
     if (index >= 0 && index < app_count)
         launch_app(apps[index]);
+    else if (index >= app_count && index < menu_items())
+        reboot(index == app_count ? RB_AUTOBOOT : RB_POWER_OFF);
     close_menu();
 }
 
@@ -855,7 +882,7 @@ static void press(uint32_t changed) {
         bool in_menu = contains(m, cursor_x, cursor_y);
 
         if (in_menu && (changed & MOUSE_BUTTON_LEFT))
-            choose_app((cursor_y - m.y - 4) / ITEM_HEIGHT);
+            choose(menu_item_at(cursor_x, cursor_y));
         close_menu();
         if (in_menu || contains(launcher(), cursor_x, cursor_y))
             return;
@@ -928,10 +955,10 @@ static void handle_mouse(const struct mouse_event *e) {
     }
 
     // The menu highlights what's under the mouse.
-    if (menu_open && (e->dx || e->dy) && contains(menu(), cursor_x, cursor_y) && app_count) {
-        int choice = (cursor_y - menu().y - 4) / ITEM_HEIGHT;
+    if (menu_open && (e->dx || e->dy)) {
+        int choice = menu_item_at(cursor_x, cursor_y);
 
-        if (choice >= 0 && choice < app_count && choice != menu_choice) {
+        if (choice >= 0 && choice != menu_choice) {
             menu_choice = choice;
             add_damage(menu());
         }
@@ -997,11 +1024,11 @@ static bool menu_key(const struct key_event *e) {
     if (!e->pressed)
         return true;
     if (e->code == KEY_ENTER)
-        choose_app(menu_choice);
+        choose(menu_choice);
     else if (e->code == KEY_ESCAPE)
         close_menu();
-    else if (app_count) {
-        menu_choice = (menu_choice + (e->code == KEY_DOWN ? 1 : app_count - 1)) % app_count;
+    else {
+        menu_choice = (menu_choice + (e->code == KEY_DOWN ? 1 : menu_items() - 1)) % menu_items();
         add_damage(menu());
     }
     return true;

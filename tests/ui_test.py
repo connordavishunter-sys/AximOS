@@ -1,11 +1,19 @@
-"""Checks libgui's widgets through the widgets demo: buttons, checkboxes, sliders and
-text boxes, with the mouse and with the keyboard."""
+"""Checks libgui's widgets through the widgets demo: buttons, checkboxes, sliders, text
+boxes, dropdowns, lists, menus and scrolling, with the mouse and with the keyboard."""
 import re, time
 from vm import VM, check, finish
 
 # The demo's window contents start at 80, 84, and the mouse in the middle.
 LEFT, TOP = 80, 84
-BACKGROUND, ACCENT = 0x1E2129, 0x3D63DD
+BACKGROUND, ACCENT, PANEL, POPUP, FRAME = 0x1E2129, 0x3D63DD, 0x181B21, 0x2B303B, 0x2B303B
+ROW = 22 # in lists, menus and dropdowns
+
+
+def wheel(v, notches):
+    """Turns the wheel towards the user, which scrolls down, or away if negative."""
+    for _ in range(abs(notches)):
+        v.command(f'mouse_move 0 0 {-1 if notches > 0 else 1}')
+        time.sleep(0.3)
 
 
 class Pointer:
@@ -33,12 +41,15 @@ try:
     def where(name):
         return [tuple(map(int, m)) for m in re.findall(rf'widgets: at {name} (\d+) (\d+) (\d+) (\d+)', v.text())][-1]
 
-    places = {k: where(k) for k in ('count', 'reset', 'checkbox', 'slider', 'textbox')}
+    time.sleep(0.5)
+    places = {k: where(k) for k in ('count', 'reset', 'checkbox', 'slider', 'textbox', 'dropdown')}
     middle = {k: (LEFT + x + w // 2, TOP + y + h // 2) for k, (x, y, w, h) in places.items()}
     time.sleep(0.5)
 
     w, h, px = v.screenshot()
-    check('window background', px(LEFT + 370, TOP + 290) == BACKGROUND, hex(px(LEFT + 370, TOP + 290)))
+    empty = (LEFT + 300, TOP + places['count'][1] + 5) # right of the buttons
+    check('scrolling area background', px(*empty) == PANEL, hex(px(*empty)))
+    check('menu bar', px(LEFT + 300, TOP + 10) == FRAME, hex(px(LEFT + 300, TOP + 10)))
 
     at = v.mark()
     mouse.click(*middle['count']); mouse.click(*middle['count'])
@@ -74,9 +85,12 @@ try:
     v.type('Grace'); v.key('backspace'); v.key('home'); v.type('X'); v.key('end'); v.type('!')
     check('text box', v.wait('widgets: name XGrac!', 5, at), v.text(at))
 
-    # The keyboard alone: Tab from the text box goes round to Count, then on.
+    # The keyboard alone: Tab from the text box goes past the dropdown, list and
+    # notes round to Count, then on.
     at = v.mark()
-    v.key('tab'); v.key('ret'); v.key('spc')
+    for _ in range(4):
+        v.key('tab')
+    v.key('ret'); v.key('spc')
     check('Tab goes round, and Enter and Space press', v.wait('widgets: count 2', 5, at), v.text(at))
     v.key('tab'); v.key('tab'); v.key('spc')
     check('Space toggles a checkbox', v.wait('widgets: progress shown', 5, at), v.text(at))
@@ -94,12 +108,82 @@ try:
     v.key('ret'); time.sleep(0.5)
     check('clicking nowhere takes the focus', 'widgets: count' not in v.text(at), v.text(at))
 
+    # The wheel scrolls the page, three rows a notch.
+    before = where('dropdown')[1]
+    mouse.to(LEFT + 300, TOP + 200)
+    wheel(v, 1); time.sleep(0.5)
+    check('the wheel scrolls', where('dropdown')[1] == before - 3 * ROW, (before, where('dropdown')))
+
+    # A dropdown's list opens under it, over what's there.
+    x, y, w_, h_ = where('dropdown')
+    at = v.mark()
+    mouse.click(LEFT + x + 50, TOP + y + 13)
+    time.sleep(0.5)
+    w, h, px = v.screenshot()
+    first = TOP + y + h_ + 4 + ROW // 2
+    check('a dropdown opens', px(LEFT + x + 200, first + ROW) == POPUP, hex(px(LEFT + x + 200, first + ROW)))
+    mouse.click(LEFT + x + 50, first + 2 * ROW)
+    check('choosing from it', v.wait('widgets: theme Solarized', 5, at), v.text(at))
+    time.sleep(0.5)
+    w, h, px = v.screenshot()
+    check('closes it', px(LEFT + x + 200, first + ROW) != POPUP, hex(px(LEFT + x + 200, first + ROW)))
+    v.key('down')
+    check('Down picks the next', v.wait('widgets: theme Nord', 5, at), v.text(at))
+
+    # Rows in the list are chosen with the mouse, and the keys, and it has a wheel of its own.
+    x, y, w_, h_ = where('list')
+    row = lambda i: TOP + y + 2 + i * ROW + ROW // 2
+    at = v.mark()
+    mouse.click(LEFT + x + 50, row(1))
+    check('clicking a row in a list', v.wait('widgets: fruit Apricot', 5, at), v.text(at))
+    v.key('end')
+    check('End goes to the last', v.wait('widgets: fruit Plum', 5, at), v.text(at))
+    v.key('home')
+    check('Home to the first', v.wait('widgets: fruit Apple', 5, at), v.text(at))
+    at = v.mark()
+    wheel(v, 1); time.sleep(0.5)
+    check('the wheel over a list scrolls only the list', 'widgets: at list' not in v.text(at), v.text(at))
+    mouse.click(LEFT + x + 50, row(0))
+    check('by three rows', v.wait('widgets: fruit Blackberry', 5, at), v.text(at))
+
+    # Notes take several lines, and Up goes to the one above. They're further down.
+    mouse.to(LEFT + 300, TOP + 60)
+    wheel(v, 2); time.sleep(0.5)
+    x, y, w_, h_ = where('notes')
+    at = v.mark()
+    mouse.click(LEFT + x + 50, TOP + y + 20)
+    v.type('ab'); v.key('ret'); v.type('cd'); v.key('up'); v.type('X')
+    check('text of several lines', v.wait('widgets: notes abX|cd', 5, at), v.text(at))
+
+    at = v.mark()
+    mouse.to(LEFT + 300, TOP + 60)
+    wheel(v, -3); time.sleep(0.5)
+    check('and scrolling back up', where('dropdown')[1] == places['dropdown'][1],
+          (where('dropdown'), v.text(at)))
+
+    # Menus open on a press, and moving to another opens that one instead.
+    at = v.mark()
+    mouse.click(LEFT + 20, TOP + 13)
+    time.sleep(0.5)
+    w, h, px = v.screenshot()
+    check('a menu opens', px(LEFT + 150, TOP + 42) == POPUP, hex(px(LEFT + 150, TOP + 42)))
+    v.key('esc'); time.sleep(0.5)
+    w, h, px = v.screenshot()
+    check('Escape closes it', px(LEFT + 150, TOP + 42) == PANEL, hex(px(LEFT + 150, TOP + 42)))
+    mouse.click(LEFT + 20, TOP + 13)
+    mouse.click(LEFT + 60, TOP + 31 + ROW // 2)
+    check('a menu item', v.wait('widgets: count 0', 5, at), v.text(at))
+    mouse.click(LEFT + 20, TOP + 13)
+    mouse.to(LEFT + 76, TOP + 13)
+    mouse.click(LEFT + 100, TOP + 31 + ROW // 2)
+    check("another menu's item", v.wait('widgets: progress hidden', 5, at), v.text(at))
+
     # Wider, the slider and text box stretch.
     at = v.mark()
     v.key('meta_l-up'); time.sleep(1)
     w, h, px = v.screenshot()
-    check('widgets stretch when maximized', px(1200, 25 + places['slider'][1] + 11) != BACKGROUND,
-          hex(px(1200, 25 + places['slider'][1] + 11)))
+    check('widgets stretch when maximized', px(1150, 25 + places['slider'][1] + 11) != PANEL,
+          hex(px(1150, 25 + places['slider'][1] + 11)))
 finally:
     v.close()
 finish()

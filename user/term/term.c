@@ -19,6 +19,8 @@
 #define TAB_WIDTH 8
 #define MAX_PARAMS 8
 #define PARAM_HIDE_CURSOR 25
+#define SCROLLBACK 1000 // lines kept after scrolling off the top
+#define WHEEL_LINES 3
 
 // The console's colours, then the defaults, which aren't any of them.
 #define BRIGHT 8
@@ -37,7 +39,12 @@ struct cell {
 
 static struct gui_window *window;
 static struct cell cells[MAX_ROWS][MAX_COLS];
-static bool dirty[MAX_ROWS];
+static bool dirty[MAX_ROWS]; // rows of the screen to draw again
+
+// Lines that scrolled off the top, oldest first from history_start, and how many
+// of them the view is scrolled back by.
+static struct cell history[SCROLLBACK][MAX_COLS];
+static int history_start, history_count, view;
 static int cols = COLS, rows = ROWS;
 static int row, col;
 static bool cursor_hidden, focused;
@@ -61,15 +68,42 @@ static void clear_cells(int r, int from, int to) {
     dirty[r] = true;
 }
 
+static struct cell *history_line(int i) {
+    return history[(history_start + i) % SCROLLBACK];
+}
+
+static void mark_all_dirty(void) {
+    for (int r = 0; r < rows; r++)
+        dirty[r] = true;
+}
+
+// Keeps a line leaving the top of the screen, losing the oldest when full. A view
+// scrolled back stays on the lines it shows.
+static void keep_line(const struct cell *line) {
+    struct cell *to = history_line(history_count);
+
+    if (history_count < SCROLLBACK)
+        history_count++;
+    else
+        history_start = (history_start + 1) % SCROLLBACK;
+    memcpy(to, line, cols * sizeof(*line));
+    for (int c = cols; c < MAX_COLS; c++)
+        to[c] = (struct cell){' ', DEFAULT_FOREGROUND, DEFAULT_BACKGROUND};
+    if (view) {
+        view = view < history_count ? view + 1 : history_count;
+        mark_all_dirty();
+    }
+}
+
 static void new_line(void) {
     col = 0;
     if (++row < rows)
         return;
     row = rows - 1;
+    keep_line(cells[0]);
     memmove(cells[0], cells[1], (rows - 1) * sizeof(cells[0]));
     clear_cells(rows - 1, 0, cols);
-    for (int r = 0; r < rows; r++)
-        dirty[r] = true;
+    mark_all_dirty();
 }
 
 static int clamp(int value, int low, int high) {
@@ -225,9 +259,16 @@ static void put_byte(char c) {
     }
 }
 
+// What's shown on row r of the window, which is in the scrollback when scrolled back.
+static const struct cell *shown_line(int r) {
+    int line = history_count - view + r;
+
+    return line < history_count ? history_line(line) : cells[line - history_count];
+}
+
 static void draw_cell(int r, int c) {
-    struct cell cell = cells[r][c];
-    bool cursor = r == row && c == col && !cursor_hidden;
+    struct cell cell = shown_line(r)[c];
+    bool cursor = r - view == row && c == col && !cursor_hidden;
     uint32_t fg = palette[cell.foreground], bg = palette[cell.background];
     int x = PADDING + c * CELL_WIDTH, y = PADDING + r * CELL_HEIGHT;
 
@@ -252,9 +293,29 @@ static void draw_cell(int r, int c) {
     }
 }
 
+// A thumb in the right margin while scrolled back, showing where.
+static void draw_scrollbar(void) {
+    int x = window->canvas.width - PADDING, height = window->canvas.height, total = history_count + rows;
+
+    gui_fill(&window->canvas, x, 0, PADDING, height, palette[DEFAULT_BACKGROUND]);
+    if (view)
+        gui_fill(&window->canvas, x + 1, (history_count - view) * height / total, PADDING - 2, rows * height / total,
+                 palette[BRIGHT]);
+    gui_update(window, x, 0, PADDING, height);
+}
+
 static void draw(void) {
+    static int drawn_view;
     int first = rows, last = -1;
 
+    // Changes on the screen move about the window while scrolled back.
+    for (int r = 0; view && r < rows; r++) {
+        if (dirty[r])
+            mark_all_dirty();
+    }
+    if (view != drawn_view || (view && dirty[0]))
+        draw_scrollbar();
+    drawn_view = view;
     for (int r = 0; r < rows; r++) {
         if (!dirty[r])
             continue;
@@ -282,7 +343,8 @@ static void write_all(int fd, const char *s, size_t len) {
 }
 
 // What a key sends, as the console's keyboard would. Alt adds an escape first.
-static void send_key(int master, const struct key_event *key) {
+// Returns whether it sent anything.
+static bool send_key(int master, const struct key_event *key) {
     const char *sequence = NULL;
     char text = key->text;
 
@@ -305,12 +367,17 @@ static void send_key(int master, const struct key_event *key) {
             write_all(master, "\x1b", 1);
         write_all(master, &text, 1);
     }
+    return sequence || text;
+}
+
+static void scroll_view(int lines) {
+    view = clamp(view + lines, 0, history_count);
+    mark_all_dirty();
 }
 
 static void paint_background(void) {
     gui_fill(&window->canvas, 0, 0, window->canvas.width, window->canvas.height, palette[DEFAULT_BACKGROUND]);
-    for (int r = 0; r < rows; r++)
-        dirty[r] = true;
+    mark_all_dirty();
 }
 
 // Fits as many cells as the new size holds, keeping the cursor's line on the
@@ -323,6 +390,8 @@ static void resize(int master, int width, int height) {
     if (!gui_resize(window, width, height))
         return;
     if (lost > 0) {
+        for (int r = 0; r < lost; r++)
+            keep_line(cells[r]);
         memmove(cells[0], cells[lost], (rows - lost) * sizeof(cells[0]));
         row -= lost;
     }
@@ -337,6 +406,7 @@ static void resize(int master, int width, int height) {
     cols = new_cols;
     rows = new_rows;
     col = clamp(col, 0, cols - 1);
+    view = clamp(view, 0, history_count);
 
     struct winsize size = {.ws_row = rows, .ws_col = cols, .ws_xpixel = cols * CELL_WIDTH, .ws_ypixel = rows * CELL_HEIGHT};
 
@@ -414,8 +484,18 @@ int main(int argc, char **argv) {
         struct gui_message e;
 
         if ((fds[0].revents & (POLLIN | POLLHUP)) && gui_next_event(&e)) {
-            if (e.type == GUI_KEY && e.key.pressed) {
-                send_key(master, &e.key);
+            bool shifted = e.key.modifiers & KEY_MOD_SHIFT;
+
+            // Shift+Page Up and Page Down scroll back and forth, and other keys go
+            // to the bottom as they go to the terminal.
+            if (e.type == GUI_KEY && e.key.pressed && shifted
+                && (e.key.code == KEY_PAGE_UP || e.key.code == KEY_PAGE_DOWN)) {
+                scroll_view((e.key.code == KEY_PAGE_UP ? 1 : -1) * (rows > 1 ? rows - 1 : 1));
+            } else if (e.type == GUI_KEY && e.key.pressed) {
+                if (send_key(master, &e.key) && view)
+                    scroll_view(-view);
+            } else if (e.type == GUI_MOUSE_WHEEL) {
+                scroll_view(-e.wheel * WHEEL_LINES);
             } else if (e.type == GUI_FOCUS) {
                 focused = e.focused;
                 dirty[row] = true;

@@ -115,8 +115,7 @@ struct gui_window *gui_create_window(const char *title, int width, int height) {
         }
         if (message.type == GUI_CREATED)
             break;
-        if (queue_count < QUEUE_SIZE)
-            queue[(queue_head + queue_count++) % QUEUE_SIZE] = message;
+        gui_post(&message);
     }
     munmap(shown, canvas_size(&window->canvas));
     free(window->canvas.pixels);
@@ -192,6 +191,11 @@ void gui_update(struct gui_window *window, int x, int y, int width, int height) 
 
 void gui_show(struct gui_window *window) {
     gui_update(window, 0, 0, window->canvas.width, window->canvas.height);
+}
+
+void gui_post(const struct gui_message *event) {
+    if (queue_count < QUEUE_SIZE)
+        queue[(queue_head + queue_count++) % QUEUE_SIZE] = *event;
 }
 
 bool gui_next_event(struct gui_message *event) {

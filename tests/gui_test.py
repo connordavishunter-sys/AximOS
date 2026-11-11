@@ -162,8 +162,8 @@ try:
     check('shown again', px(1000, 400) == PAPER, hex(px(1000, 400)))
 
     # The menu lists /system/bin/gui above the launcher, 24 pixels an app: fbdemo,
-    # guidemo, term, widgets.
-    menu_top = bar - 4 * 24 - 8
+    # guidemo, term, widgets. Then a line, Reboot and Shut down.
+    menu_top = bar - 6 * 24 - 9 - 8
     mouse.click(36, bar + 14)
     time.sleep(0.5)
     w, h, px = v.screenshot()
@@ -197,8 +197,9 @@ try:
     w, h, px = v.screenshot()
     check('the switched to window comes to the top', px(1000, 400) == PAPER, hex(px(1000, 400)))
 
-    v.key('meta_l-shift-q')
-    o = v.run('echo back'); check('quits', '\nback\n' in o, o)
+    # Up from the first item goes round to the last, Shut down.
+    v.key('meta_l'); time.sleep(0.3); v.key('up'); v.key('ret')
+    check('Shut down in the menu turns the computer off', v.exited(15), v.text()[-300:])
 finally:
     v.close()
 finish()

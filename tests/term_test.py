@@ -98,6 +98,26 @@ try:
     lines = wait_screen(v, 'line40')
     check('scrolls', lines[23] == 'line40' and lines[22] == 'line39' and lines[24].startswith('/$'), '\n'.join(lines))
 
+    # What scrolled off since clear is kept: Shift+Page Up goes back a screen less a
+    # line, which is all of it, and the wheel goes three lines at a time.
+    v.key('shift-pgup'); time.sleep(0.5)
+    back = screen_text(v)
+    check('Shift+Page Up scrolls back', back[0] == 'cleared' and back[2] == 'line1', '\n'.join(back))
+    w, h, px = v.screenshot()
+    check('with a thumb in the margin', any(px(LEFT + 80 * 8 + 1, y) == 0x666666 for y in range(TOP, TOP + 400)),
+          'no thumb')
+    v.mouse(-800, -500)
+    v.command('mouse_move 0 0 -1'); time.sleep(0.3)
+    v.mouse(800, 500); time.sleep(0.3)
+    later = screen_text(v)
+    check('the wheel scrolls forward', later[0] == back[3], '\n'.join(later))
+    v.key('shift-pgdn'); time.sleep(0.5)
+    check('Shift+Page Down to the bottom', screen_text(v) == lines, '\n'.join(screen_text(v)))
+    v.key('shift-pgup'); time.sleep(0.3)
+    v.type('echo back\n')
+    lines = wait_screen(v, 'back')
+    check('typing goes back to the bottom', lines[23] == 'back' and 'line1' not in lines, '\n'.join(lines))
+
     # Maximized, it fills the screen above the taskbar, from 1, 25, and tells the
     # program running in it.
     v.type('clear; winsize -w\n'); time.sleep(1)

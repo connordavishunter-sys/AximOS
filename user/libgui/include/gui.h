@@ -29,6 +29,9 @@ enum gui_message_type {
     GUI_FOCUS,        // focused is whether the window now has the keyboard
     GUI_CLOSE,        // the close button was clicked, or Super+Q pressed
     GUI_RESIZE,       // width and height wm would like the window to be
+
+    // From libgui itself, through gui_post: draw the window again.
+    GUI_REDRAW,
 };
 
 struct gui_message {
@@ -86,6 +89,9 @@ void gui_show(struct gui_window *window);
 // Waits for the next event, returning false when wm has gone.
 bool gui_next_event(struct gui_message *event);
 
+// Puts an event at the end of those gui_next_event gives, as if it came from wm.
+void gui_post(const struct gui_message *event);
+
 // Reads or writes one whole message on a connection, for wm.
 bool gui_receive(int fd, struct gui_message *message);
 bool gui_send(int fd, const struct gui_message *message);
@@ -126,6 +132,22 @@ struct gui_rect {
 
 #define GUI_UI_MAX_KEYS 16
 #define GUI_UI_MAX_FOCUSABLE 64
+#define GUI_UI_MAX_SCROLLS 16
+#define GUI_UI_MAX_DEPTH 4
+
+// Where widgets go: across from left to right, and down from y, inside clip.
+struct gui_layout {
+    int left, right;
+    int x, y, line_height, line_end;
+    bool same_line;
+    struct gui_rect clip;
+};
+
+// How far down something scrolling is, and how tall what's in it was last frame.
+struct gui_scroll {
+    uint32_t id;
+    int offset, content;
+};
 
 struct gui_ui {
     struct gui_window *window;
@@ -134,24 +156,46 @@ struct gui_ui {
     // This frame's input.
     int mouse_x, mouse_y;
     bool mouse_down, mouse_pressed, mouse_released;
+    int wheel;
     struct key_event keys[GUI_UI_MAX_KEYS];
     int key_count;
 
     // Widgets by the hash of their label: under the mouse, being pressed or
     // dragged, and with the keyboard.
     uint32_t hot, active, focus;
-    size_t text_cursor;   // in the text box that last had the keyboard
+    size_t text_cursor; // in the text box that last had the keyboard
     uint32_t text_owner;
+    int drag_offset; // from the top of a scroll bar's thumb to the mouse
 
     // The widgets that can have the keyboard, in order, as of the last frame and
     // so far in this one, for Tab and Shift+Tab.
     uint32_t order[GUI_UI_MAX_FOCUSABLE], next_order[GUI_UI_MAX_FOCUSABLE];
     int order_count, next_count;
 
-    // Where the next widget goes.
-    int x, y, line_height, line_end;
-    bool same_line;
+    // What scrolls, and which of it was innermost under the mouse last frame, so
+    // gets the wheel.
+    struct gui_scroll scrolls[GUI_UI_MAX_SCROLLS];
+    uint32_t wheel_owner, next_wheel_owner;
+
+    // The open dropdown or menu, which is drawn over everything else, and gets
+    // the mouse when it's over it.
+    uint32_t popup;
+    bool popup_is_menu, popup_drawn, in_popup, mouse_in_popup;
+    struct gui_rect popup_rect, outside_popup;
+    uint32_t *popup_pixels;
+    int item_y, bar_x;
+
+    // Where the next widget goes, with what it was before each scrolling area.
+    struct gui_layout layout;
+    struct {
+        struct gui_layout layout;
+        struct gui_rect area;
+        uint32_t id;
+        int top;
+    } saved[GUI_UI_MAX_DEPTH];
+    int depth;
     struct gui_rect last;
+    bool again; // something changed that was already drawn
 };
 
 void gui_ui_init(struct gui_ui *ui, struct gui_window *window);
@@ -180,3 +224,28 @@ bool gui_button(struct gui_ui *ui, const char *label);
 bool gui_checkbox(struct gui_ui *ui, const char *label, bool *value);
 bool gui_slider(struct gui_ui *ui, const char *label, int *value, int min, int max);
 bool gui_textbox(struct gui_ui *ui, const char *label, char *text, size_t size);
+
+// Text of several lines, lines tall, scrolling to keep the cursor in sight. Enter
+// starts a new line.
+bool gui_textarea(struct gui_ui *ui, const char *label, char *text, size_t size, int lines);
+
+// Picks one of count items, shown when clicked in a list under it. Up and Down
+// change it without opening the list.
+bool gui_dropdown(struct gui_ui *ui, const char *label, const char *const *items, int count, int *selected);
+
+// All of count items in a list rows tall, which scrolls, with selected highlighted.
+bool gui_list(struct gui_ui *ui, const char *label, const char *const *items, int count, int *selected, int rows);
+
+// A bar of menus across the top, which goes first in a frame. Each gui_menu that
+// returns true is open, and has its items next, then gui_menu_end. An item returns
+// true when it's chosen.
+void gui_menu_bar(struct gui_ui *ui);
+bool gui_menu(struct gui_ui *ui, const char *label);
+bool gui_menu_item(struct gui_ui *ui, const char *label);
+void gui_menu_end(struct gui_ui *ui);
+
+// The widgets between these go in an area height tall, or down to the bottom of
+// the window if height is 0, which the wheel and a scroll bar scroll when they
+// don't fit. Areas can go inside each other, GUI_UI_MAX_DEPTH deep.
+void gui_scroll_begin(struct gui_ui *ui, const char *label, int height);
+void gui_scroll_end(struct gui_ui *ui);
