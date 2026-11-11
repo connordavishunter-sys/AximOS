@@ -21,14 +21,19 @@ LIBC_OBJS := $(filter-out $(CRT0) $(BUILD)/user/libc/ld.o,$(patsubst user/%,$(BU
 LIBC_SO := $(BUILD)/user/libc.so
 LIBC_SO_OBJS := $(patsubst user/libc/%,$(BUILD)/user/libc_pic/%.o,$(basename $(filter-out user/libc/crt0.S,$(wildcard user/libc/*.c user/libc/*.S))))
 
+# /system/lib/libgui.so, for programs with windows, which GUI_PROGRAMS are linked against.
+LIBGUI_SO := $(BUILD)/user/libgui.so
+LIBGUI_SO_OBJS := $(patsubst user/libgui/%.c,$(BUILD)/user/libgui_pic/%.o,$(wildcard user/libgui/*.c))
+GUI_PROGRAMS := wm guidemo
+
 # Programs from elsewhere, built by ports/build.sh.
 DASH := $(BUILD)/ports/dash-0.5.12/src/dash
 MBEDTLS := $(BUILD)/ports/mbedtls-3.6.7
 MBEDTLS_LIBS := $(MBEDTLS)/library/libmbedtls.a $(MBEDTLS)/library/libmbedx509.a $(MBEDTLS)/library/libmbedcrypto.a
 
-# Every folder in user/ but libc is a program. init goes in /system/boot and
+# Every folder in user/ but the libraries is a program. init goes in /system/boot and
 # the others in /system/bin. rootfs/ is copied onto the disk as it is.
-PROGRAMS := $(filter-out libc,$(notdir $(wildcard user/*)))
+PROGRAMS := $(filter-out libc libgui,$(notdir $(wildcard user/*)))
 PROGRAM_ELFS := $(PROGRAMS:%=$(BUILD)/user/%.elf)
 PROGRAM_OBJS := $(patsubst user/%.c,$(BUILD)/user/%.o,$(foreach p,$(PROGRAMS),$(wildcard user/$(p)/*.c)))
 ROOTFS_FILES := $(shell find rootfs -type f)
@@ -45,7 +50,7 @@ CFLAGS := $(BASE_CFLAGS) -Iinclude -Iabi -mcmodel=kernel -mno-80387 -mno-mmx -mn
 # whatever a program doesn't use. build/ keeps debug info and the disk gets it stripped.
 USER_CFLAGS := $(BASE_CFLAGS) -Os -fno-asynchronous-unwind-tables -fno-unwind-tables \
 	-ffunction-sections -fdata-sections -nostdinc -isystem $(shell $(CC) -print-file-name=include) \
-	-Iuser/libc/include -Iabi
+	-Iuser/libc/include -Iuser/libgui/include -Iabi
 LDFLAGS := -m elf_x86_64 -nostdlib -static -z max-page-size=0x1000 -z noexecstack
 USER_LDFLAGS := -m elf_x86_64 -nostdlib -z max-page-size=0x1000 -z noexecstack --gc-sections -z noseparate-code \
 	-Ttext-segment=0x400000 -e _start
@@ -98,6 +103,13 @@ $(BUILD)/user/libc_pic/%.o: user/libc/%.S
 $(LIBC_SO): $(LIBC_SO_OBJS)
 	$(LD) $(LIBC_SO_LDFLAGS) $^ -o $@
 
+$(BUILD)/user/libgui_pic/%.o: user/libgui/%.c
+	@mkdir -p $(@D)
+	$(CC) $(filter-out -fno-pic -fno-pie,$(USER_CFLAGS)) -fPIC -c $< -o $@
+
+$(LIBGUI_SO): $(LIBGUI_SO_OBJS) $(LIBC_SO)
+	$(LD) -m elf_x86_64 -nostdlib -shared --hash-style=sysv -soname libgui.so -z noexecstack $^ -o $@
+
 $(KERNEL): $(OBJS) src/linker.ld
 	$(LD) $(LDFLAGS) -T src/linker.ld $(OBJS) -o $@
 
@@ -112,6 +124,7 @@ $(BUILD)/user/$(1).elf: $(CRT0) $(patsubst user/%.c,$(BUILD)/user/%.o,$(wildcard
 	$$(LD) $$(USER_LDFLAGS) $$(DYNAMIC_LDFLAGS) $$+ -o $$@
 endef
 $(foreach p,$(filter-out init,$(PROGRAMS)),$(eval $(call PROGRAM,$(p))))
+$(GUI_PROGRAMS:%=$(BUILD)/user/%.elf): $(LIBGUI_SO)
 
 $(BUILD)/user/init.elf: $(CRT0) $(patsubst user/%.c,$(BUILD)/user/%.o,$(wildcard user/init/*.c)) $(LIBC)
 	$(LD) $(USER_LDFLAGS) -static $+ -o $@
@@ -127,12 +140,13 @@ $(MBEDTLS_LIBS) &: $(LIBC) $(CRT0) ports/build.sh ports/aximos-cc ports/mbedtls_
 $(DASH): $(LIBC_SO) $(CRT0) ports/build.sh ports/aximos-cc ports/dash.patch
 	ports/build.sh dash
 
-$(DISK): $(PROGRAM_ELFS) $(LIBC_SO) $(ROOTFS_FILES) $(DASH)
+$(DISK): $(PROGRAM_ELFS) $(LIBC_SO) $(LIBGUI_SO) $(ROOTFS_FILES) $(DASH)
 	rm -f $@
 	mkfs.fat -F 32 -C $@ $$(($(DISK_SIZE_MB) * 1024))
 	mcopy -s -i $@ rootfs/system ::/
 	mmd -i $@ ::/system/boot ::/system/bin ::/system/lib ::/tmp
 	$(call install_stripped,$(LIBC_SO),/system/lib/libc.so)
+	$(call install_stripped,$(LIBGUI_SO),/system/lib/libgui.so)
 	$(call install_stripped,$(BUILD)/user/init.elf,/system/boot/init)
 	for p in $(filter-out init,$(PROGRAMS)); do $(call install_stripped,$(BUILD)/user/$$p.elf,/system/bin/$$p); done
 	$(call install_stripped,$(DASH),/system/bin/dash)
@@ -191,4 +205,4 @@ help:
 clean:
 	rm -rf $(BUILD)
 
--include $(OBJS:.o=.d) $(LIBC_OBJS:.o=.d) $(PROGRAM_OBJS:.o=.d) $(CRT0:.o=.d)
+-include $(OBJS:.o=.d) $(LIBC_OBJS:.o=.d) $(LIBGUI_SO_OBJS:.o=.d) $(PROGRAM_OBJS:.o=.d) $(CRT0:.o=.d)

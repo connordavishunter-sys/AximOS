@@ -18,6 +18,7 @@ struct vfs_mount;
 enum vfs_device {
     VFS_DEVICE_NONE,
     VFS_DEVICE_MOUSE,
+    VFS_DEVICE_KEYBOARD,
     VFS_DEVICE_FB,
     VFS_DEVICE_NULL,
     VFS_DEVICE_ZERO,

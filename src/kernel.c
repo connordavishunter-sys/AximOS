@@ -68,6 +68,7 @@ void _start(void) {
         irq_enable_isa(IRQ_MOUSE);
         vfs_add_device(VFS_DEVICE_MOUSE);
     }
+    vfs_add_device(VFS_DEVICE_KEYBOARD);
     vfs_add_device(VFS_DEVICE_NULL);
     vfs_add_device(VFS_DEVICE_ZERO);
     vfs_add_device(VFS_DEVICE_TTY);

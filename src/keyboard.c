@@ -1,7 +1,10 @@
+#include <errno_values.h>
 #include <io.h>
+#include <key_event.h>
 #include <keyboard.h>
 #include <mouse.h>
 #include <process.h>
+#include <string.h>
 #include <tty.h>
 #include <stdint.h>
 
@@ -23,12 +26,9 @@
 
 #define SC_RELEASED 0x80
 #define SC_EXTENDED 0xE0
-#define SC_LSHIFT 0x2A
-#define SC_RSHIFT 0x36
-#define SC_CTRL 0x1D
-#define SC_CAPS 0x3A
 
 #define BUFFER_SIZE 4096
+#define EVENT_COUNT 256
 #define CTRL_C 0x03
 
 // Scancode set 1. The keypad acts as if num lock were always on.
@@ -53,9 +53,14 @@ static const char keymap_shift[] = {
 static char buffer[BUFFER_SIZE];
 static size_t head;
 static size_t count;
-static bool shift;
-static bool ctrl;
-static bool caps;
+
+// For /dev/keyboard, which takes every key while it's open.
+static struct key_event events[EVENT_COUNT];
+static size_t events_head;
+static size_t events_count;
+static bool events_open;
+
+static uint8_t modifiers;
 static bool extended;
 
 static void wait_input_empty(void) {
@@ -113,56 +118,84 @@ static void push(const char *bytes, size_t len) {
     process_wakeup(buffer);
 }
 
-static void handle_extended(uint8_t scancode) {
-    switch (scancode) {
-    case SC_CTRL:
-        ctrl = true;
+static void update_modifiers(uint16_t code, bool pressed) {
+    uint8_t bit = 0;
+
+    switch (code) {
+    case KEY_LEFT_SHIFT:
+    case KEY_RIGHT_SHIFT:
+        bit = KEY_MOD_SHIFT;
         break;
-    case SC_CTRL | SC_RELEASED:
-        ctrl = false;
+    case KEY_LEFT_CTRL:
+    case KEY_RIGHT_CTRL:
+        bit = KEY_MOD_CTRL;
         break;
-    case 0x48:
-        push("\x1b[A", 3);
+    case KEY_LEFT_ALT:
+    case KEY_RIGHT_ALT:
+        bit = KEY_MOD_ALT;
         break;
-    case 0x50:
-        push("\x1b[B", 3);
+    case KEY_LEFT_SUPER:
+    case KEY_RIGHT_SUPER:
+        bit = KEY_MOD_SUPER;
         break;
-    case 0x4D:
-        push("\x1b[C", 3);
-        break;
-    case 0x4B:
-        push("\x1b[D", 3);
-        break;
-    case 0x47:
-        push("\x1b[H", 3);
-        break;
-    case 0x4F:
-        push("\x1b[F", 3);
-        break;
-    case 0x53:
-        push("\x1b[3~", 4);
-        break;
-    case 0x1C:
-        push("\r", 1);
-        break;
-    case 0x35:
-        push("/", 1);
-        break;
+    case KEY_CAPS_LOCK:
+        if (pressed)
+            modifiers ^= KEY_MOD_CAPS_LOCK;
+        return;
     }
+    modifiers = pressed ? modifiers | bit : modifiers & ~bit;
 }
 
-static void handle_key(uint8_t scancode) {
-    if (scancode >= sizeof(keymap))
-        return;
+// The character a key types with the modifiers held now, or 0.
+static char key_text(uint16_t code) {
+    if (code == KEY_EXTENDED + KEY_ENTER)
+        return '\r';
+    if (code == (KEY_EXTENDED | 0x35))
+        return '/';
+    if (code >= sizeof(keymap))
+        return 0;
 
-    char c = shift ? keymap_shift[scancode] : keymap[scancode];
+    char c = modifiers & KEY_MOD_SHIFT ? keymap_shift[code] : keymap[code];
+    bool letter = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+
+    if (letter && (modifiers & KEY_MOD_CAPS_LOCK))
+        c ^= 0x20;
+    if (letter && (modifiers & KEY_MOD_CTRL))
+        c &= 0x1F;
+    return c;
+}
+
+// What the console gets for keys that type nothing themselves.
+static const char *key_sequence(uint16_t code) {
+    switch (code) {
+    case KEY_UP:
+        return "\x1b[A";
+    case KEY_DOWN:
+        return "\x1b[B";
+    case KEY_RIGHT:
+        return "\x1b[C";
+    case KEY_LEFT:
+        return "\x1b[D";
+    case KEY_HOME:
+        return "\x1b[H";
+    case KEY_END:
+        return "\x1b[F";
+    case KEY_DELETE:
+        return "\x1b[3~";
+    }
+    return NULL;
+}
+
+static void to_console(uint16_t code) {
+    const char *sequence = key_sequence(code);
+    char c = key_text(code);
+
+    if (sequence) {
+        push(sequence, strlen(sequence));
+        return;
+    }
     if (c == 0)
         return;
-
-    if (caps && ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')))
-        c ^= 0x20;
-    if (ctrl && ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')))
-        c &= 0x1F;
 
     // With nothing in the foreground, Ctrl+C reaches the shell like any other key.
     if (c == CTRL_C && tty_signals_enabled() && process_interrupt_foreground()) {
@@ -172,38 +205,30 @@ static void handle_key(uint8_t scancode) {
     push(&c, 1);
 }
 
-static void handle_scancode(uint8_t scancode) {
-    if (scancode == SC_EXTENDED) {
+static void handle_scancode(uint8_t byte) {
+    if (byte == SC_EXTENDED) {
         extended = true;
         return;
     }
-    if (extended) {
-        extended = false;
-        handle_extended(scancode);
-        return;
-    }
 
-    switch (scancode) {
-    case SC_LSHIFT:
-    case SC_RSHIFT:
-        shift = true;
-        break;
-    case SC_LSHIFT | SC_RELEASED:
-    case SC_RSHIFT | SC_RELEASED:
-        shift = false;
-        break;
-    case SC_CTRL:
-        ctrl = true;
-        break;
-    case SC_CTRL | SC_RELEASED:
-        ctrl = false;
-        break;
-    case SC_CAPS:
-        caps = !caps;
-        break;
-    default:
-        if (!(scancode & SC_RELEASED))
-            handle_key(scancode);
+    uint16_t code = (byte & ~SC_RELEASED) | (extended ? KEY_EXTENDED : 0);
+    bool pressed = !(byte & SC_RELEASED);
+
+    extended = false;
+    // Some keys come wrapped in a fake shift, which isn't a key at all.
+    if (code == (KEY_EXTENDED | KEY_LEFT_SHIFT) || code == (KEY_EXTENDED | KEY_RIGHT_SHIFT))
+        return;
+
+    update_modifiers(code, pressed);
+    if (events_open) {
+        if (events_count < EVENT_COUNT) {
+            events[(events_head + events_count++) % EVENT_COUNT] = (struct key_event){
+                .code = code, .pressed = pressed, .modifiers = modifiers, .text = pressed ? key_text(code) : 0,
+            };
+            process_wakeup(events);
+        }
+    } else if (pressed) {
+        to_console(code);
     }
 }
 
@@ -231,4 +256,44 @@ size_t keyboard_read(char *buf, size_t len) {
         count--;
     }
     return copied;
+}
+
+int keyboard_open_events(void) {
+    if (events_open)
+        return -EBUSY;
+    events_open = true;
+    events_count = 0;
+    return 0;
+}
+
+void keyboard_close_events(void) {
+    events_open = false;
+}
+
+bool keyboard_events_readable(void) {
+    return events_count > 0;
+}
+
+int64_t keyboard_read_events(void *buf, size_t len, bool nonblocking) {
+    size_t capacity = len / sizeof(struct key_event);
+
+    if (capacity == 0)
+        return -EINVAL;
+
+    while (events_count == 0) {
+        if (nonblocking)
+            return -EAGAIN;
+        if (!process_sleep(events))
+            return -EINTR;
+    }
+
+    struct key_event *out = buf;
+    size_t copied = 0;
+
+    while (copied < capacity && events_count > 0) {
+        out[copied++] = events[events_head];
+        events_head = (events_head + 1) % EVENT_COUNT;
+        events_count--;
+    }
+    return copied * sizeof(struct key_event);
 }

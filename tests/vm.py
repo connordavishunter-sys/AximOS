@@ -110,13 +110,42 @@ class VM:
             time.sleep(0.05)
         return False
 
-    def key(self, name):
-        self.monitor.sendall(f'sendkey {name}\n'.encode())
+    def command(self, line):
+        """Runs a QEMU monitor command, without waiting for it to finish."""
+        self.monitor.sendall(line.encode() + b'\n')
         try:
             while self.monitor.recv(4096):
                 pass
         except socket.timeout:
             pass
+
+    def key(self, name):
+        self.command(f'sendkey {name}')
+
+    def mouse(self, dx=0, dy=0, buttons=None):
+        """Moves the mouse by dx, dy, then sets which buttons are held (1 left, 2 right, 4 middle)."""
+        if dx or dy:
+            self.command(f'mouse_move {dx} {dy}')
+        if buttons is not None:
+            self.command(f'mouse_button {buttons}')
+        time.sleep(0.2)
+
+    def screenshot(self):
+        """Returns the screen as (width, height, pixel(x, y) giving 0xRRGGBB)."""
+        path = self.dir + '/screen.ppm'
+        if os.path.exists(path):
+            os.remove(path)
+        self.command(f'screendump {path}')
+        for _ in range(100):
+            if os.path.exists(path) and os.path.getsize(path) > 15:
+                time.sleep(0.1)
+                break
+            time.sleep(0.05)
+        data = open(path, 'rb').read()
+        magic, width, height, depth, pixels = data.split(maxsplit=4)
+        width, height = int(width), int(height)
+        assert magic == b'P6' and depth == b'255'
+        return width, height, lambda x, y: int.from_bytes(pixels[(y * width + x) * 3:(y * width + x) * 3 + 3], 'big')
 
     def type(self, s):
         for c in s:

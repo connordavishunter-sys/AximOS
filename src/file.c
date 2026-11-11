@@ -26,6 +26,7 @@ enum file_kind {
     FILE_PIPE_WRITE,
     FILE_SHM,
     FILE_MOUSE,
+    FILE_KEYBOARD,
     FILE_FB,
     FILE_NULL,
     FILE_ZERO,
@@ -93,12 +94,15 @@ static int file_open_locked(const char *cwd, const char *path, int flags, struct
         *out = file;
         return 0;
     }
-    if (status == VFS_OK && vfs_device_of(&file->node) == VFS_DEVICE_MOUSE) {
-        if (access != O_RDONLY) {
+    enum vfs_device device = status == VFS_OK ? vfs_device_of(&file->node) : VFS_DEVICE_NONE;
+
+    if (device == VFS_DEVICE_MOUSE || device == VFS_DEVICE_KEYBOARD) {
+        status = access != O_RDONLY ? -EACCES : device == VFS_DEVICE_KEYBOARD ? keyboard_open_events() : 0;
+        if (status < 0) {
             kfree(file);
-            return -EACCES;
+            return status;
         }
-        file->kind = FILE_MOUSE;
+        file->kind = device == VFS_DEVICE_MOUSE ? FILE_MOUSE : FILE_KEYBOARD;
         file->flags = flags;
         file->refs = 1;
         *out = file;
@@ -355,6 +359,9 @@ int file_poll(struct file *file, int events) {
     case FILE_MOUSE:
         ready = mouse_readable() ? POLLIN : 0;
         break;
+    case FILE_KEYBOARD:
+        ready = keyboard_events_readable() ? POLLIN : 0;
+        break;
     case FILE_SOCKET:
         ready = socket_poll(file->socket);
         break;
@@ -407,6 +414,8 @@ void file_close(struct file *file) {
         socket_close(file->socket);
     } else if (file->kind == FILE_INET) {
         inet_close(file->inet);
+    } else if (file->kind == FILE_KEYBOARD) {
+        keyboard_close_events();
     } else if (file->kind == FILE_SHM) {
         shm_unref(file->shm);
     } else if (file->kind == FILE_FB && (file->flags & O_ACCMODE) != O_RDONLY) {
@@ -427,6 +436,8 @@ int64_t file_read(struct file *file, void *buf, size_t len) {
         return -EBADF;
     case FILE_MOUSE:
         return mouse_read(buf, len, nonblocking);
+    case FILE_KEYBOARD:
+        return keyboard_read_events(buf, len, nonblocking);
     case FILE_SOCKET:
         return socket_read(file->socket, buf, len, nonblocking, false);
     case FILE_INET:
@@ -485,6 +496,7 @@ int64_t file_write(struct file *file, const void *buf, size_t len) {
         return inet_send(file->inet, buf, len, NULL, file->flags & O_NONBLOCK, true);
     case FILE_PIPE_READ:
     case FILE_MOUSE:
+    case FILE_KEYBOARD:
         return -EBADF;
     case FILE_RANDOM:
     case FILE_URANDOM:

@@ -39,6 +39,7 @@ static struct vfs_mount *root_mount;
 static bool device_present[VFS_DEVICE_COUNT];
 static const char *const device_names[VFS_DEVICE_COUNT] = {
     [VFS_DEVICE_MOUSE] = "mouse",
+    [VFS_DEVICE_KEYBOARD] = "keyboard",
     [VFS_DEVICE_FB] = "fb0",
     [VFS_DEVICE_NULL] = "null",
     [VFS_DEVICE_ZERO] = "zero",
