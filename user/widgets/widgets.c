@@ -4,6 +4,10 @@
 #include <unistd.h>
 
 static const char *const themes[] = {"Dark", "Light", "Solarized", "Nord"};
+static const char *const months[] = {
+    "January", "February", "March",     "April",   "May",      "June",
+    "July",    "August",   "September", "October", "November", "December",
+};
 static const char *const fruits[] = {
     "Apple", "Apricot", "Banana", "Blackberry", "Blueberry", "Cherry", "Coconut", "Date",  "Fig",   "Grape",
     "Guava", "Kiwi",    "Lemon",  "Lime",       "Mango",     "Melon",  "Orange",  "Peach", "Pear",  "Plum",
@@ -12,7 +16,7 @@ static const char *const fruits[] = {
 
 static int count;
 static bool show_progress = true, quitting;
-static int volume = 50, theme, fruit;
+static int volume = 50, theme, month, fruit;
 static char name[32], notes[256];
 
 // Says where a widget is when that changes, for the tests to find it.
@@ -92,6 +96,9 @@ static void frame(struct gui_ui *ui) {
     if (gui_dropdown(ui, "Theme", themes, COUNT(themes), &theme))
         printf("widgets: theme %s\n", themes[theme]);
     report(ui, 5, "dropdown");
+    if (gui_dropdown(ui, "Month", months, COUNT(months), &month))
+        printf("widgets: month %s\n", months[month]);
+    report(ui, 9, "month");
     if (gui_list(ui, "Fruit", fruits, COUNT(fruits), &fruit, 5))
         printf("widgets: fruit %s\n", fruits[fruit]);
     report(ui, 6, "list");

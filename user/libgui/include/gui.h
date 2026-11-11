@@ -134,6 +134,7 @@ struct gui_rect {
 #define GUI_UI_MAX_FOCUSABLE 64
 #define GUI_UI_MAX_SCROLLS 16
 #define GUI_UI_MAX_DEPTH 4
+#define GUI_UI_MAX_MENUS 8
 
 // Where widgets go: across from left to right, and down from y, inside clip.
 struct gui_layout {
@@ -183,13 +184,24 @@ struct gui_ui {
     bool popup_is_menu, popup_drawn, in_popup, mouse_in_popup;
     struct gui_rect popup_rect, outside_popup;
     uint32_t *popup_pixels;
-    int item_y, bar_x;
+    int item_y, item_width, item_index, bar_x;
+
+    // The menus in the bar, as of the last frame and so far in this one. An open
+    // menu has the keyboard: Up and Down move menu_choice through its items, of
+    // which it had menu_items last frame, and Left and Right go to the next menu.
+    uint32_t menus[GUI_UI_MAX_MENUS], next_menus[GUI_UI_MAX_MENUS];
+    int menu_count, next_menu_count, menu_choice, menu_items;
+    struct key_event menu_keys[GUI_UI_MAX_KEYS];
+    int menu_key_count;
+
+    // A widget Tab moved the keyboard to, which the areas it's in scroll to show.
+    uint32_t reveal;
 
     // Where the next widget goes, with what it was before each scrolling area.
     struct gui_layout layout;
     struct {
         struct gui_layout layout;
-        struct gui_rect area;
+        struct gui_rect area, view;
         uint32_t id;
         int top;
     } saved[GUI_UI_MAX_DEPTH];
@@ -229,8 +241,8 @@ bool gui_textbox(struct gui_ui *ui, const char *label, char *text, size_t size);
 // starts a new line.
 bool gui_textarea(struct gui_ui *ui, const char *label, char *text, size_t size, int lines);
 
-// Picks one of count items, shown when clicked in a list under it. Up and Down
-// change it without opening the list.
+// Picks one of count items, shown when clicked in a list under it, which scrolls
+// when there are too many. Up and Down change it, open or not.
 bool gui_dropdown(struct gui_ui *ui, const char *label, const char *const *items, int count, int *selected);
 
 // All of count items in a list rows tall, which scrolls, with selected highlighted.
@@ -238,7 +250,8 @@ bool gui_list(struct gui_ui *ui, const char *label, const char *const *items, in
 
 // A bar of menus across the top, which goes first in a frame. Each gui_menu that
 // returns true is open, and has its items next, then gui_menu_end. An item returns
-// true when it's chosen.
+// true when it's chosen. F10 opens the first menu from the keyboard, the arrows move
+// about, and Enter chooses.
 void gui_menu_bar(struct gui_ui *ui);
 bool gui_menu(struct gui_ui *ui, const char *label);
 bool gui_menu_item(struct gui_ui *ui, const char *label);
@@ -246,6 +259,7 @@ void gui_menu_end(struct gui_ui *ui);
 
 // The widgets between these go in an area height tall, or down to the bottom of
 // the window if height is 0, which the wheel and a scroll bar scroll when they
-// don't fit. Areas can go inside each other, GUI_UI_MAX_DEPTH deep.
+// don't fit, or Tab moves to something in them that can't be seen. Areas can go
+// inside each other, GUI_UI_MAX_DEPTH deep.
 void gui_scroll_begin(struct gui_ui *ui, const char *label, int height);
 void gui_scroll_end(struct gui_ui *ui);

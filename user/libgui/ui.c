@@ -15,6 +15,7 @@
 #define MIN_THUMB 16
 #define WHEEL_STEP (3 * ROW_HEIGHT)
 #define MENU_WIDTH 180
+#define DROPDOWN_ROWS 8 // at most, with more scrolling
 
 #define BACKGROUND 0x1E2129
 #define PANEL 0x181B21 // behind scrolling areas and lists
@@ -146,6 +147,7 @@ void gui_ui_begin(struct gui_ui *ui) {
     ui->hot = 0;
     ui->next_count = 0;
     ui->next_wheel_owner = 0;
+    ui->next_menu_count = 0;
     ui->popup_drawn = false;
 
     // An open popup has the mouse when it's over it. A click anywhere else, or
@@ -154,6 +156,19 @@ void gui_ui_begin(struct gui_ui *ui) {
     if (ui->popup && ((ui->mouse_pressed && !ui->mouse_in_popup) || key_pressed(ui, KEY_ESCAPE))) {
         ui->popup = 0;
         ui->mouse_pressed = false;
+    }
+
+    // F10 opens the first menu, or closes the one that's open, which then has the keyboard.
+    if (key_pressed(ui, KEY_F10) && ui->menu_count) {
+        ui->popup = ui->popup && ui->popup_is_menu ? 0 : ui->menus[0];
+        ui->popup_is_menu = true;
+        ui->menu_choice = 0;
+    }
+    ui->menu_key_count = 0;
+    if (ui->popup && ui->popup_is_menu) {
+        memcpy(ui->menu_keys, ui->keys, ui->key_count * sizeof(*ui->keys));
+        ui->menu_key_count = ui->key_count;
+        ui->key_count = 0;
     }
 
     // Clicking where there's no widget takes the keyboard away, and one there gives it back.
@@ -175,7 +190,7 @@ void gui_ui_begin(struct gui_ui *ui) {
         bool back = ui->keys[i].modifiers & KEY_MOD_SHIFT;
 
         at = at < 0 ? (back ? ui->order_count - 1 : 0) : (at + (back ? ui->order_count - 1 : 1)) % ui->order_count;
-        ui->focus = ui->order[at];
+        ui->focus = ui->reveal = ui->order[at];
     }
 }
 
@@ -189,10 +204,13 @@ void gui_ui_end(struct gui_ui *ui) {
         free(ui->popup_pixels);
         ui->popup_pixels = NULL;
     }
-    if (!ui->popup_drawn)
+    if (!ui->popup_drawn && !ui->again)
         ui->popup = 0;
 
     memcpy(ui->order, ui->next_order, ui->next_count * sizeof(*ui->order));
+    memcpy(ui->menus, ui->next_menus, ui->next_menu_count * sizeof(*ui->menus));
+    ui->menu_count = ui->next_menu_count;
+    ui->reveal = 0;
     ui->order_count = ui->next_count;
     ui->wheel_owner = ui->next_wheel_owner;
     if (ui->mouse_released)
@@ -273,8 +291,29 @@ static bool interact(struct gui_ui *ui, uint32_t id, struct gui_rect r) {
     return ui->mouse_released && ui->active == id && is_over;
 }
 
+static struct gui_scroll *scroll_of(struct gui_ui *ui, uint32_t id);
+
+// Scrolls the areas the last widget is in to show it, from the innermost out. That
+// shows in the next frame, which comes at once.
+static void reveal(struct gui_ui *ui) {
+    struct gui_rect r = ui->last;
+
+    for (int d = ui->depth - 1; d >= 0; d--) {
+        struct gui_rect view = ui->saved[d].view;
+        int shift = r.y < view.y                               ? r.y - view.y - PADDING
+                  : r.y + r.height > view.y + view.height ? r.y + r.height - view.y - view.height + PADDING
+                                                               : 0;
+
+        scroll_of(ui, ui->saved[d].id)->offset += shift;
+        r.y -= shift;
+        ui->again |= shift != 0;
+    }
+}
+
 // Takes part in Tab's order, returning whether it has the keyboard.
 static bool focusable(struct gui_ui *ui, uint32_t id) {
+    if (id == ui->reveal)
+        reveal(ui);
     if (ui->next_count < GUI_UI_MAX_FOCUSABLE)
         ui->next_order[ui->next_count++] = id;
     return ui->focus == id && ui->window_focused;
@@ -662,6 +701,14 @@ bool gui_textarea(struct gui_ui *ui, const char *label, char *s, size_t size, in
     return changed;
 }
 
+static bool menu_key(const struct gui_ui *ui, uint16_t code) {
+    for (int i = 0; i < ui->menu_key_count; i++) {
+        if (ui->menu_keys[i].code == code)
+            return true;
+    }
+    return false;
+}
+
 // Popups are drawn as they come, then kept and put back at the end of the frame,
 // so nothing after covers them. Their items fill their own rows.
 static void popup_begin(struct gui_ui *ui, struct gui_rect r) {
@@ -674,15 +721,19 @@ static void popup_begin(struct gui_ui *ui, struct gui_rect r) {
     ui->outside_popup = ui->layout.clip;
     ui->layout.clip = all;
     ui->item_y = r.y + 4;
+    ui->item_width = r.width;
+    ui->item_index = 0;
     fill(ui, r.x, r.y, r.width, 4, POPUP);
 }
 
-static void popup_end(struct gui_ui *ui) {
+// The items end at bottom.
+static void popup_end(struct gui_ui *ui, int bottom) {
     struct gui_rect *r = &ui->popup_rect;
     struct gui_canvas *w = &ui->window->canvas;
 
-    fill(ui, r->x, ui->item_y, r->width, 4, POPUP);
-    r->height = ui->item_y + 4 - r->y;
+    ui->layout.clip = whole(ui);
+    fill(ui, r->x, bottom, r->width, 4, POPUP);
+    r->height = bottom + 4 - r->y;
     draw_border(ui, *r, SEPARATOR);
     *r = intersect(*r, whole(ui));
     free(ui->popup_pixels);
@@ -694,18 +745,21 @@ static void popup_end(struct gui_ui *ui) {
     ui->in_popup = false;
 }
 
-// A row in a popup, returning whether it was chosen: let go over.
-static bool popup_item(struct gui_ui *ui, const char *label, bool marked) {
-    struct gui_rect r = {ui->popup_rect.x, ui->item_y, ui->popup_rect.width, ROW_HEIGHT};
+// A row in a popup, highlighted when the mouse or the keyboard is on it, or
+// marked. Returns whether it was chosen: let go over, or Enter on it.
+static bool popup_item(struct gui_ui *ui, const char *label, bool keyed, bool marked) {
+    struct gui_rect r = {ui->popup_rect.x, ui->item_y, ui->item_width, ROW_HEIGHT};
     bool is_over = over(ui, r);
+    bool chosen = (is_over && ui->mouse_released) || (keyed && ui->menu_key_count && menu_key(ui, KEY_ENTER));
 
     ui->item_y += ROW_HEIGHT;
-    fill(ui, r.x, r.y, r.width, r.height, is_over ? ACCENT : marked ? FRAME_HOT : POPUP);
+    ui->item_index++;
+    fill(ui, r.x, r.y, r.width, r.height, is_over || keyed ? ACCENT : marked ? FRAME_HOT : POPUP);
     draw_fitted(ui, r.x + 8, r.y + (ROW_HEIGHT - GUI_CHAR_HEIGHT) / 2, r.width - 16, label, shown_length(label), TEXT);
 
     // What was drawn before it may show what it changes, so the frame goes again.
-    ui->again |= is_over && ui->mouse_released;
-    return is_over && ui->mouse_released;
+    ui->again |= chosen;
+    return chosen;
 }
 
 static void toggle_popup(struct gui_ui *ui, uint32_t id, bool menu) {
@@ -713,10 +767,51 @@ static void toggle_popup(struct gui_ui *ui, uint32_t id, bool menu) {
     ui->popup_is_menu = menu;
 }
 
+// Under the frame, or over it if there's more room there, as many rows as fit up to
+// DROPDOWN_ROWS, scrolling to show the selected one when it opens or changes.
+static void dropdown_popup(struct gui_ui *ui, uint32_t id, struct gui_rect frame, const char *const *items, int count,
+                           int *selected, bool opened, bool moved) {
+    uint32_t list_id = id ^ 0x85EBCA6Bu;
+    struct gui_scroll *scroll = scroll_of(ui, list_id);
+    int below = whole(ui).height - frame.y - frame.height, above = frame.y;
+    int fit = ((below > above ? below : above) - 8) / ROW_HEIGHT;
+    int rows = count < DROPDOWN_ROWS ? count : DROPDOWN_ROWS;
+
+    rows = rows < fit ? rows : fit > 1 ? fit : 1;
+
+    int height = rows * ROW_HEIGHT + 8, top = *selected * ROW_HEIGHT;
+    bool under = height <= below || below >= above;
+    struct gui_rect view;
+
+    scroll->content = count * ROW_HEIGHT;
+    if (opened)
+        scroll->offset = top - rows / 2 * ROW_HEIGHT;
+    else if (moved)
+        scroll->offset = top < scroll->offset ? top : top + ROW_HEIGHT > scroll->offset + rows * ROW_HEIGHT
+                                                          ? top + ROW_HEIGHT - rows * ROW_HEIGHT
+                                                          : scroll->offset;
+    popup_begin(ui, (struct gui_rect){frame.x, under ? frame.y + frame.height : frame.y - height, frame.width, height});
+    view = (struct gui_rect){ui->popup_rect.x, ui->popup_rect.y + 4, frame.width, rows * ROW_HEIGHT};
+
+    struct gui_rect inner = scrolling(ui, list_id, scroll, view);
+
+    ui->layout.clip = inner;
+    ui->item_y = inner.y - scroll->offset;
+    ui->item_width = inner.width;
+    for (int i = 0; i < count; i++) {
+        if (popup_item(ui, items[i], false, i == *selected)) {
+            *selected = i;
+            ui->popup = 0;
+        }
+    }
+    popup_end(ui, view.y + view.height);
+}
+
 bool gui_dropdown(struct gui_ui *ui, const char *label, const char *const *items, int count, int *selected) {
     uint32_t id = id_of(label);
     struct gui_rect frame;
     int before = *selected;
+    bool was_open = ui->popup == id, moved = false;
 
     framed(ui, label, FRAME_HEIGHT, &frame);
 
@@ -734,10 +829,12 @@ bool gui_dropdown(struct gui_ui *ui, const char *label, const char *const *items
     for (int i = 0; focused && i < ui->key_count; i++) {
         uint16_t code = ui->keys[i].code;
 
-        if (code == KEY_UP || code == KEY_DOWN)
+        if (code == KEY_UP || code == KEY_DOWN) {
             *selected += code == KEY_DOWN ? 1 : -1;
-        else if (code == KEY_ENTER || code == KEY_SPACE)
+            moved = true;
+        } else if (code == KEY_ENTER || code == KEY_SPACE) {
             toggle_popup(ui, id, false);
+        }
     }
     *selected = *selected >= count ? count - 1 : *selected < 0 ? 0 : *selected;
 
@@ -748,20 +845,8 @@ bool gui_dropdown(struct gui_ui *ui, const char *label, const char *const *items
     if (focused)
         draw_focus(ui, frame);
 
-    // Under the frame, or over it if there's no room under.
-    if (ui->popup == id) {
-        int height = count * ROW_HEIGHT + 8;
-        bool under = frame.y + frame.height + height <= whole(ui).height || frame.y < height;
-
-        popup_begin(ui, (struct gui_rect){frame.x, under ? frame.y + frame.height : frame.y - height, frame.width, 0});
-        for (int i = 0; i < count; i++) {
-            if (popup_item(ui, items[i], i == *selected)) {
-                *selected = i;
-                ui->popup = 0;
-            }
-        }
-        popup_end(ui);
-    }
+    if (ui->popup == id)
+        dropdown_popup(ui, id, frame, items, count, selected, !was_open, moved);
     return *selected != before;
 }
 
@@ -825,6 +910,34 @@ bool gui_list(struct gui_ui *ui, const char *label, const char *const *items, in
     return *selected != before;
 }
 
+// Up and Down go through the open menu's items, and Left and Right to the menus
+// beside it. One to the left has been drawn already, so the frame goes again.
+static void menu_keys(struct gui_ui *ui, uint32_t id) {
+    int at = 0;
+
+    for (int i = 0; i < ui->menu_count; i++) {
+        if (ui->menus[i] == id)
+            at = i;
+    }
+    for (int i = 0; i < ui->menu_key_count; i++) {
+        uint16_t code = ui->menu_keys[i].code;
+        int items = ui->menu_items > 0 ? ui->menu_items : 1;
+
+        if (code == KEY_DOWN)
+            ui->menu_choice = (ui->menu_choice + 1) % items;
+        else if (code == KEY_UP)
+            ui->menu_choice = ui->menu_choice <= 0 ? items - 1 : ui->menu_choice - 1;
+        if ((code == KEY_LEFT || code == KEY_RIGHT) && ui->menu_count) {
+            at = (at + (code == KEY_RIGHT ? 1 : ui->menu_count - 1)) % ui->menu_count;
+            ui->popup = ui->menus[at];
+            ui->menu_choice = 0;
+            ui->menu_key_count = 0; // used up, not for the menu it goes to
+            ui->again = true;
+            return;
+        }
+    }
+}
+
 void gui_menu_bar(struct gui_ui *ui) {
     int width = whole(ui).width;
 
@@ -840,12 +953,19 @@ bool gui_menu(struct gui_ui *ui, const char *label) {
     bool is_over = over(ui, r);
 
     ui->bar_x += r.width;
+    if (ui->next_menu_count < GUI_UI_MAX_MENUS)
+        ui->next_menus[ui->next_menu_count++] = id;
 
     // Opens on a press, and while one menu is open, the mouse moving over another opens that.
-    if (is_over && ui->mouse_pressed)
+    if (is_over && ui->mouse_pressed) {
         toggle_popup(ui, id, true);
-    else if (is_over && ui->popup && ui->popup_is_menu)
+        ui->menu_choice = -1;
+    } else if (is_over && ui->popup && ui->popup_is_menu && ui->popup != id) {
         ui->popup = id;
+        ui->menu_choice = -1;
+    }
+    if (ui->popup == id)
+        menu_keys(ui, id);
     fill(ui, r.x, r.y, r.width, r.height, ui->popup == id ? ACCENT : is_over ? FRAME_HOT : FRAME);
     draw_label(ui, r.x + PADDING + 3, r.y + PADDING, label, TEXT);
     if (ui->popup != id)
@@ -855,7 +975,14 @@ bool gui_menu(struct gui_ui *ui, const char *label) {
 }
 
 bool gui_menu_item(struct gui_ui *ui, const char *label) {
-    bool chosen = popup_item(ui, label, false);
+    struct gui_rect r = {ui->popup_rect.x, ui->item_y, ui->item_width, ROW_HEIGHT};
+    int index = ui->item_index;
+
+    // The keyboard goes on from wherever the mouse was.
+    if (over(ui, r))
+        ui->menu_choice = index;
+
+    bool chosen = popup_item(ui, label, index == ui->menu_choice, false);
 
     if (chosen)
         ui->popup = 0;
@@ -863,7 +990,8 @@ bool gui_menu_item(struct gui_ui *ui, const char *label) {
 }
 
 void gui_menu_end(struct gui_ui *ui) {
-    popup_end(ui);
+    ui->menu_items = ui->item_index;
+    popup_end(ui, ui->item_y);
 }
 
 void gui_scroll_begin(struct gui_ui *ui, const char *label, int height) {
@@ -885,6 +1013,7 @@ void gui_scroll_begin(struct gui_ui *ui, const char *label, int height) {
         return; // too deep: what's in it goes on as if it weren't there
     ui->saved[ui->depth].layout = ui->layout;
     ui->saved[ui->depth].area = area;
+    ui->saved[ui->depth].view = inner;
     ui->saved[ui->depth].id = id;
     ui->saved[ui->depth].top = inner.y - scroll->offset;
     ui->depth++;

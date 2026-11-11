@@ -85,10 +85,10 @@ try:
     v.type('Grace'); v.key('backspace'); v.key('home'); v.type('X'); v.key('end'); v.type('!')
     check('text box', v.wait('widgets: name XGrac!', 5, at), v.text(at))
 
-    # The keyboard alone: Tab from the text box goes past the dropdown, list and
-    # notes round to Count, then on.
+    # The keyboard alone: Tab from the text box goes past the dropdowns, list and
+    # notes round to Count, then on, scrolling the page to show where it is.
     at = v.mark()
-    for _ in range(4):
+    for _ in range(5):
         v.key('tab')
     v.key('ret'); v.key('spc')
     check('Tab goes round, and Enter and Space press', v.wait('widgets: count 2', 5, at), v.text(at))
@@ -99,12 +99,13 @@ try:
     v.key('shift-tab'); v.key('shift-tab'); v.key('ret')
     check('Shift+Tab goes back', v.wait('widgets: count 0', 5, at), v.text(at))
     w, h, px = v.screenshot()
-    x, y, w_, h_ = places['reset']
+    x, y, w_, h_ = where('reset')
     check('the focused widget has a ring', px(LEFT + x - 2, TOP + y + 5) == 0x8FA8F5, hex(px(LEFT + x - 2, TOP + y + 5)))
 
-    # Clicking where there's no widget takes the keyboard away.
+    # Clicking where there's no widget, like the empty end of the menu bar, takes
+    # the keyboard away.
     at = v.mark()
-    mouse.click(LEFT + 300, TOP + 280)
+    mouse.click(LEFT + 300, TOP + 13)
     v.key('ret'); time.sleep(0.5)
     check('clicking nowhere takes the focus', 'widgets: count' not in v.text(at), v.text(at))
 
@@ -177,6 +178,41 @@ try:
     mouse.to(LEFT + 76, TOP + 13)
     mouse.click(LEFT + 100, TOP + 31 + ROW // 2)
     check("another menu's item", v.wait('widgets: progress hidden', 5, at), v.text(at))
+
+    # A dropdown with more items than fit scrolls. Month's opens over it, where
+    # there's more room, eight rows tall.
+    x, y, w_, h_ = where('month')
+    top = y - (8 * ROW + 8) + 4
+    at = v.mark()
+    mouse.click(LEFT + x + 50, TOP + y + 13)
+    mouse.to(LEFT + x + 50, TOP + top + ROW // 2)
+    wheel(v, 1); time.sleep(0.5)
+    mouse.click(LEFT + x + 50, TOP + top + ROW // 2)
+    check('a long dropdown scrolls', v.wait('widgets: month April', 5, at), v.text(at))
+    v.key('ret')
+    for _ in range(8):
+        v.key('down')
+    v.key('ret')
+    check('and Down goes on past what was shown', v.wait('widgets: month December', 5, at), v.text(at))
+    time.sleep(0.5)
+    w, h, px = v.screenshot()
+    check('closing with Enter', px(LEFT + x + 200, TOP + top + ROW // 2) != ACCENT, 'still open')
+
+    # Shift+Tab from nowhere goes to the last widget, the notes, scrolling down to them.
+    mouse.click(LEFT + 300, TOP + 13)
+    v.key('shift-tab'); time.sleep(0.5)
+    x, y, w_, h_ = where('notes')
+    check('Tab scrolls to what it moves to', y + h_ <= 410, (x, y, w_, h_))
+
+    # F10 opens the first menu, Right the next, and Enter chooses.
+    at = v.mark()
+    v.key('f10'); time.sleep(0.3)
+    w, h, px = v.screenshot()
+    check('F10 opens a menu', px(LEFT + 150, TOP + 42) == ACCENT, hex(px(LEFT + 150, TOP + 42)))
+    v.key('right'); v.key('ret')
+    check('Right goes to the next menu, and Enter chooses', v.wait('widgets: progress shown', 5, at), v.text(at))
+    v.key('f10'); v.key('down'); v.key('up'); v.key('ret')
+    check('Down and Up move through it', v.wait('widgets: count 0', 5, at), v.text(at))
 
     # Wider, the slider and text box stretch.
     at = v.mark()
