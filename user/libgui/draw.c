@@ -53,14 +53,33 @@ void gui_copy(struct gui_canvas *canvas, int x, int y, const struct gui_canvas *
                from->pixels + (long)(sy + row) * from->stride + sx, width * sizeof(uint32_t));
 }
 
+// Each glyph that's on the canvas, and of it only the rows and columns that are,
+// pixel by pixel when it isn't scaled.
 void gui_text(struct gui_canvas *canvas, int x, int y, const char *text, uint32_t color, int scale) {
-    for (; *text; text++, x += GUI_CHAR_WIDTH * scale) {
+    int width = GUI_CHAR_WIDTH * scale, height = GUI_CHAR_HEIGHT * scale;
+    int first_row = y < 0 ? -y / scale : 0;
+    int last_row = (canvas->height - y + scale - 1) / scale;
+
+    if (y >= canvas->height || y + height <= 0)
+        return;
+    last_row = last_row < GUI_CHAR_HEIGHT ? last_row : GUI_CHAR_HEIGHT;
+    for (; *text && x < canvas->width; text++, x += width) {
         unsigned char c = (unsigned char)*text < 128 ? (unsigned char)*text : '?';
 
-        for (int row = 0; row < GUI_CHAR_HEIGHT; row++) {
-            for (int col = 0; col < GUI_CHAR_WIDTH; col++) {
-                if (font8x16[c][row] & 0x80 >> col)
-                    gui_fill(canvas, x + col * scale, y + row * scale, scale, scale, color);
+        if (x + width <= 0)
+            continue;
+        for (int row = first_row; row < last_row; row++) {
+            unsigned char bits = font8x16[c][row];
+
+            for (int col = 0; bits && col < GUI_CHAR_WIDTH; col++, bits <<= 1) {
+                int px = x + col * scale, py = y + row * scale;
+
+                if (!(bits & 0x80))
+                    continue;
+                if (scale == 1 && px >= 0 && px < canvas->width)
+                    canvas->pixels[(long)py * canvas->stride + px] = color;
+                else if (scale > 1)
+                    gui_fill(canvas, px, py, scale, scale, color);
             }
         }
     }

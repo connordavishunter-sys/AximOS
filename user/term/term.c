@@ -310,12 +310,13 @@ static void draw_cell(int r, int c) {
         fg = bg;
         bg = swap;
     }
-    gui_fill(&window->canvas, x, y, CELL_WIDTH, CELL_HEIGHT, bg);
+    // Cells are always inside the window, so each row of the glyph goes straight in.
     for (int line = 0; line < CELL_HEIGHT; line++) {
-        for (int bit = 0; bit < CELL_WIDTH; bit++) {
-            if (font8x16[(uint8_t)cell.c & 0x7F][line] & 0x80 >> bit)
-                gui_fill(&window->canvas, x + bit, y + line, 1, 1, fg);
-        }
+        uint32_t *p = window->canvas.pixels + (long)(y + line) * window->canvas.stride + x;
+        uint8_t bits = font8x16[(uint8_t)cell.c & 0x7F][line];
+
+        for (int bit = 0; bit < CELL_WIDTH; bit++)
+            p[bit] = bits & 0x80 >> bit ? fg : bg;
     }
     if (cursor && !focused) {
         gui_fill(&window->canvas, x, y, CELL_WIDTH, 1, fg);

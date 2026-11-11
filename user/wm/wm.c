@@ -277,8 +277,20 @@ static int menu_item_at(int x, int y) {
     return -1;
 }
 
+// Whether a window's frame hides all of a rectangle.
+static bool covers(const struct window *w, struct rect r) {
+    struct rect f = frame_of(w);
+
+    return !w->minimized && r.x >= f.x && r.y >= f.y && r.x + r.width <= f.x + f.width
+        && r.y + r.height <= f.y + f.height;
+}
+
 static bool overlaps(struct rect a, struct rect b) {
     return a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
+}
+
+static long area(struct rect r) {
+    return (long)r.width * r.height;
 }
 
 static struct rect bounds(struct rect a, struct rect b) {
@@ -306,6 +318,18 @@ static void add_damage(struct rect r) {
     if (r.width <= 0 || r.height <= 0)
         return;
 
+    // A rectangle that overlaps another goes in with it when the two together are
+    // no bigger than they are apart, as when a window moves a little, so that the
+    // overlap isn't drawn twice. Merging can make more overlap, so it goes round.
+    for (int i = 0; i < damage_count; i++) {
+        struct rect both = bounds(damage[i], r);
+
+        if (overlaps(damage[i], r) && area(both) <= area(damage[i]) + area(r)) {
+            r = both;
+            damage[i] = damage[--damage_count];
+            i = -1;
+        }
+    }
     if (damage_count == MAX_DAMAGE) {
         for (int i = 1; i < damage_count; i++)
             damage[0] = bounds(damage[0], damage[i]);
@@ -368,12 +392,12 @@ static void draw_shadow(struct gui_canvas *c, const struct window *w, int ox, in
             }
 
             int dx = x < s.x ? s.x - x : x >= s.x + s.width ? x - (s.x + s.width - 1) : 0;
-            int a = dx > SHADOW || dy > SHADOW ? 0 : falloff[dx][dy] * w->shadow >> 8;
+            uint32_t a = dx > SHADOW || dy > SHADOW ? 0 : falloff[dx][dy] * w->shadow >> 8, keep = 256 - a;
             uint32_t p = row[x];
 
+            // Red and blue together, then green, each kept by keep/256.
             if (a)
-                row[x] = ((p >> 16 & 0xFF) * (255 - a) / 255) << 16 | ((p >> 8 & 0xFF) * (255 - a) / 255) << 8
-                       | (p & 0xFF) * (255 - a) / 255;
+                row[x] = ((p & 0xFF00FF) * keep >> 8 & 0xFF00FF) | ((p & 0x00FF00) * keep >> 8 & 0x00FF00);
         }
     }
 }
@@ -383,7 +407,11 @@ static void draw_window(struct gui_canvas *c, const struct window *w, int ox, in
     uint32_t title_color = w == focused ? TITLE_FOCUSED : TITLE_UNFOCUSED;
     int text_y = w->y - TITLE_HEIGHT + (TITLE_HEIGHT - GUI_CHAR_HEIGHT) / 2 - oy;
 
-    gui_fill(c, frame.x - ox, frame.y - oy, frame.width, frame.height, BORDER_COLOR);
+    // Only the border's edges, as the title bar and contents cover the rest.
+    gui_fill(c, frame.x - ox, frame.y - oy, frame.width, BORDER, BORDER_COLOR);
+    gui_fill(c, frame.x - ox, frame.y + frame.height - BORDER - oy, frame.width, BORDER, BORDER_COLOR);
+    gui_fill(c, frame.x - ox, frame.y - oy, BORDER, frame.height, BORDER_COLOR);
+    gui_fill(c, frame.x + frame.width - BORDER - ox, frame.y - oy, BORDER, frame.height, BORDER_COLOR);
     gui_fill(c, w->x - ox, w->y - TITLE_HEIGHT - oy, w->canvas.width, TITLE_HEIGHT, title_color);
     gui_text(c, w->x + 8 - ox, text_y, w->title, TITLE_TEXT, 1);
 
@@ -513,12 +541,20 @@ static void draw_cursor(struct gui_canvas *c, int ox, int oy) {
 // part of the screen.
 static void compose(struct rect r) {
     struct gui_canvas c = {screen.pixels + r.y * screen.stride + r.x, r.width, r.height, screen.stride};
-    int hint_y = desktop().height - 2 * GUI_CHAR_HEIGHT;
+    int hint_y = desktop().height - 2 * GUI_CHAR_HEIGHT, first = -1;
     struct rect bar = taskbar();
 
-    gui_fill(&c, 0, 0, r.width, r.height, DESKTOP_COLOR);
-    gui_text(&c, GUI_CHAR_WIDTH - r.x, hint_y - r.y, HINT, HINT_COLOR, 1);
-    for (int i = 0; i < window_count; i++) {
+    // Nothing under a window that covers all of it can be seen.
+    for (int i = window_count - 1; i >= 0 && first < 0; i--) {
+        if (covers(windows[i], r))
+            first = i;
+    }
+    if (first < 0) {
+        gui_fill(&c, 0, 0, r.width, r.height, DESKTOP_COLOR);
+        gui_text(&c, GUI_CHAR_WIDTH - r.x, hint_y - r.y, HINT, HINT_COLOR, 1);
+        first = 0;
+    }
+    for (int i = first; i < window_count; i++) {
         if (!windows[i]->minimized && overlaps(extent_of(windows[i]), r)) {
             draw_shadow(&c, windows[i], r.x, r.y);
             draw_window(&c, windows[i], r.x, r.y);

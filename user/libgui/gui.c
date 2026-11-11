@@ -170,6 +170,39 @@ static void copy_shown(struct gui_window *window, int x, int y, int width, int h
     gui_copy(&shown, x, y, &window->canvas, x, y, width, height);
 }
 
+// Copies what changed in part of the canvas to the shown pixels, row by row, and
+// gives the part that holds all the changes, which has no width if nothing did.
+static void copy_changes(struct gui_window *window, struct gui_message *changed) {
+    const struct gui_canvas *c = &window->canvas;
+    int x = changed->x < 0 ? 0 : changed->x, y = changed->y < 0 ? 0 : changed->y;
+    int right = changed->x + changed->width < c->width ? changed->x + changed->width : c->width;
+    int bottom = changed->y + changed->height < c->height ? changed->y + changed->height : c->height;
+    int top = -1, last = 0, left = right, end = x;
+
+    for (int row = y; row < bottom; row++) {
+        const uint32_t *from = c->pixels + (long)row * c->stride;
+        uint32_t *to = window->shown + (long)row * c->width;
+        int l = x, r = right - 1;
+
+        while (l < right && from[l] == to[l])
+            l++;
+        if (l == right)
+            continue;
+        while (from[r] == to[r])
+            r--;
+        memcpy(to + l, from + l, (r - l + 1) * sizeof(uint32_t));
+        top = top < 0 ? row : top;
+        last = row;
+        left = l < left ? l : left;
+        end = r + 1 > end ? r + 1 : end;
+    }
+    *changed = (struct gui_message){
+        .type = GUI_DAMAGE, .window = window->id, .x = left, .y = top, .width = top < 0 ? 0 : end - left,
+        .height = last - top + 1,
+    };
+}
+
+// Only what changed goes to wm, so a frame drawn again the same costs it nothing.
 void gui_update(struct gui_window *window, int x, int y, int width, int height) {
     struct gui_message message = {
         .type = GUI_DAMAGE, .window = window->id, .x = x, .y = y, .width = width, .height = height,
@@ -186,7 +219,9 @@ void gui_update(struct gui_window *window, int x, int y, int width, int height) 
         munmap(window->old_shown, window->old_size);
         window->pending[0] = '\0';
     } else {
-        copy_shown(window, x, y, width, height);
+        copy_changes(window, &message);
+        if (message.width <= 0)
+            return;
     }
     gui_send(connection, &message);
 }

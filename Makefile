@@ -70,7 +70,9 @@ DYNAMIC_LDFLAGS := --hash-style=sysv -dynamic-linker /system/lib/libc.so
 # Copies a file onto the disk without its debug info.
 install_stripped = strip -s -o $(BUILD)/stripped $(1) && mcopy -i $@ $(BUILD)/stripped ::$(2)
 
-QEMU_BASE := qemu-system-x86_64 -smp 4 -m 256M -serial stdio -boot d -cdrom $(ISO) \
+# KVM runs it at the CPU's own speed, where the host has it, and otherwise QEMU
+# goes back to emulating every instruction, many times slower.
+QEMU_BASE := qemu-system-x86_64 -accel kvm -accel tcg -cpu max -smp 4 -m 256M -serial stdio -boot d -cdrom $(ISO) \
 	-vga none -device VGA,vgamem_mb=64 -netdev user,id=net0 -device e1000,netdev=net0
 
 # pc has legacy IDE drives, named hda and so on. q35 has AHCI, named sda and so on.
@@ -134,6 +136,10 @@ $(addprefix $(BUILD)/user/,$(addsuffix .elf,wm $(GUI_APPS))): $(LIBGUI_SO)
 
 $(BUILD)/user/init.elf: $(CRT0) $(patsubst user/%.c,$(BUILD)/user/%.o,$(wildcard user/init/*.c)) $(LIBC)
 	$(LD) $(USER_LDFLAGS) -static $+ -o $@
+
+# Drawing is where the window system spends its time, so it's built for speed
+# rather than size.
+$(BUILD)/user/libgui_pic/%.o $(BUILD)/user/wm/%.o $(BUILD)/user/term/%.o: USER_CFLAGS += -O2
 
 # fetch speaks TLS, with mbedtls linked in.
 $(BUILD)/user/fetch/fetch.o: USER_CFLAGS += -I$(MBEDTLS)/include -DMBEDTLS_CONFIG_FILE='"$(CURDIR)/ports/mbedtls_config.h"'
