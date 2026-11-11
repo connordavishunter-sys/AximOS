@@ -1,0 +1,97 @@
+head a.txt
+head -n 3 a.txt
+head -3 a.txt
+head -c 20 a.txt
+head -n 0 a.txt
+head a.txt b.txt
+cat a.txt | head -n 2
+tail a.txt
+tail -n 3 a.txt
+tail -3 a.txt
+tail -n +5 a.txt
+tail -n 0 a.txt
+tail -c 15 a.txt
+tail -c +10 b.txt
+tail nonl.txt
+tail -n 1 nonl.txt
+tail a.txt b.txt
+cat a.txt | tail -n 2
+head empty.txt; tail empty.txt; wc empty.txt
+wc a.txt
+wc -l a.txt b.txt
+wc -w a.txt
+wc -c a.txt
+wc -lw nonl.txt
+cat a.txt | wc
+cat a.txt | wc -l
+wc missing.txt; echo st=$?
+grep the a.txt
+grep -i THE a.txt
+grep -v the a.txt
+grep -n the a.txt
+grep -c the a.txt
+grep -c the a.txt b.txt
+grep -l the a.txt b.txt nonl.txt
+grep -H fox a.txt
+grep -q the a.txt; echo st=$?
+grep -q zzzz a.txt; echo st=$?
+grep zzzz a.txt; echo st=$?
+grep the missing.txt; echo st=$?
+grep -E 'fo+x|dog$' a.txt
+grep '^The' a.txt
+grep 'do[gt]' a.txt
+grep -F 'a.b' b.txt
+grep 'a.b' b.txt
+grep -iF 'A.B' b.txt
+cat a.txt | grep -n fox
+grep -r needle d | sort
+grep -rl needle d | sort
+grep -rc needle d | sort
+grep '(' b.txt
+grep -E '(' b.txt >/dev/null 2>&1; echo st=$?
+grep '' nonl.txt
+find d | sort
+find d -type f | sort
+find d -type d | sort
+find d -name '*.txt' | sort
+find d -iname '*.TXT' | sort
+find d -maxdepth 1 | sort
+find d -mindepth 2 | sort
+find d -mindepth 1 -maxdepth 1 -type d | sort
+find d/ -name n1.txt
+find d d/sub -maxdepth 0
+find missing; echo st=$?
+sort s.txt
+sort -r s.txt
+sort -n n.txt
+sort -rn n.txt
+sort -u dup.txt
+sort -f mixed.txt
+sort -fu mixed.txt
+sort -k 2 k.txt
+sort -n -k 2 k.txt
+sort -t : -k 2 c.txt
+sort -t : -n -k 3 c.txt
+sort a.txt b.txt
+cat s.txt | sort
+sort empty.txt
+sort missing.txt; echo st=$?
+sleep 0.1; echo slept=$?
+sleep 0; echo st=$?
+sleep x; echo st=$?
+cp a.txt cp1.txt; wc -c cp1.txt; grep -c the cp1.txt
+mkdir cpd; cp a.txt b.txt cpd; find cpd | sort; wc -c cpd/a.txt cpd/b.txt
+cp -r d dcopy; find dcopy | sort; wc -c dcopy/n1.txt dcopy/sub/n2.txt dcopy/sub/deep/big.bin
+mkdir into; cp -r d into; find into | sort
+cp d nope 2>/dev/null; echo st=$?
+cp missing x 2>/dev/null; echo st=$?
+cp a.txt missingdir/x 2>/dev/null; echo st=$?
+cp a.txt b.txt notadir 2>/dev/null; echo st=$?mkdir rmd rmd/s; touch rmd/a rmd/s/b; rm -r rmd; echo st=$?; find . -name 'rmd*'
+mkdir rmd2; rm rmd2 2>/dev/null; echo st=$?; rm -r rmd2; echo st=$?
+rm -f missing.txt; echo st=$?
+rm missing.txt 2>/dev/null; echo st=$?
+cp a.txt rm1.txt; cp a.txt rm2.txt; rm rm1.txt rm2.txt; echo st=$?; find . -name 'rm?.txt'
+ls d | cat
+ls d/sub d | cat
+ls -1 d/sub
+ls missing.txt; echo st=$?

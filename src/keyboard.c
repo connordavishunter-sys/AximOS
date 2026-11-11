@@ -28,7 +28,7 @@
 #define SC_CTRL 0x1D
 #define SC_CAPS 0x3A
 
-#define BUFFER_SIZE 256
+#define BUFFER_SIZE 4096
 #define CTRL_C 0x03
 
 // Scancode set 1. The keypad acts as if num lock were always on.

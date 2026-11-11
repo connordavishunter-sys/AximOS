@@ -1,7 +1,7 @@
 """Checks a dash session at the console: builtins, programs, job control and the terminal."""
-import sys, time
-import vm as harness
-from vm import VM, check
+import time
+
+from vm import VM, check, finish
 
 v = VM()
 try:
@@ -60,6 +60,4 @@ try:
     o = v.run('echo after-eof'); check('ctrl+d starts a new shell', '\nafter-eof\n' in o, o)
 finally:
     v.close()
-
-print(f'{harness.failures} failed')
-sys.exit(harness.failures > 0)
+finish()

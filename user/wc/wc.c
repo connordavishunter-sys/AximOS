@@ -31,14 +31,19 @@ static bool count(int fd, struct counts *out) {
     return got == 0;
 }
 
+// Counts are separated by one space, with none left trailing.
 static void print(const struct counts *c, const char *name) {
-    if (show_lines)
-        printf("%7lu ", c->lines);
-    if (show_words)
-        printf("%7lu ", c->words);
-    if (show_bytes)
-        printf("%7lu ", c->bytes);
-    printf("%s\n", name ? name : "");
+    const unsigned long values[] = {c->lines, c->words, c->bytes};
+    const bool shown[] = {show_lines, show_words, show_bytes};
+    const char *gap = "";
+
+    for (int i = 0; i < 3; i++) {
+        if (shown[i]) {
+            printf("%s%7lu", gap, values[i]);
+            gap = " ";
+        }
+    }
+    printf(name ? " %s\n" : "\n", name);
 }
 
 int main(int argc, char **argv) {

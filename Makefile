@@ -162,7 +162,8 @@ build-run: all
 
 # Each tests/*_test.py boots its own VM from a snapshot, so the disk stays as it was.
 test: built
-	@for t in tests/*_test.py; do echo "== $$t"; python3 $$t || exit 1; done
+	@failed=; for t in tests/*_test.py; do echo "== $$t"; python3 $$t || failed="$$failed $$t"; done; \
+	[ -z "$$failed" ] || { echo "failed:$$failed"; exit 1; }
 
 help:
 	@echo "make                build whatever has changed (same as make all)"

@@ -34,6 +34,10 @@ static void add_name(const char *name, bool is_dir) {
     count++;
 }
 
+static int compare_names(const void *a, const void *b) {
+    return strcmp(*(char *const *)a, *(char *const *)b);
+}
+
 // One line per file: type, size, modification time in UTC, name.
 static void print_long(const char *dir, const char *name) {
     static char path[PATH_MAX];
@@ -67,6 +71,8 @@ static void print_long(const char *dir, const char *name) {
            t.tm_hour, t.tm_min, name);
 }
 
+static bool one_per_line;
+
 static void print_names_long(const char *dir) {
     for (int i = 0; i < count; i++) {
         size_t len = strlen(names[i]);
@@ -80,10 +86,26 @@ static void print_names_long(const char *dir) {
     count = 0;
 }
 
+// Into a pipe or a file, each name is on its own line without the directory marker,
+// so that other programs can read them.
+static void print_names_plain(void) {
+    for (int i = 0; i < count; i++) {
+        size_t len = strlen(names[i]);
+
+        if (len > 1 && names[i][len - 1] == '/')
+            names[i][len - 1] = '\0';
+        printf("%s\n", names[i]);
+        free(names[i]);
+    }
+    count = 0;
+}
+
 static void print_names(void) {
     int rows, cols = 80;
     size_t width = 0;
 
+    if (one_per_line)
+        return print_names_plain();
     termsize(&rows, &cols);
     for (int i = 0; i < count; i++) {
         if (strlen(names[i]) + 2 > width)
@@ -109,7 +131,7 @@ static int list_path(const char *path, bool show_header, bool long_format, bool 
 
     if (stat(path, &st) < 0) {
         dprintf(STDERR_FILENO, "ls: %s: %s\n", path, strerror(errno));
-        return 1;
+        return 2;
     }
 
     if (!S_ISDIR(st.st_mode)) {
@@ -144,8 +166,9 @@ static int list_path(const char *path, bool show_header, bool long_format, bool 
 }
 
 int main(int argc, char **argv) {
-    help_option(argc, argv, "usage: ls [-a] [-l] [path...]\n"
+    help_option(argc, argv, "usage: ls [-1al] [path...]\n"
                             "Lists directories, by default the current one.\n"
+                            "  -1  one name per line, as when the output isn't a terminal\n"
                             "  -a  include names starting with a dot\n"
                             "  -l  show size and date\n");
 
@@ -153,19 +176,24 @@ int main(int argc, char **argv) {
     bool show_hidden = false;
     int option;
 
-    while ((option = getopt(argc, argv, "al")) != -1) {
-        if (option == 'a') {
+    one_per_line = !isatty(STDOUT_FILENO);
+    while ((option = getopt(argc, argv, "1al")) != -1) {
+        if (option == '1') {
+            one_per_line = true;
+        } else if (option == 'a') {
             show_hidden = true;
         } else if (option == 'l') {
             long_format = true;
         } else {
-            dprintf(STDERR_FILENO, "usage: ls [-a] [-l] [path...]\n");
+            dprintf(STDERR_FILENO, "usage: ls [-1al] [path...]\n");
             return 2;
         }
     }
 
     if (optind == argc)
         return list_path(".", false, long_format, show_hidden);
+
+    qsort(argv + optind, argc - optind, sizeof(*argv), compare_names);
 
     int status = 0;
     for (int i = optind; i < argc; i++)
