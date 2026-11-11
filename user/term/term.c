@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <time.h>
 #include <unistd.h>
 
 #define COLS 80 // to start with
@@ -22,6 +23,7 @@
 #define PARAM_HIDE_CURSOR 25
 #define SCROLLBACK 1000 // lines kept after scrolling off the top
 #define WHEEL_LINES 3
+#define DRAG_SCROLL_MS 50 // between scrolls while a selection is dragged out of the window
 #define KEY_C 0x2E
 #define KEY_V 0x2F
 
@@ -56,6 +58,7 @@ struct place {
 };
 static struct place select_from, select_to;
 static bool selecting, selected;
+static int drag_x, drag_y; // where the mouse is while selecting
 static int cols = COLS, rows = ROWS;
 static int row, col;
 static bool cursor_hidden, focused;
@@ -399,6 +402,11 @@ static bool send_key(int master, const struct key_event *key) {
     return sequence || text;
 }
 
+static void scroll_view(int lines) {
+    view = clamp(view + lines, 0, history_count);
+    mark_all_dirty();
+}
+
 // The cell under a point in the window.
 static struct place place_at(int x, int y) {
     return (struct place){shown_line(clamp((y - PADDING) / CELL_HEIGHT, 0, rows - 1)),
@@ -417,7 +425,48 @@ static void mouse(const struct gui_message *e) {
         select_to = place_at(e->x, e->y);
         selected = order(select_from) != order(select_to);
     }
+    drag_x = e->x;
+    drag_y = e->y;
     mark_all_dirty();
+}
+
+// How many lines back to scroll while a selection is dragged above the window,
+// or forward when below it, more the further out it is.
+static int drag_lines(void) {
+    int bottom = PADDING + rows * CELL_HEIGHT;
+
+    if (!selecting)
+        return 0;
+    if (drag_y < PADDING)
+        return 1 + (PADDING - drag_y) / CELL_HEIGHT;
+    if (drag_y >= bottom)
+        return -(1 + (drag_y - bottom) / CELL_HEIGHT);
+    return 0;
+}
+
+static long now_ms(void) {
+    struct timespec now;
+
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return now.tv_sec * 1000 + now.tv_nsec / 1000000;
+}
+
+// Scrolls every DRAG_SCROLL_MS while the selection is dragged out of the window,
+// taking the selection along, and returns how long until the next scroll, or -1.
+static int drag_scroll(void) {
+    static long last;
+    long now = now_ms();
+    int lines = drag_lines();
+
+    if (!lines)
+        return -1;
+    if (now - last >= DRAG_SCROLL_MS) {
+        last = now;
+        scroll_view(lines);
+        select_to = place_at(drag_x, drag_y);
+        selected = order(select_from) != order(select_to);
+    }
+    return (int)(DRAG_SCROLL_MS - (now - last));
 }
 
 // Each line's text, without the spaces at its end, with a line break between them.
@@ -453,11 +502,6 @@ static void paste(int master) {
         text[i] = text[i] == '\n' ? '\r' : text[i];
     write_all(master, text, length);
     free(text);
-}
-
-static void scroll_view(int lines) {
-    view = clamp(view + lines, 0, history_count);
-    mark_all_dirty();
 }
 
 static void paint_background(void) {
@@ -554,7 +598,10 @@ int main(int argc, char **argv) {
         struct pollfd fds[2] = {{.fd = gui_fd(), .events = POLLIN}, {.fd = master, .events = POLLIN}};
         char buf[4096];
 
-        if (poll(fds, 2, -1) < 0 && errno != EINTR)
+        int timeout = drag_scroll();
+
+        draw(); // what came last time round, and any scrolling
+        if (poll(fds, 2, timeout) < 0 && errno != EINTR)
             break;
 
         // The shell's output, ending when everything on the terminal has exited.
@@ -603,7 +650,6 @@ int main(int argc, char **argv) {
         } else if (fds[0].revents & (POLLIN | POLLHUP)) {
             running = false; // wm has gone
         }
-        draw();
     }
 
     // Closing the master hangs up whatever is still running on the terminal.

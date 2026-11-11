@@ -575,11 +575,28 @@ static bool ctrl_key(const struct key_event *k, char letter) {
 }
 
 bool gui_shortcut(const struct gui_ui *ui, char letter) {
+    bool shift = letter >= 'A' && letter <= 'Z';
+
     for (int i = 0; i < ui->key_count; i++) {
-        if (ctrl_key(&ui->keys[i], letter))
+        const struct key_event *k = &ui->keys[i];
+
+        if (ctrl_key(k, shift ? letter - 'A' + 'a' : letter) && !(k->modifiers & KEY_MOD_SHIFT) == !shift)
             return true;
     }
     return false;
+}
+
+bool gui_key(const struct gui_ui *ui, uint16_t code) {
+    return key_pressed(ui, code);
+}
+
+void gui_set_focus(struct gui_ui *ui, const char *label, const char *text) {
+    ui->focus = ui->reveal = id_of(label);
+    if (text) {
+        ui->text_owner = ui->focus;
+        ui->text_anchor = 0;
+        ui->text_cursor = strlen(text);
+    }
 }
 
 // Editing that's the same on one line or many. Shift with the keys that move the
@@ -643,7 +660,7 @@ static bool edit(const struct key_event *k, struct editing *e) {
         memmove(s + at, s + at + 1, len - at);
         return true;
     }
-    if (((typed >= ' ' && typed < 127) || typed == '\n') && !(k->modifiers & (KEY_MOD_CTRL | KEY_MOD_ALT)))
+    if (((typed >= ' ' && typed < 127) || (typed == '\n' && e->multiline)) && !(k->modifiers & (KEY_MOD_CTRL | KEY_MOD_ALT)))
         return insert(e, &typed, 1);
     return false;
 }

@@ -129,6 +129,25 @@ try:
     lines = wait_screen(v, 'pasted-copyme')
     check('copying and pasting', len(lines) > 2 and lines[2] == 'pasted-copyme', '\n'.join(lines))
 
+    # Dragging a selection above the window scrolls back, taking the selection
+    # along, while the mouse stays there. Press on row40's line, near the bottom.
+    v.type('clear; seq=1; while [ $seq -le 40 ]; do echo row$seq; seq=$((seq+1)); done\n')
+    lines = wait_screen(v, 'row40')
+    v.mouse(LEFT + 20 - 1240, TOP + 23 * 16 + 8 - 780, 1)
+    v.mouse(0, TOP - 20 - (TOP + 23 * 16 + 8)) # into the title bar, two lines a scroll
+    time.sleep(0.5)
+    v.mouse(buttons=0)
+    v.mouse(1240 - LEFT - 20, 780 - TOP + 20)
+    back = screen_text(v)
+    check('dragging a selection out of the window scrolls', back[23] != 'row40' and 'row1' in back, '\n'.join(back))
+    v.key('ctrl-shift-c')
+    v.type('cat > /tmp/selected\n'); time.sleep(0.3)
+    v.key('ctrl-shift-v'); time.sleep(0.5); v.key('ctrl-d'); v.key('ctrl-d'); time.sleep(0.3)
+    v.type('clear; wc -l < /tmp/selected; echo counted\n')
+    lines = wait_screen(v, 'counted')
+    counted = lines[0].strip()
+    check('and the selection with it', counted.isdigit() and int(counted) >= 30, '\n'.join(lines))
+
     # Maximized, it fills the screen above the taskbar, from 1, 25, and tells the
     # program running in it.
     v.type('clear; winsize -w\n'); time.sleep(1)

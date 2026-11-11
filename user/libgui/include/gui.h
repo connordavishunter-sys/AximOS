@@ -262,8 +262,15 @@ void gui_label(struct gui_ui *ui, const char *format, ...) __attribute__((format
 void gui_separator(struct gui_ui *ui);
 void gui_progress(struct gui_ui *ui, float fraction);
 
-// Whether Ctrl and a letter were pressed this frame, for shortcuts.
+// Whether Ctrl and a letter were pressed this frame, for shortcuts. A capital
+// letter is with Shift as well.
 bool gui_shortcut(const struct gui_ui *ui, char letter);
+
+// Whether a key was pressed this frame.
+bool gui_key(const struct gui_ui *ui, uint16_t code);
+
+// Gives the widget with label the keyboard, and if it holds text, selects all of it.
+void gui_set_focus(struct gui_ui *ui, const char *label, const char *text);
 
 // These return true when they're pressed, or when what they hold changes.
 bool gui_button(struct gui_ui *ui, const char *label);
@@ -301,3 +308,28 @@ void gui_menu_end(struct gui_ui *ui);
 // inside each other, GUI_UI_MAX_DEPTH deep.
 void gui_scroll_begin(struct gui_ui *ui, const char *label, int height);
 void gui_scroll_end(struct gui_ui *ui);
+
+// A file picker, which fills the window while it's open, in place of what's
+// usually there. It shows a folder's files, with folders first, to choose one to
+// open, or to choose a name to save as. Typing a folder's path in the name box
+// goes there.
+#define GUI_PATH_MAX 1024
+
+struct gui_file_picker {
+    bool open, saving, focus_name;
+    char folder[GUI_PATH_MAX], name[256];
+    char path[GUI_PATH_MAX]; // what was chosen
+    char status[GUI_PATH_MAX + 64], replacing[GUI_PATH_MAX];
+    char **items;
+    int count, selected;
+};
+
+enum { GUI_PICKED = 1, GUI_PICK_CANCELLED };
+
+// Opens it on folder, with name in the name box.
+void gui_picker_open(struct gui_file_picker *picker, const char *folder, const char *name, bool saving);
+
+// Draws it, between gui_ui_begin and gui_ui_end. Returns GUI_PICKED with the
+// chosen file's path in picker->path, GUI_PICK_CANCELLED when Cancel or Escape
+// is pressed, and 0 until then. Either closes it.
+int gui_file_picker(struct gui_ui *ui, struct gui_file_picker *picker);

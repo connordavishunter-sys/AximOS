@@ -86,9 +86,10 @@ try:
     check("the window that isn't focused has a lighter shadow", darker(focused_shadow, px(75, 300)),
           f'{focused_shadow:x} {px(75, 300):x}')
 
-    # The editor's contents are 640x480 from 112, 116, with the text from 95 down.
+    # The editor's contents are 640x480 from 112, 116, with the text from 71 down.
+    text_line = 116 + 71 + 5 + 8
     at = v.mark()
-    mouse.click(112 + 300, 116 + 95 + 5 + 8)
+    mouse.click(112 + 300, text_line)
     check('an I-beam over the text', mouse.shape() == WHITE, hex(mouse.shape()))
     v.type(' world')
     check('typing marks the title', v.wait('editor: title *hello.txt - Editor', 5, at), v.text(at))
@@ -99,8 +100,44 @@ try:
     # The line, selected with Shift+Home, goes on the clipboard for later.
     v.key('shift-home'); v.key('ctrl-c')
 
+    # Save as picks in the file's folder, with its name selected to type over.
     at = v.mark()
+    v.key('ctrl-shift-s')
+    check('Save as opens the picker', v.wait('editor: picking in /tmp', 5, at), v.text(at))
+    v.type('copy.txt\n')
+    check('and saves under the new name', v.wait('editor: saved /tmp/copy.txt 12 bytes', 5, at)
+          and v.wait('editor: title copy.txt - Editor', 5, at), v.text(at))
+
+    # In the picker, typing a folder goes there. Its list starts 142 down, with
+    # folders first, then files by name: copy.txt, hello.txt.
+    at = v.mark()
+    v.key('ctrl-o')
+    check('Open opens the picker', v.wait('editor: picking in /tmp', 5, at), v.text(at))
+    v.type('/system/etc\n')
+    check('typing a folder goes there', v.wait('editor: picking in /system/etc', 5, at), v.text(at))
+    back = v.mark()
+    v.type('/tmp\n')
+    v.wait('editor: picking in /tmp', 5, back)
+    time.sleep(0.5)
+    mouse.double_click(112 + 60, 116 + 142 + 2 + 22 + 11)
+    check('double-clicking a file opens it', v.wait('editor: opened /tmp/hello.txt 12 bytes', 5, at), v.text(at))
+
+    # Saving over a file that's there asks first.
+    at = v.mark()
+    v.key('ctrl-shift-s'); time.sleep(0.5); v.key('ret'); time.sleep(0.5)
+    check('saving over a file asks first', 'editor: saved' not in v.text(at), v.text(at))
+    v.key('ret')
+    check('and replaces it when asked again', v.wait('editor: saved /tmp/hello.txt 12 bytes', 5, at), v.text(at))
+    at = v.mark()
+    v.key('ctrl-o'); time.sleep(0.5); v.key('esc')
+    check('Escape cancels picking', v.wait('editor: picking cancelled', 5, at), v.text(at))
+
+    # With changes, Open and closing ask first.
+    at = v.mark()
+    mouse.click(112 + 300, text_line)
     v.type('!')
+    v.key('ctrl-o'); time.sleep(0.5)
+    check('Open with changes asks first', 'editor: picking in' not in v.text(at), v.text(at))
     v.key('meta_l-q'); time.sleep(1)
     check("closing with changes asks first", 'editor: closed' not in v.text(at), v.text(at))
     v.key('meta_l-q')
@@ -113,7 +150,7 @@ try:
     mouse.click(80 + 450, 84 + 71 + 13)
     v.type('docs')
     mouse.click(80 + 297, 84 + 71 + 13)
-    check('New folder', v.wait('files: made /tmp/docs', 5, at) and v.wait('files: in /tmp: docs/ hello.txt', 5, at),
+    check('New folder', v.wait('files: made /tmp/docs', 5, at) and v.wait('files: in /tmp: docs/ copy.txt hello.txt', 5, at),
           v.text(at))
     mouse.click(80 + 141, 84 + 71 + 13)
     time.sleep(0.5)
@@ -121,7 +158,9 @@ try:
     mouse.click(80 + 141, 84 + 71 + 13)
     check('and deletes on the second press', v.wait('files: deleted /tmp/docs', 5, at), v.text(at))
 
+    # hello.txt is second now, after copy.txt.
     at = v.mark()
+    mouse.click(80 + x + 40, 84 + y + 2 + 22 + 11)
     mouse.click(80 + 450, 84 + 71 + 13)
     v.type('greeting.txt')
     mouse.click(80 + 211, 84 + 71 + 13)
@@ -140,7 +179,7 @@ try:
 
     v.key('meta_l-shift-q'); time.sleep(1)
     o = v.run('cat /tmp/greeting.txt; ls /tmp')
-    check('the saved file, renamed', 'hello world\n' in o and 'hello.txt' not in o and 'docs' not in o, o)
+    check('the saved file, renamed', 'hello world\n' in o and 'hello.txt' not in o and 'copy.txt' in o, o)
 finally:
     v.close()
 finish()
