@@ -16,9 +16,11 @@
 #include <string.h>
 #include <syscall_numbers.h>
 
-// The unmapped pages either side of the stack catch overflows.
+// The unmapped pages either side of the stack catch overflows. Only the top pages,
+// which hold the arguments, are mapped at the start, and the rest when first touched.
 #define STACK_TOP 0x00007FFFFFFFF000UL
-#define STACK_PAGES 16
+#define STACK_PAGES 2048
+#define STACK_FIRST_PAGES 2
 #define STACK_BOTTOM (STACK_TOP - STACK_PAGES * PAGE_SIZE)
 
 // Mappings grow down from here, and the heap grows up towards them. Address space
@@ -341,7 +343,7 @@ static int load_image(const struct vfs_node *file, const struct exec_args *args,
     struct elf_image elf;
     int status = elf_load(file, &elf);
 
-    for (uint64_t page = STACK_BOTTOM; status == 0 && page < STACK_TOP; page += PAGE_SIZE)
+    for (uint64_t page = STACK_TOP - STACK_FIRST_PAGES * PAGE_SIZE; status == 0 && page < STACK_TOP; page += PAGE_SIZE)
         status = map_new_page(page) ? 0 : -ENOMEM;
 
     if (status != 0) {
@@ -1358,8 +1360,17 @@ void process_move_futex_waiters(uint64_t old_page, uint64_t new_page) {
     }
 }
 
-void process_handle_kernel_fault(uint64_t address, bool write) {
-    if (write && mm_handle_write_fault(address))
+bool process_fault_in(uint64_t address) {
+    uint64_t page = address & ~(uint64_t)(PAGE_SIZE - 1);
+
+    if (page < STACK_BOTTOM || page >= STACK_TOP)
+        return false;
+    // Another thread may have touched it first.
+    return mm_user_physical(page) || map_new_page(page);
+}
+
+void process_handle_kernel_fault(uint64_t address, bool present, bool write) {
+    if ((present ? write && mm_handle_write_fault(address) : process_fault_in(address)))
         return;
 
     // Another thread unmapped what a system call was using, which is the program's

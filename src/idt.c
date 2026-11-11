@@ -14,6 +14,7 @@
 #define VECTOR_PAGE_FAULT 14
 #define VECTOR_EXCEPTION_COUNT 32
 #define VECTOR_SYSCALL 0x80
+#define PAGE_FAULT_PRESENT 0x01
 #define PAGE_FAULT_WRITE 0x02
 #define STUB_SPACING 16
 
@@ -77,9 +78,10 @@ void idt_load(void) {
 }
 
 static void user_exception(struct interrupt_frame *frame, uint64_t cr2) {
-    // A write to a page shared by fork isn't really a fault.
-    if (frame->vector == VECTOR_PAGE_FAULT && (frame->error & PAGE_FAULT_WRITE)
-        && mm_handle_write_fault(cr2))
+    // Neither is a write to a page shared by fork, nor touching the stack for the first time.
+    if (frame->vector == VECTOR_PAGE_FAULT
+        && (frame->error & PAGE_FAULT_PRESENT ? frame->error & PAGE_FAULT_WRITE && mm_handle_write_fault(cr2)
+                                              : process_fault_in(cr2)))
         return;
 
     kprintf("exception: vector %lu error %lx rip %lx rsp %lx cr2 %lx\n",
@@ -113,7 +115,7 @@ void interrupt_dispatch(struct interrupt_frame *frame) {
 
     // The kernel lock is already held, as the kernel was running.
     if (vector == VECTOR_PAGE_FAULT && !from_user && this_cpu()->running && cr2 >= PAGE_SIZE && cr2 < LOWER_HALF_END) {
-        process_handle_kernel_fault(cr2, frame->error & PAGE_FAULT_WRITE);
+        process_handle_kernel_fault(cr2, frame->error & PAGE_FAULT_PRESENT, frame->error & PAGE_FAULT_WRITE);
         return;
     }
     if (vector < VECTOR_EXCEPTION_COUNT && !from_user)

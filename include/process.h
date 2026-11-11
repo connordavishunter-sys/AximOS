@@ -159,9 +159,13 @@ int process_wakeup_some(void *channel, int count);
 // in it need to follow, as futexes are named by physical address.
 void process_move_futex_waiters(uint64_t old_page, uint64_t new_page);
 
+// Gives a stack page memory the first time it's touched. Returns false if the
+// address isn't in the stack or there's no memory.
+bool process_fault_in(uint64_t address);
+
 // A page fault in the kernel on a user address, as a thread may have changed the
 // memory after it was checked. Fixes it or ends the process.
-void process_handle_kernel_fault(uint64_t address, bool write);
+void process_handle_kernel_fault(uint64_t address, bool present, bool write);
 int process_parent_pid(void);
 int process_group_of(int pid);
 

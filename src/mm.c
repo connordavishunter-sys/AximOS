@@ -240,7 +240,7 @@ static uint64_t *walk(uint64_t virt, bool create) {
 bool mm_map_page(uint64_t virt, uint64_t phys, uint64_t flags) {
     uint64_t *entry = walk(virt, true);
 
-    if (!entry || (*entry & PTE_PRESENT))
+    if (!entry || (*entry & (PTE_PRESENT | PAGE_INACCESSIBLE)))
         return false;
 
     *entry = phys | PTE_PRESENT | flags;
@@ -488,6 +488,8 @@ bool mm_user_range_ok(uint64_t virt, size_t len, bool writable) {
     for (uint64_t page = virt & ~(uint64_t)(PAGE_SIZE - 1); page <= last; page += PAGE_SIZE) {
         uint64_t *entry = walk(page, false);
 
+        if ((!entry || !(*entry & (PTE_PRESENT | PAGE_INACCESSIBLE))) && process_fault_in(page))
+            entry = walk(page, false);
         if (!entry || !(*entry & PTE_PRESENT) || !(*entry & PAGE_USER))
             return false;
         if (writable && !(*entry & PAGE_WRITE) && !mm_handle_write_fault(page))
