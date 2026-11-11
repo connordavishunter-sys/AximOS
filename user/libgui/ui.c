@@ -30,6 +30,7 @@
 #define ACCENT_HOT 0x5578E8
 #define FOCUS_RING 0x8FA8F5
 #define SEPARATOR 0x3A4150
+#define SELECTION 0x34519E
 #define THUMB 0x4A5263
 
 static struct gui_rect intersect(struct gui_rect a, struct gui_rect b) {
@@ -243,15 +244,6 @@ void gui_same_line(struct gui_ui *ui) {
     ui->layout.same_line = true;
 }
 
-bool gui_shortcut(const struct gui_ui *ui, char letter) {
-    for (int i = 0; i < ui->key_count; i++) {
-        const struct key_event *k = &ui->keys[i];
-
-        if ((k->modifiers & KEY_MOD_CTRL) && (k->text == (uint32_t)(letter & 0x1F) || k->text == (uint32_t)letter))
-            return true;
-    }
-    return false;
-}
 
 struct gui_rect gui_last_rect(const struct gui_ui *ui) {
     return ui->last;
@@ -486,10 +478,11 @@ bool gui_slider(struct gui_ui *ui, const char *label, int *value, int min, int m
     return *value != before;
 }
 
-// The cursor starts at the end when a text widget gets the keyboard.
+// The cursor starts at the end when a text widget gets the keyboard, with nothing
+// selected.
 static void own_cursor(struct gui_ui *ui, uint32_t id, size_t len) {
-    if (ui->focus == id && (ui->text_owner != id || ui->text_cursor > len)) {
-        ui->text_cursor = len;
+    if (ui->focus == id && (ui->text_owner != id || ui->text_cursor > len || ui->text_anchor > len)) {
+        ui->text_cursor = ui->text_anchor = len;
         ui->text_owner = id;
     }
 }
@@ -506,46 +499,185 @@ static size_t line_end(const char *s, size_t at) {
     return at;
 }
 
-// Editing that's the same on one line or many. Returns whether the text changed.
-static bool edit(const struct key_event *k, char *s, size_t size, size_t *at, bool multiline) {
-    size_t len = strlen(s), start = line_start(s, *at), end = line_end(s, *at);
-    char typed = k->code == KEY_ENTER && multiline ? '\n' : (char)k->text;
+static bool is_word(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+}
 
-    if (k->code == KEY_LEFT && *at > 0) {
-        (*at)--;
-    } else if (k->code == KEY_RIGHT && *at < len) {
-        (*at)++;
-    } else if (k->code == KEY_HOME) {
-        *at = start;
-    } else if (k->code == KEY_END) {
-        *at = end;
-    } else if (k->code == KEY_UP && multiline && start > 0) {
-        size_t above = line_start(s, start - 1);
+// A column on a line of length, or its end if the line is shorter.
+static size_t column_in(size_t column, size_t length) {
+    return column < length ? column : length;
+}
 
-        *at = above + (*at - start < start - 1 - above ? *at - start : start - 1 - above);
-    } else if (k->code == KEY_DOWN && multiline && s[end]) {
-        size_t below = end + 1, below_end = line_end(s, below);
+// Text being edited, with the cursor at *at and the other end of what's selected
+// at *anchor, the same when nothing is.
+struct editing {
+    char *s;
+    size_t size, *at, *anchor;
+    bool multiline;
+};
 
-        *at = below + (*at - start < below_end - below ? *at - start : below_end - below);
-    } else if (k->code == KEY_BACKSPACE && *at > 0) {
-        memmove(s + *at - 1, s + *at, len - *at + 1);
-        (*at)--;
-        return true;
-    } else if (k->code == KEY_DELETE && *at < len) {
-        memmove(s + *at, s + *at + 1, len - *at);
-        return true;
-    } else if (((typed >= ' ' && typed < 127) || typed == '\n') && !(k->modifiers & (KEY_MOD_CTRL | KEY_MOD_ALT))
-               && len + 1 < size) {
-        memmove(s + *at + 1, s + *at, len - *at + 1);
-        s[(*at)++] = typed;
-        return true;
+static void selected_range(const struct editing *e, size_t *low, size_t *high) {
+    *low = *e->at < *e->anchor ? *e->at : *e->anchor;
+    *high = *e->at < *e->anchor ? *e->anchor : *e->at;
+}
+
+static bool delete_selection(struct editing *e) {
+    size_t low, high;
+
+    selected_range(e, &low, &high);
+    if (low == high)
+        return false;
+    memmove(e->s + low, e->s + high, strlen(e->s) - high + 1);
+    *e->at = *e->anchor = low;
+    return true;
+}
+
+// Puts text in place of what's selected, as much as fits. One line takes line
+// breaks as spaces, and what has no glyph shows as ?.
+static bool insert(struct editing *e, const char *text, size_t n) {
+    bool changed = delete_selection(e);
+    size_t len = strlen(e->s), at = *e->at, room = e->size - 1 - len;
+
+    n = n < room ? n : room;
+    memmove(e->s + at + n, e->s + at, len - at + 1);
+    for (size_t i = 0; i < n; i++) {
+        char c = text[i];
+
+        e->s[at + i] = c == '\n' ? (e->multiline ? '\n' : ' ') : c == '\t' ? ' ' : c >= ' ' && c < 127 ? c : '?';
+    }
+    *e->at = *e->anchor = at + n;
+    return changed || n;
+}
+
+static void copy_selection(const struct editing *e) {
+    size_t low, high;
+
+    selected_range(e, &low, &high);
+    if (low < high)
+        gui_clipboard_set(e->s + low, high - low);
+}
+
+// Selects the word at, or the run of other characters there.
+static void select_word(struct editing *e, size_t at) {
+    size_t start = at, end = at;
+    bool word = is_word(e->s[at]);
+
+    while (start > 0 && is_word(e->s[start - 1]) == word && e->s[start - 1] != '\n')
+        start--;
+    while (e->s[end] && is_word(e->s[end]) == word && e->s[end] != '\n')
+        end++;
+    *e->anchor = start;
+    *e->at = end;
+}
+
+static bool ctrl_key(const struct key_event *k, char letter) {
+    return (k->modifiers & KEY_MOD_CTRL) && (k->text == (uint32_t)(letter & 0x1F) || k->text == (uint32_t)letter);
+}
+
+bool gui_shortcut(const struct gui_ui *ui, char letter) {
+    for (int i = 0; i < ui->key_count; i++) {
+        if (ctrl_key(&ui->keys[i], letter))
+            return true;
     }
     return false;
+}
+
+// Editing that's the same on one line or many. Shift with the keys that move the
+// cursor selects. Returns whether the text changed.
+static bool edit(const struct key_event *k, struct editing *e) {
+    char *s = e->s, typed = k->code == KEY_ENTER && e->multiline ? '\n' : (char)k->text;
+    size_t len = strlen(s), at = *e->at, start = line_start(s, at), end = line_end(s, at), low, high;
+    bool shift = k->modifiers & KEY_MOD_SHIFT, moved = true;
+
+    selected_range(e, &low, &high);
+    if (ctrl_key(k, 'a')) {
+        *e->anchor = 0;
+        *e->at = len;
+        return false;
+    }
+    if (ctrl_key(k, 'c') || ctrl_key(k, 'x')) {
+        copy_selection(e);
+        return ctrl_key(k, 'x') && delete_selection(e);
+    }
+    if (ctrl_key(k, 'v')) {
+        size_t n;
+        char *pasted = gui_clipboard_get(&n);
+        bool changed = pasted && insert(e, pasted, n);
+
+        free(pasted);
+        return changed;
+    }
+
+    // Left and Right on their own go to that end of what's selected.
+    if ((k->code == KEY_LEFT || k->code == KEY_RIGHT) && !shift && low != high)
+        at = k->code == KEY_LEFT ? low : high;
+    else if (k->code == KEY_LEFT && at > 0)
+        at--;
+    else if (k->code == KEY_RIGHT && at < len)
+        at++;
+    else if (k->code == KEY_HOME)
+        at = start;
+    else if (k->code == KEY_END)
+        at = end;
+    else if (k->code == KEY_UP && e->multiline && start > 0)
+        at = line_start(s, start - 1) + column_in(at - start, start - 1 - line_start(s, start - 1));
+    else if (k->code == KEY_DOWN && e->multiline && s[end])
+        at = end + 1 + column_in(at - start, line_end(s, end + 1) - end - 1);
+    else
+        moved = false;
+    if (moved) {
+        *e->at = at;
+        if (!shift)
+            *e->anchor = at;
+        return false;
+    }
+
+    if ((k->code == KEY_BACKSPACE || k->code == KEY_DELETE) && low != high)
+        return delete_selection(e);
+    if (k->code == KEY_BACKSPACE && at > 0) {
+        memmove(s + at - 1, s + at, len - at + 1);
+        *e->at = *e->anchor = at - 1;
+        return true;
+    }
+    if (k->code == KEY_DELETE && at < len) {
+        memmove(s + at, s + at + 1, len - at);
+        return true;
+    }
+    if (((typed >= ' ' && typed < 127) || typed == '\n') && !(k->modifiers & (KEY_MOD_CTRL | KEY_MOD_ALT)))
+        return insert(e, &typed, 1);
+    return false;
+}
+
+// The mouse in text: a press puts the cursor there, or selects the word with a
+// double click, and dragging selects from there. Returns whether it moved.
+static bool click_text(struct gui_ui *ui, uint32_t id, struct editing *e, size_t at) {
+    if (ui->active != id || !ui->mouse_down)
+        return false;
+    if (ui->mouse_pressed && ui->double_click)
+        select_word(e, at);
+    else if (ui->mouse_pressed)
+        *e->at = *e->anchor = at;
+    else
+        *e->at = at;
+    return true;
+}
+
+// The selected part of text drawn from x, from index from and count characters long.
+static void draw_selection(struct gui_ui *ui, const struct editing *e, int x, int y, size_t from, size_t count) {
+    size_t low, high;
+
+    selected_range(e, &low, &high);
+    low = low > from ? low : from;
+    high = high < from + count ? high : from + count;
+    if (low < high)
+        fill(ui, x + (int)(low - from) * GUI_CHAR_WIDTH, y - 1, (int)(high - low) * GUI_CHAR_WIDTH, GUI_CHAR_HEIGHT + 2,
+             SELECTION);
 }
 
 bool gui_textbox(struct gui_ui *ui, const char *label, char *s, size_t size) {
     uint32_t id = id_of(label);
     struct gui_rect frame;
+    struct editing e = {s, size, &ui->text_cursor, &ui->text_anchor, false};
     bool changed = false;
 
     framed(ui, label, FRAME_HEIGHT, &frame);
@@ -554,16 +686,23 @@ bool gui_textbox(struct gui_ui *ui, const char *label, char *s, size_t size) {
         ui->cursor = GUI_CURSOR_TEXT;
 
     bool focused = focusable(ui, id);
-
-    own_cursor(ui, id, strlen(s));
-    for (int i = 0; focused && i < ui->key_count; i++)
-        changed |= edit(&ui->keys[i], s, size, &ui->text_cursor, false);
+    int fits = (frame.width - 2 * PADDING) / GUI_CHAR_WIDTH;
+    size_t len = strlen(s);
 
     // Long text scrolls to keep the cursor in sight.
-    int fits = (frame.width - 2 * PADDING) / GUI_CHAR_WIDTH;
+    own_cursor(ui, id, len);
+
     size_t first = focused && (int)ui->text_cursor >= fits ? ui->text_cursor - fits + 1 : 0;
+    long column = first + (ui->mouse_x - frame.x - PADDING + GUI_CHAR_WIDTH / 2) / GUI_CHAR_WIDTH;
+
+    click_text(ui, id, &e, column < 0 ? 0 : (size_t)column > len ? len : (size_t)column);
+    for (int i = 0; focused && i < ui->key_count; i++)
+        changed |= edit(&ui->keys[i], &e);
+    first = focused && (int)ui->text_cursor >= fits ? ui->text_cursor - fits + 1 : 0;
 
     fill(ui, frame.x, frame.y, frame.width, frame.height, ui->hot == id || focused ? FRAME_HOT : FRAME);
+    if (focused)
+        draw_selection(ui, &e, frame.x + PADDING, frame.y + PADDING, first, fits);
     draw_fitted(ui, frame.x + PADDING, frame.y + PADDING, frame.width - 2 * PADDING, s + first, 255, TEXT);
     if (focused) {
         int caret = frame.x + PADDING + (int)(ui->text_cursor - first) * GUI_CHAR_WIDTH;
@@ -660,6 +799,7 @@ bool gui_textarea(struct gui_ui *ui, const char *label, char *s, size_t size, in
     uint32_t id = id_of(label);
     struct gui_scroll *scroll = scroll_of(ui, id);
     struct gui_rect frame, was;
+    struct editing e = {s, size, &ui->text_cursor, &ui->text_anchor, true};
     bool changed = false, moved = false;
     int line_count = 1;
 
@@ -684,13 +824,16 @@ bool gui_textarea(struct gui_ui *ui, const char *label, char *s, size_t size, in
     size_t column = ui->text_cursor - line_start(s, ui->text_cursor);
     int first = focused && (int)column >= fits ? (int)column - fits + 1 : 0;
 
-    if (ui->active == id && ui->mouse_pressed && over(ui, inner)) {
-        int line = (ui->mouse_y - inner.y - PADDING + scroll->offset) / GUI_CHAR_HEIGHT;
+    // Dragging past the top or bottom scrolls, as the cursor goes out of sight.
+    int line = (ui->mouse_y - inner.y - PADDING + scroll->offset) / GUI_CHAR_HEIGHT;
 
-        ui->text_cursor = index_at(s, line, first + (ui->mouse_x - inner.x - PADDING + GUI_CHAR_WIDTH / 2) / GUI_CHAR_WIDTH);
-    }
+    if (ui->mouse_y < inner.y + PADDING)
+        line = (ui->mouse_y - inner.y - PADDING + scroll->offset - GUI_CHAR_HEIGHT + 1) / GUI_CHAR_HEIGHT;
+    if (!(ui->mouse_pressed && !over(ui, inner)))
+        moved = click_text(ui, id, &e,
+                           index_at(s, line, first + (ui->mouse_x - inner.x - PADDING + GUI_CHAR_WIDTH / 2) / GUI_CHAR_WIDTH));
     for (int i = 0; focused && i < ui->key_count; i++) {
-        changed |= edit(&ui->keys[i], s, size, &ui->text_cursor, true);
+        changed |= edit(&ui->keys[i], &e);
         moved = true;
     }
 
@@ -722,7 +865,12 @@ bool gui_textarea(struct gui_ui *ui, const char *label, char *s, size_t size, in
         int y = inner.y + PADDING + line * GUI_CHAR_HEIGHT - scroll->offset;
         size_t end = line_end(s, at);
 
-        if (y + GUI_CHAR_HEIGHT > inner.y && y < inner.y + inner.height && (int)(end - at) > first)
+        bool seen = y + GUI_CHAR_HEIGHT > inner.y && y < inner.y + inner.height;
+
+        // A selected line break shows as a space at the end of its line.
+        if (seen && focused && (int)(end - at) + 1 > first)
+            draw_selection(ui, &e, inner.x + PADDING, y, at + first, end - at + 1 - first);
+        if (seen && (int)(end - at) > first)
             draw_fitted(ui, inner.x + PADDING, y, fits * GUI_CHAR_WIDTH, s + at + first, (int)(end - at) - first, TEXT);
         at = end + 1;
     }

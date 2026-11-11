@@ -96,6 +96,9 @@ try:
     check('Ctrl+S saves', v.wait('editor: saved /tmp/hello.txt 12 bytes', 5, at), v.text(at))
     check('and unmarks it', v.wait('editor: title hello.txt - Editor', 5, at), v.text(at))
 
+    # The line, selected with Shift+Home, goes on the clipboard for later.
+    v.key('shift-home'); v.key('ctrl-c')
+
     at = v.mark()
     v.type('!')
     v.key('meta_l-q'); time.sleep(1)
@@ -104,11 +107,12 @@ try:
     check('and closing again closes', v.wait('editor: closed', 5, at), v.text(at))
     time.sleep(0.5)
 
-    # Back in files: a new folder, deleted with two presses.
+    # Back in files: a new folder, deleted with two presses. The buttons are Open,
+    # Run, Delete, Rename and New folder, then the name box.
     at = v.mark()
-    mouse.click(80 + 400, 84 + 71 + 13)
+    mouse.click(80 + 450, 84 + 71 + 13)
     v.type('docs')
-    mouse.click(80 + 227, 84 + 71 + 13)
+    mouse.click(80 + 297, 84 + 71 + 13)
     check('New folder', v.wait('files: made /tmp/docs', 5, at) and v.wait('files: in /tmp: docs/ hello.txt', 5, at),
           v.text(at))
     mouse.click(80 + 141, 84 + 71 + 13)
@@ -118,12 +122,25 @@ try:
     check('and deletes on the second press', v.wait('files: deleted /tmp/docs', 5, at), v.text(at))
 
     at = v.mark()
+    mouse.click(80 + 450, 84 + 71 + 13)
+    v.type('greeting.txt')
+    mouse.click(80 + 211, 84 + 71 + 13)
+    check('Rename', v.wait('files: renamed /tmp/hello.txt to /tmp/greeting.txt', 5, at), v.text(at))
+
+    # What the editor copied, pasted into the name box, names a new folder.
+    at = v.mark()
+    mouse.click(80 + 450, 84 + 71 + 13)
+    v.key('ctrl-v')
+    mouse.click(80 + 297, 84 + 71 + 13)
+    check('pasting from another program', v.wait('files: made /tmp/hello world', 5, at), v.text(at))
+
+    at = v.mark()
     mouse.click(80 + 25, 84 + 37 + 13)
     check('Up goes to the folder above', v.wait('files: in /: ', 5, at), v.text(at))
 
     v.key('meta_l-shift-q'); time.sleep(1)
-    o = v.run('cat /tmp/hello.txt; ls /tmp')
-    check('the saved file', 'hello world\n' in o and 'docs' not in o, o)
+    o = v.run('cat /tmp/greeting.txt; ls /tmp')
+    check('the saved file, renamed', 'hello world\n' in o and 'hello.txt' not in o and 'docs' not in o, o)
 finally:
     v.close()
 finish()

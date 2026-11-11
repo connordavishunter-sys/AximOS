@@ -53,26 +53,28 @@ int gui_fd(void) {
     return connection;
 }
 
-// Shared memory for pixels, which wm maps and then removes the name of.
-static uint32_t *new_buffer(int width, int height, char name[GUI_TITLE_MAX]) {
+// Shared memory, which wm maps and then removes the name of.
+static void *new_shared(size_t size, char name[GUI_TITLE_MAX]) {
     static int created;
-    size_t size = (size_t)width * height * sizeof(uint32_t);
 
-    if (width <= 0 || height <= 0)
-        return NULL;
     snprintf(name, GUI_TITLE_MAX, "/gui-%d-%d", getpid(), created++);
 
     int fd = shm_open(name, O_RDWR | O_CREAT | O_EXCL, 0600);
-    void *pixels = fd < 0 || ftruncate(fd, size) < 0 ? MAP_FAILED
+    void *shared = fd < 0 || ftruncate(fd, size) < 0 ? MAP_FAILED
                                                      : mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
 
     if (fd >= 0)
         close(fd);
-    if (pixels == MAP_FAILED) {
+    if (shared == MAP_FAILED) {
         shm_unlink(name);
         return NULL;
     }
-    return pixels;
+    return shared;
+}
+
+// For pixels, width by height.
+static uint32_t *new_buffer(int width, int height, char name[GUI_TITLE_MAX]) {
+    return width > 0 && height > 0 ? new_shared((size_t)width * height * sizeof(uint32_t), name) : NULL;
 }
 
 static size_t canvas_size(const struct gui_canvas *c) {
@@ -198,6 +200,53 @@ void gui_set_title(struct gui_window *window, const char *title) {
 
 void gui_set_cursor(struct gui_window *window, enum gui_cursor cursor) {
     gui_send(connection, &(struct gui_message){.type = GUI_CURSOR, .window = window->id, .x = cursor});
+}
+
+bool gui_clipboard_set(const char *text, size_t length) {
+    struct gui_message message = {.type = GUI_CLIPBOARD_SET, .width = (int32_t)length};
+    char *shared = length ? new_shared(length, message.buffer) : NULL;
+
+    if (length && !shared)
+        return false;
+    if (shared) {
+        memcpy(shared, text, length);
+        munmap(shared, length);
+    }
+    return gui_send(connection, &message);
+}
+
+// Waits for the answer, keeping events that come first for gui_next_event.
+char *gui_clipboard_get(size_t *length) {
+    struct gui_message message = {.type = GUI_CLIPBOARD_GET};
+    char *text = NULL;
+
+    if (length)
+        *length = 0;
+    if (!gui_send(connection, &message))
+        return NULL;
+    while (gui_receive(connection, &message) && message.type != GUI_CLIPBOARD)
+        gui_post(&message);
+    if (message.type != GUI_CLIPBOARD || message.width <= 0)
+        return NULL;
+
+    size_t size = (size_t)message.width;
+    int fd = shm_open(message.buffer, O_RDONLY, 0);
+    void *shared = fd < 0 ? MAP_FAILED : mmap(NULL, size, PROT_READ, MAP_SHARED, fd, 0);
+
+    if (fd >= 0)
+        close(fd);
+    shm_unlink(message.buffer);
+    if (shared == MAP_FAILED)
+        return NULL;
+    text = malloc(size + 1);
+    if (text) {
+        memcpy(text, shared, size);
+        text[size] = '\0';
+        if (length)
+            *length = size;
+    }
+    munmap(shared, size);
+    return text;
 }
 
 void gui_show(struct gui_window *window) {

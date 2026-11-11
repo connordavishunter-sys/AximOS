@@ -22,6 +22,11 @@ enum gui_message_type {
     GUI_TITLE,  // a new title, in text
     GUI_CURSOR, // the mouse cursor to show over the window: x is a gui_cursor
 
+    // The clipboard, which wm keeps. Text goes either way in shared memory named
+    // in buffer, width bytes long, which whoever gets it maps and then removes.
+    GUI_CLIPBOARD_SET, // width and buffer, or width 0 to empty it
+    GUI_CLIPBOARD_GET, // answered with GUI_CLIPBOARD
+
     // From wm. Mouse positions are inside the window.
     GUI_CREATED,
     GUI_MOUSE_MOVE,   // x, y, buttons held
@@ -31,6 +36,7 @@ enum gui_message_type {
     GUI_FOCUS,        // focused is whether the window now has the keyboard
     GUI_CLOSE,        // the close button was clicked, or Super+Q pressed
     GUI_RESIZE,       // width and height wm would like the window to be
+    GUI_CLIPBOARD,    // width and buffer, what's on the clipboard
 
     // From libgui itself, through gui_post: draw the window again.
     GUI_REDRAW,
@@ -96,6 +102,13 @@ bool gui_resize(struct gui_window *window, int width, int height);
 
 void gui_set_title(struct gui_window *window, const char *title);
 void gui_set_cursor(struct gui_window *window, enum gui_cursor cursor);
+
+// Puts text on the clipboard, returning false if memory ran out.
+bool gui_clipboard_set(const char *text, size_t length);
+
+// What's on the clipboard, ending in a zero byte, to be freed, or NULL if it's
+// empty. length, if not NULL, gets its length.
+char *gui_clipboard_get(size_t *length);
 
 // Shows what was drawn on part of a window's canvas, or all of it with gui_show.
 void gui_update(struct gui_window *window, int x, int y, int width, int height);
@@ -182,8 +195,8 @@ struct gui_ui {
     // dragged, and with the keyboard.
     uint32_t hot, active, focus;
     enum gui_cursor cursor, shown_cursor; // what the widget under the mouse wants, and what wm shows
-    size_t text_cursor; // in the text box that last had the keyboard
-    uint32_t text_owner;
+    size_t text_cursor, text_anchor; // in the text box that last had the keyboard, and
+    uint32_t text_owner;             // where what's selected starts
     int drag_offset; // from the top of a scroll bar's thumb to the mouse
 
     // The widgets that can have the keyboard, in order, as of the last frame and

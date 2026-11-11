@@ -156,6 +156,27 @@ static void delete_selected(void) {
     read_folder(folder, NULL);
 }
 
+// Renames the selected entry to what's typed in the name box.
+static void rename_selected(void) {
+    char from[PATH_MAX], to[PATH_MAX];
+
+    if (!count)
+        return;
+    if (!new_name[0] || strchr(new_name, '/')) {
+        snprintf(status, sizeof(status), "Type the new name first, without a /");
+        return;
+    }
+    path_of(from, entries[selected].name);
+    path_of(to, new_name);
+    if (rename(from, to) < 0) {
+        snprintf(status, sizeof(status), "Can't rename %s: %s", entries[selected].name, strerror(errno));
+        return;
+    }
+    printf("files: renamed %s to %s\n", from, to);
+    read_folder(folder, new_name);
+    new_name[0] = '\0';
+}
+
 static void make_folder(void) {
     char path[PATH_MAX];
 
@@ -195,6 +216,8 @@ static void frame(struct gui_ui *ui) {
             run_selected();
         if (gui_menu_item(ui, "New folder"))
             make_folder();
+        if (gui_menu_item(ui, "Rename"))
+            rename_selected();
         if (gui_menu_item(ui, "Delete"))
             delete_selected();
         if (gui_menu_item(ui, "Quit"))
@@ -225,6 +248,9 @@ static void frame(struct gui_ui *ui) {
     gui_same_line(ui);
     if (gui_button(ui, "Delete"))
         delete_selected();
+    gui_same_line(ui);
+    if (gui_button(ui, "Rename"))
+        rename_selected();
     gui_same_line(ui);
     if (gui_button(ui, "New folder"))
         make_folder();

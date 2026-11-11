@@ -20,6 +20,7 @@
 #define MAX_WINDOWS 64
 #define MAX_DAMAGE 32
 #define MAX_SIZE 4096
+#define CLIPBOARD_MAX (1024 * 1024)
 #define INBOX_SIZE (8 * sizeof(struct gui_message))
 #define OUTBOX_SIZE (64 * sizeof(struct gui_message))
 
@@ -35,13 +36,13 @@
 // Shadows reach SHADOW past the frame, moved SHADOW_DROP down, and are darkest,
 // out of 255, at SHADOW_ALPHA. Their strength, out of 256, fades over FADE_MS
 // between what's right for focused windows and the rest, and from nothing for
-// new windows.
+// new windows, quickly at first and slowing to a stop.
 #define SHADOW 16
 #define SHADOW_DROP 4
 #define SHADOW_ALPHA 120
 #define SHADOW_FOCUSED 256
 #define SHADOW_UNFOCUSED 140
-#define FADE_MS 180
+#define FADE_MS 240
 #define FRAME_MS 16
 
 #define TASKBAR_HEIGHT 28
@@ -111,7 +112,8 @@ struct window {
     int resize_edges;
 
     enum gui_cursor cursor; // what the program wants over its contents
-    int shadow, shadow_target;
+    int shadow, fade_from, fade_to;
+    long fade_start;
 };
 
 enum part { PART_NONE, PART_CONTENT, PART_TITLE, PART_CLOSE, PART_MAXIMIZE, PART_MINIMIZE, PART_RESIZE };
@@ -128,7 +130,8 @@ static uint32_t next_id = 1;
 static struct window *focused;
 
 static uint8_t falloff[SHADOW + 1][SHADOW + 1];
-static long fade_clock; // when shadows last stepped, or 0 when none are fading
+static char *clipboard;
+static size_t clipboard_length;
 
 static struct rect damage[MAX_DAMAGE];
 static int damage_count;
@@ -584,26 +587,31 @@ static long now_ms(void) {
     return now.tv_sec * 1000 + now.tv_nsec / 1000000;
 }
 
-// Moves each shadow a step towards its target, returning whether any has further
-// to go. The steps are by time, so they take FADE_MS however often they come.
+static void fade(struct window *w, int to) {
+    w->fade_from = w->shadow;
+    w->fade_to = to;
+    w->fade_start = now_ms();
+}
+
+// Sets each fading shadow to how far it is through its fade, eased out as
+// 1 - (1 - t)^3, returning whether any has further to go.
 static bool fade_shadows(void) {
-    long now = now_ms(), step = fade_clock ? (now - fade_clock) * SHADOW_FOCUSED / FADE_MS : 0;
+    const long whole = (long)FADE_MS * FADE_MS * FADE_MS;
+    long now = now_ms();
     bool fading = false;
 
     for (int i = 0; i < window_count; i++) {
         struct window *w = windows[i];
-        int left = w->shadow_target - w->shadow;
+        long left = FADE_MS - (now - w->fade_start);
 
-        if (!left)
+        if (w->shadow == w->fade_to)
             continue;
-        w->shadow += left > 0 ? (left < step ? left : step) : (-left < step ? left : -step);
-        fading |= w->shadow != w->shadow_target;
+        left = left < 0 ? 0 : left;
+        w->shadow = w->fade_from + (w->fade_to - w->fade_from) * (whole - left * left * left) / whole;
+        fading |= w->shadow != w->fade_to;
         if (!w->minimized)
             add_damage(extent_of(w));
     }
-    // A step too small to move anything waits for more time to pass.
-    if (!fading || step || !fade_clock)
-        fade_clock = fading ? now : 0;
     return fading;
 }
 
@@ -614,13 +622,13 @@ static void set_focus(struct window *w) {
     if (focused) {
         send_to(focused, (struct gui_message){.type = GUI_FOCUS, .focused = 0});
         damage_title(focused);
-        focused->shadow_target = SHADOW_UNFOCUSED;
+        fade(focused, SHADOW_UNFOCUSED);
     }
     focused = w;
     if (w) {
         send_to(w, (struct gui_message){.type = GUI_FOCUS, .focused = 1});
         damage_title(w);
-        w->shadow_target = SHADOW_FOCUSED;
+        fade(w, SHADOW_FOCUSED);
     }
 }
 
@@ -640,23 +648,31 @@ static void raise_window(struct window *w) {
     add_damage(extent_of(w));
 }
 
+// Opens shared memory a message names, removing the name. Returns its file, or -1.
+static int open_shared(const struct gui_message *m, int flags) {
+    char name[GUI_TITLE_MAX];
+    int fd;
+
+    // A name that isn't terminated is cut short rather than trusted.
+    memcpy(name, m->buffer, sizeof(name));
+    name[sizeof(name) - 1] = '\0';
+    fd = shm_open(name, flags, 0600);
+    shm_unlink(name);
+    return fd;
+}
+
 // Maps the pixels a message names, and removes the name.
 static bool map_buffer(const struct gui_message *m, struct gui_canvas *out) {
     size_t size = (size_t)m->width * m->height * sizeof(uint32_t);
-    char buffer[GUI_TITLE_MAX];
 
-    // A name that isn't terminated is cut short rather than trusted.
-    memcpy(buffer, m->buffer, sizeof(buffer));
-    buffer[sizeof(buffer) - 1] = '\0';
     if (m->width <= 0 || m->height <= 0 || m->width > MAX_SIZE || m->height > MAX_SIZE)
         return false;
 
-    int fd = shm_open(buffer, O_RDONLY, 0);
+    int fd = open_shared(m, O_RDONLY);
 
     if (fd < 0)
         return false;
     *out = (struct gui_canvas){mmap(NULL, size, PROT_READ, MAP_SHARED, fd, 0), m->width, m->height, m->width};
-    shm_unlink(buffer);
     close(fd);
     return out->pixels != MAP_FAILED;
 }
@@ -787,6 +803,48 @@ static void take_buffer(struct window *w, const struct gui_message *m) {
         ask_size(w, w->want_width, w->want_height);
 }
 
+static void set_clipboard(const struct gui_message *m) {
+    size_t length = m->width > 0 && m->width <= CLIPBOARD_MAX ? (size_t)m->width : 0;
+    int fd = length ? open_shared(m, O_RDONLY) : -1;
+    void *shared = fd < 0 ? MAP_FAILED : mmap(NULL, length, PROT_READ, MAP_SHARED, fd, 0);
+    char *copy = shared == MAP_FAILED ? NULL : malloc(length);
+
+    if (fd >= 0)
+        close(fd);
+    if (copy)
+        memcpy(copy, shared, length);
+    if (shared != MAP_FAILED)
+        munmap(shared, length);
+    free(clipboard);
+    clipboard = copy;
+    clipboard_length = copy ? length : 0;
+}
+
+// Answers with the clipboard in new shared memory, which the program removes.
+static void send_clipboard(struct client *client) {
+    static int created;
+    struct gui_message reply = {.type = GUI_CLIPBOARD};
+    int fd = -1;
+    void *shared = MAP_FAILED;
+
+    if (clipboard_length) {
+        snprintf(reply.buffer, sizeof(reply.buffer), "/wm-clipboard-%d", created++);
+        fd = shm_open(reply.buffer, O_RDWR | O_CREAT | O_EXCL, 0600);
+        if (fd >= 0 && ftruncate(fd, clipboard_length) == 0)
+            shared = mmap(NULL, clipboard_length, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+        if (fd >= 0)
+            close(fd);
+    }
+    if (shared != MAP_FAILED) {
+        memcpy(shared, clipboard, clipboard_length);
+        munmap(shared, clipboard_length);
+        reply.width = (int32_t)clipboard_length;
+    } else if (clipboard_length) {
+        shm_unlink(reply.buffer);
+    }
+    queue_message(client, &reply);
+}
+
 static void update_cursor(void);
 
 static void handle_message(struct client *client, const struct gui_message *m) {
@@ -815,6 +873,12 @@ static void handle_message(struct client *client, const struct gui_message *m) {
             damage_title(w);
             damage_taskbar();
         }
+        break;
+    case GUI_CLIPBOARD_SET:
+        set_clipboard(m);
+        break;
+    case GUI_CLIPBOARD_GET:
+        send_clipboard(client);
         break;
     case GUI_CURSOR:
         if (w && m->x >= 0 && m->x <= GUI_CURSOR_RESIZE_NESW) {

@@ -5,6 +5,7 @@
 #include <pty.h>
 #include <signal.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
@@ -21,6 +22,8 @@
 #define PARAM_HIDE_CURSOR 25
 #define SCROLLBACK 1000 // lines kept after scrolling off the top
 #define WHEEL_LINES 3
+#define KEY_C 0x2E
+#define KEY_V 0x2F
 
 // The console's colours, then the defaults, which aren't any of them.
 #define BRIGHT 8
@@ -45,6 +48,14 @@ static bool dirty[MAX_ROWS]; // rows of the screen to draw again
 // of them the view is scrolled back by.
 static struct cell history[SCROLLBACK][MAX_COLS];
 static int history_start, history_count, view;
+
+// What the mouse has selected, from where it was pressed to where it's been
+// dragged, by line counting from the oldest kept, and column.
+struct place {
+    int line, col;
+};
+static struct place select_from, select_to;
+static bool selecting, selected;
 static int cols = COLS, rows = ROWS;
 static int row, col;
 static bool cursor_hidden, focused;
@@ -82,10 +93,15 @@ static void mark_all_dirty(void) {
 static void keep_line(const struct cell *line) {
     struct cell *to = history_line(history_count);
 
-    if (history_count < SCROLLBACK)
+    if (history_count < SCROLLBACK) {
         history_count++;
-    else
+    } else {
+        // Every kept line moves up one, and the selection with them.
         history_start = (history_start + 1) % SCROLLBACK;
+        select_from.line--;
+        select_to.line--;
+        selected &= select_from.line >= 0 && select_to.line >= 0;
+    }
     memcpy(to, line, cols * sizeof(*line));
     for (int c = cols; c < MAX_COLS; c++)
         to[c] = (struct cell){' ', DEFAULT_FOREGROUND, DEFAULT_BACKGROUND};
@@ -259,21 +275,34 @@ static void put_byte(char c) {
     }
 }
 
-// What's shown on row r of the window, which is in the scrollback when scrolled back.
-static const struct cell *shown_line(int r) {
-    int line = history_count - view + r;
-
+// A line counting from the oldest kept, through the scrollback and onto the screen.
+static const struct cell *line_cells(int line) {
     return line < history_count ? history_line(line) : cells[line - history_count];
 }
 
+// What's shown on row r of the window, which is in the scrollback when scrolled back.
+static int shown_line(int r) {
+    return history_count - view + r;
+}
+
+static long order(struct place p) {
+    return (long)p.line * MAX_COLS + p.col;
+}
+
+static bool is_selected(int line, int c) {
+    long from = order(select_from), to = order(select_to), at = order((struct place){line, c});
+
+    return selected && at >= (from < to ? from : to) && at <= (from < to ? to : from);
+}
+
 static void draw_cell(int r, int c) {
-    struct cell cell = shown_line(r)[c];
+    struct cell cell = line_cells(shown_line(r))[c];
     bool cursor = r - view == row && c == col && !cursor_hidden;
     uint32_t fg = palette[cell.foreground], bg = palette[cell.background];
     int x = PADDING + c * CELL_WIDTH, y = PADDING + r * CELL_HEIGHT;
 
-    // A solid block when focused, an outline when not.
-    if (cursor && focused) {
+    // A solid block when focused, an outline when not, and what's selected reversed.
+    if ((cursor && focused) != is_selected(shown_line(r), c)) {
         uint32_t swap = fg;
         fg = bg;
         bg = swap;
@@ -370,6 +399,62 @@ static bool send_key(int master, const struct key_event *key) {
     return sequence || text;
 }
 
+// The cell under a point in the window.
+static struct place place_at(int x, int y) {
+    return (struct place){shown_line(clamp((y - PADDING) / CELL_HEIGHT, 0, rows - 1)),
+                          clamp((x - PADDING) / CELL_WIDTH, 0, cols - 1)};
+}
+
+// The mouse selects by dragging. A click on its own selects nothing.
+static void mouse(const struct gui_message *e) {
+    if (e->type == GUI_MOUSE_BUTTON && (e->changed & 1)) {
+        selecting = e->buttons & 1;
+        if (selecting) {
+            select_from = select_to = place_at(e->x, e->y);
+            selected = false;
+        }
+    } else if (e->type == GUI_MOUSE_MOVE && selecting) {
+        select_to = place_at(e->x, e->y);
+        selected = order(select_from) != order(select_to);
+    }
+    mark_all_dirty();
+}
+
+// Each line's text, without the spaces at its end, with a line break between them.
+static void copy_selection(void) {
+    struct place from = order(select_from) < order(select_to) ? select_from : select_to;
+    struct place to = order(select_from) < order(select_to) ? select_to : select_from;
+    char *text = selected ? malloc((size_t)(to.line - from.line + 1) * (MAX_COLS + 1)) : NULL;
+    size_t length = 0;
+
+    if (!text)
+        return;
+    for (int line = from.line; line <= to.line; line++) {
+        const struct cell *cells_of = line_cells(line);
+        int first = line == from.line ? from.col : 0, last = line == to.line ? to.col : cols - 1;
+
+        while (last >= first && cells_of[last].c == ' ')
+            last--;
+        for (int c = first; c <= last; c++)
+            text[length++] = cells_of[c].c;
+        if (line < to.line)
+            text[length++] = '\n';
+    }
+    gui_clipboard_set(text, length);
+    free(text);
+}
+
+// Pasting types what's on the clipboard, with Enter for each line break.
+static void paste(int master) {
+    size_t length;
+    char *text = gui_clipboard_get(&length);
+
+    for (size_t i = 0; i < length; i++)
+        text[i] = text[i] == '\n' ? '\r' : text[i];
+    write_all(master, text, length);
+    free(text);
+}
+
 static void scroll_view(int lines) {
     view = clamp(view + lines, 0, history_count);
     mark_all_dirty();
@@ -458,6 +543,7 @@ int main(int argc, char **argv) {
     }
     for (int r = 0; r < rows; r++)
         clear_cells(r, 0, cols);
+    gui_set_cursor(window, GUI_CURSOR_TEXT);
     paint_background();
     draw();
     gui_show(window);
@@ -485,15 +571,25 @@ int main(int argc, char **argv) {
 
         if ((fds[0].revents & (POLLIN | POLLHUP)) && gui_next_event(&e)) {
             bool shifted = e.key.modifiers & KEY_MOD_SHIFT;
+            bool ctrl_shift = shifted && (e.key.modifiers & KEY_MOD_CTRL);
 
             // Shift+Page Up and Page Down scroll back and forth, and other keys go
             // to the bottom as they go to the terminal.
-            if (e.type == GUI_KEY && e.key.pressed && shifted
+            // Ctrl+Shift+C and V copy and paste, leaving Ctrl+C to interrupt.
+            if (e.type == GUI_KEY && e.key.pressed && ctrl_shift && e.key.code == KEY_C) {
+                copy_selection();
+            } else if (e.type == GUI_KEY && e.key.pressed && ctrl_shift && e.key.code == KEY_V) {
+                if (view)
+                    scroll_view(-view);
+                paste(master);
+            } else if (e.type == GUI_KEY && e.key.pressed && shifted
                 && (e.key.code == KEY_PAGE_UP || e.key.code == KEY_PAGE_DOWN)) {
                 scroll_view((e.key.code == KEY_PAGE_UP ? 1 : -1) * (rows > 1 ? rows - 1 : 1));
             } else if (e.type == GUI_KEY && e.key.pressed) {
                 if (send_key(master, &e.key) && view)
                     scroll_view(-view);
+            } else if (e.type == GUI_MOUSE_MOVE || e.type == GUI_MOUSE_BUTTON) {
+                mouse(&e);
             } else if (e.type == GUI_MOUSE_WHEEL) {
                 scroll_view(-e.wheel * WHEEL_LINES);
             } else if (e.type == GUI_FOCUS) {

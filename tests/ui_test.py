@@ -28,6 +28,12 @@ class Pointer:
         self.to(x, y, 1)
         self.v.mouse(buttons=0)
 
+    def double_click(self, x, y):
+        self.to(x, y)
+        for b in (1, 0, 1, 0):
+            self.v.command(f'mouse_button {b}')
+        time.sleep(0.3)
+
 
 v = VM()
 try:
@@ -84,6 +90,16 @@ try:
     mouse.click(LEFT + x + 20, TOP + y + h_ // 2)
     v.type('Grace'); v.key('backspace'); v.key('home'); v.type('X'); v.key('end'); v.type('!')
     check('text box', v.wait('widgets: name XGrac!', 5, at), v.text(at))
+
+    # Ctrl+A selects all of it, Ctrl+X cuts it and Ctrl+V puts it back. Shift with
+    # Home selects to the start, and typing replaces what's selected.
+    at = v.mark()
+    v.key('ctrl-a'); v.key('ctrl-x')
+    check('cut', v.wait('widgets: name \n', 5, at), v.text(at))
+    v.key('ctrl-v')
+    check('and paste', v.wait('widgets: name XGrac!\n', 5, at), v.text(at))
+    v.key('left'); v.key('shift-home'); v.type('Z')
+    check('typing over a selection', v.wait('widgets: name Z!\n', 5, at), v.text(at))
 
     # The keyboard alone: Tab from the text box goes past the dropdowns, list and
     # notes round to Count, then on, scrolling the page to show where it is.
@@ -155,6 +171,17 @@ try:
     mouse.click(LEFT + x + 50, TOP + y + 20)
     v.type('ab'); v.key('ret'); v.type('cd'); v.key('up'); v.type('X')
     check('text of several lines', v.wait('widgets: notes abX|cd', 5, at), v.text(at))
+
+    # A double click selects a word, and dragging selects from where it started.
+    line = lambda n: TOP + y + 5 + n * 16 + 8
+    column = lambda n: LEFT + x + 5 + n * 8
+    at = v.mark()
+    mouse.double_click(column(1) + 4, line(0))
+    v.type('Q')
+    check('double-clicking selects a word', v.wait('widgets: notes Q|cd', 5, at), v.text(at))
+    mouse.to(column(0) + 1, line(1), 1); mouse.to(column(2) + 1, line(1)); v.mouse(buttons=0)
+    v.key('backspace')
+    check('dragging selects', v.wait('widgets: notes Q|\n', 5, at), v.text(at))
 
     at = v.mark()
     mouse.to(LEFT + 300, TOP + 60)

@@ -118,6 +118,17 @@ try:
     lines = wait_screen(v, 'back')
     check('typing goes back to the bottom', lines[23] == 'back' and 'line1' not in lines, '\n'.join(lines))
 
+    # Dragging selects, Ctrl+Shift+C copies and Ctrl+Shift+V types it. The mouse
+    # is at 1240, 780, out of the way.
+    v.type('clear; echo copyme\n')
+    lines = wait_screen(v, 'copyme')
+    v.mouse(LEFT + 2 - 1240, TOP + 8 - 780, 1); v.mouse(44, 0); v.mouse(buttons=0)
+    v.key('ctrl-shift-c')
+    v.mouse(1240 - LEFT - 46, 780 - TOP - 8)
+    v.type('echo pasted-'); v.key('ctrl-shift-v'); v.type('\n')
+    lines = wait_screen(v, 'pasted-copyme')
+    check('copying and pasting', len(lines) > 2 and lines[2] == 'pasted-copyme', '\n'.join(lines))
+
     # Maximized, it fills the screen above the taskbar, from 1, 25, and tells the
     # program running in it.
     v.type('clear; winsize -w\n'); time.sleep(1)
