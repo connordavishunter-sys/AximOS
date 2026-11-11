@@ -79,22 +79,35 @@ static size_t canvas_size(const struct gui_canvas *c) {
     return (size_t)c->width * c->height * sizeof(uint32_t);
 }
 
+// A blank canvas, the size of the shown pixels, replacing the old one.
+static bool new_canvas(struct gui_window *window, int width, int height) {
+    uint32_t *pixels = calloc((size_t)width * height, sizeof(uint32_t));
+
+    if (!pixels)
+        return false;
+    free(window->canvas.pixels);
+    window->canvas = (struct gui_canvas){.pixels = pixels, .width = width, .height = height, .stride = width};
+    return true;
+}
+
 struct gui_window *gui_create_window(const char *title, int width, int height) {
     struct gui_message message = {.type = GUI_CREATE, .width = width, .height = height};
     struct gui_window *window = calloc(1, sizeof(*window));
-    uint32_t *pixels = window ? new_buffer(width, height, message.buffer) : NULL;
+    uint32_t *shown = window ? new_buffer(width, height, message.buffer) : NULL;
 
     snprintf(message.text, sizeof(message.text), "%s", title);
-    if (!pixels || !gui_send(connection, &message)) {
-        if (pixels) {
+    if (!shown || !new_canvas(window, width, height) || !gui_send(connection, &message)) {
+        if (shown) {
             shm_unlink(message.buffer);
-            munmap(pixels, (size_t)width * height * sizeof(uint32_t));
+            munmap(shown, (size_t)width * height * sizeof(uint32_t));
         }
+        if (window)
+            free(window->canvas.pixels);
         free(window);
         return NULL;
     }
 
-    window->canvas = (struct gui_canvas){.pixels = pixels, .width = width, .height = height, .stride = width};
+    window->shown = shown;
     while (gui_receive(connection, &message)) {
         if (message.type == GUI_CREATED && message.window) {
             window->id = message.window;
@@ -105,28 +118,35 @@ struct gui_window *gui_create_window(const char *title, int width, int height) {
         if (queue_count < QUEUE_SIZE)
             queue[(queue_head + queue_count++) % QUEUE_SIZE] = message;
     }
-    munmap(pixels, canvas_size(&window->canvas));
+    munmap(shown, canvas_size(&window->canvas));
+    free(window->canvas.pixels);
     free(window);
     return NULL;
 }
 
 bool gui_resize(struct gui_window *window, int width, int height) {
     char name[GUI_TITLE_MAX];
-    uint32_t *pixels = new_buffer(width, height, name);
+    uint32_t *shown = new_buffer(width, height, name);
+    size_t size = canvas_size(&window->canvas);
 
-    if (!pixels)
+    if (shown && !new_canvas(window, width, height)) {
+        shm_unlink(name);
+        munmap(shown, (size_t)width * height * sizeof(uint32_t));
+        shown = NULL;
+    }
+    if (!shown)
         return false;
 
-    // One that wm never saw can go at once.
+    // Pixels wm never saw can go at once.
     if (window->pending[0]) {
         shm_unlink(window->pending);
-        munmap(window->canvas.pixels, canvas_size(&window->canvas));
+        munmap(window->shown, size);
     } else {
-        window->old_pixels = window->canvas.pixels;
-        window->old_size = canvas_size(&window->canvas);
+        window->old_shown = window->shown;
+        window->old_size = size;
     }
     memcpy(window->pending, name, sizeof(name));
-    window->canvas = (struct gui_canvas){.pixels = pixels, .width = width, .height = height, .stride = width};
+    window->shown = shown;
     return true;
 }
 
@@ -136,10 +156,17 @@ void gui_destroy_window(struct gui_window *window) {
     gui_send(connection, &message);
     if (window->pending[0]) {
         shm_unlink(window->pending);
-        munmap(window->old_pixels, window->old_size);
+        munmap(window->old_shown, window->old_size);
     }
-    munmap(window->canvas.pixels, canvas_size(&window->canvas));
+    munmap(window->shown, canvas_size(&window->canvas));
+    free(window->canvas.pixels);
     free(window);
+}
+
+static void copy_shown(struct gui_window *window, int x, int y, int width, int height) {
+    struct gui_canvas shown = {window->shown, window->canvas.width, window->canvas.height, window->canvas.width};
+
+    gui_copy(&shown, x, y, &window->canvas, x, y, width, height);
 }
 
 void gui_update(struct gui_window *window, int x, int y, int width, int height) {
@@ -152,10 +179,13 @@ void gui_update(struct gui_window *window, int x, int y, int width, int height) 
             .type = GUI_BUFFER, .window = window->id, .width = window->canvas.width, .height = window->canvas.height,
         };
 
+        copy_shown(window, 0, 0, window->canvas.width, window->canvas.height);
         memcpy(buffer.buffer, window->pending, sizeof(buffer.buffer));
         gui_send(connection, &buffer);
-        munmap(window->old_pixels, window->old_size);
+        munmap(window->old_shown, window->old_size);
         window->pending[0] = '\0';
+    } else {
+        copy_shown(window, x, y, width, height);
     }
     gui_send(connection, &message);
 }

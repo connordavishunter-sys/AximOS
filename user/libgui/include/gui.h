@@ -50,13 +50,16 @@ struct gui_canvas {
     int stride; // pixels from one row to the next
 };
 
+// Programs draw on canvas, which is private, and updates copy what changed to the
+// pixels wm shows, so it never shows a half-drawn frame.
 struct gui_window {
     uint32_t id;
     struct gui_canvas canvas;
+    uint32_t *shown;
 
-    // A new buffer from gui_resize, which wm switches to with the next update.
+    // New shown pixels from gui_resize, which wm switches to with the next update.
     char pending[GUI_TITLE_MAX];
-    uint32_t *old_pixels;
+    uint32_t *old_shown;
     size_t old_size;
 };
 
@@ -71,12 +74,12 @@ int gui_fd(void);
 struct gui_window *gui_create_window(const char *title, int width, int height);
 void gui_destroy_window(struct gui_window *window);
 
-// Gives the window a new size, usually when GUI_RESIZE asks, with new pixels to draw
-// on. wm goes on showing the old ones until the next update, so draw first. Returns
+// Gives the window a new size, usually when GUI_RESIZE asks, with a blank canvas to
+// draw on. wm goes on showing the old size until the next update. Returns
 // false, leaving the window as it was, if memory ran out.
 bool gui_resize(struct gui_window *window, int width, int height);
 
-// Shows what was drawn in part of a window, or all of it with gui_show.
+// Shows what was drawn on part of a window's canvas, or all of it with gui_show.
 void gui_update(struct gui_window *window, int x, int y, int width, int height);
 void gui_show(struct gui_window *window);
 

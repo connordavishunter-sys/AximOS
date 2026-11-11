@@ -288,7 +288,7 @@ static void draw_cursor(struct gui_canvas *c, int ox, int oy) {
 }
 
 // Draws everything that overlaps a rectangle, through a canvas that is only that
-// part of the screen, then puts it on the framebuffer.
+// part of the screen.
 static void compose(struct rect r) {
     struct gui_canvas c = {screen.pixels + r.y * screen.stride + r.x, r.width, r.height, screen.stride};
     int hint_y = desktop().height - 2 * GUI_CHAR_HEIGHT;
@@ -306,15 +306,20 @@ static void compose(struct rect r) {
     if (r.y + r.height > bar.y)
         draw_taskbar(&c, r.x, r.y);
     draw_cursor(&c, r.x, r.y);
-
-    for (int row = 0; row < r.height; row++)
-        memcpy(framebuffer + (long)(r.y + row) * pitch + r.x * sizeof(uint32_t),
-               c.pixels + (long)row * c.stride, r.width * sizeof(uint32_t));
 }
 
+// Composes all that changed before showing any of it, so a window being moved is
+// never seen gone from both places.
 static void redraw(void) {
     for (int i = 0; i < damage_count; i++)
         compose(damage[i]);
+    for (int i = 0; i < damage_count; i++) {
+        struct rect r = damage[i];
+
+        for (int row = r.y; row < r.y + r.height; row++)
+            memcpy(framebuffer + (long)row * pitch + r.x * sizeof(uint32_t), screen.pixels + (long)row * screen.stride + r.x,
+                   r.width * sizeof(uint32_t));
+    }
     damage_count = 0;
 }
 
