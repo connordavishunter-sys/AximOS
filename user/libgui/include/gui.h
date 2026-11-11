@@ -97,3 +97,83 @@ void gui_copy(struct gui_canvas *canvas, int x, int y, const struct gui_canvas *
 #define GUI_CHAR_HEIGHT 8
 void gui_text(struct gui_canvas *canvas, int x, int y, const char *text, uint32_t color, int scale);
 int gui_text_width(const char *text, int scale);
+
+// Widgets, drawn immediately in the style of Dear ImGui. Each frame, a program
+// calls them in order, top to bottom, and each draws itself and says what was done
+// to it. Frames are drawn after events:
+//
+//     while (gui_next_event(&e)) {
+//         if (e.type == GUI_CLOSE)
+//             break;
+//         if (gui_ui_event(&ui, &e)) {
+//             gui_ui_begin(&ui);
+//             if (gui_button(&ui, "Save"))
+//                 save();
+//             gui_ui_end(&ui);
+//         }
+//     }
+//
+// Labels name widgets as well as showing on them, so two with the same label need
+// "##" after it and something different, which isn't shown. Tab and Shift+Tab move
+// the keyboard between widgets, and Enter or Space presses what it's on.
+
+struct gui_rect {
+    int x, y, width, height;
+};
+
+#define GUI_UI_MAX_KEYS 16
+#define GUI_UI_MAX_FOCUSABLE 64
+
+struct gui_ui {
+    struct gui_window *window;
+    bool window_focused;
+
+    // This frame's input.
+    int mouse_x, mouse_y;
+    bool mouse_down, mouse_pressed, mouse_released;
+    struct key_event keys[GUI_UI_MAX_KEYS];
+    int key_count;
+
+    // Widgets by the hash of their label: under the mouse, being pressed or
+    // dragged, and with the keyboard.
+    uint32_t hot, active, focus;
+    size_t text_cursor;   // in the text box that last had the keyboard
+    uint32_t text_owner;
+
+    // The widgets that can have the keyboard, in order, as of the last frame and
+    // so far in this one, for Tab and Shift+Tab.
+    uint32_t order[GUI_UI_MAX_FOCUSABLE], next_order[GUI_UI_MAX_FOCUSABLE];
+    int order_count, next_count;
+
+    // Where the next widget goes.
+    int x, y, line_height, line_end;
+    bool same_line;
+    struct gui_rect last;
+};
+
+void gui_ui_init(struct gui_ui *ui, struct gui_window *window);
+
+// Takes an event's input, and resizes the window when wm asks. Returns whether the
+// frame should be drawn again, which is false for events it has no use for.
+bool gui_ui_event(struct gui_ui *ui, const struct gui_message *event);
+
+// A frame starts with a blank window, and ends by showing it.
+void gui_ui_begin(struct gui_ui *ui);
+void gui_ui_end(struct gui_ui *ui);
+
+// Puts the next widget to the right of the last, rather than under it.
+void gui_same_line(struct gui_ui *ui);
+
+// Where the last widget went, in the window.
+struct gui_rect gui_last_rect(const struct gui_ui *ui);
+
+void gui_heading(struct gui_ui *ui, const char *text);
+void gui_label(struct gui_ui *ui, const char *format, ...) __attribute__((format(printf, 2, 3)));
+void gui_separator(struct gui_ui *ui);
+void gui_progress(struct gui_ui *ui, float fraction);
+
+// These return true when they're pressed, or when what they hold changes.
+bool gui_button(struct gui_ui *ui, const char *label);
+bool gui_checkbox(struct gui_ui *ui, const char *label, bool *value);
+bool gui_slider(struct gui_ui *ui, const char *label, int *value, int min, int max);
+bool gui_textbox(struct gui_ui *ui, const char *label, char *text, size_t size);

@@ -24,7 +24,7 @@ LIBC_SO_OBJS := $(patsubst user/libc/%,$(BUILD)/user/libc_pic/%.o,$(basename $(f
 # /system/lib/libgui.so, for programs with windows, which GUI_PROGRAMS are linked against.
 LIBGUI_SO := $(BUILD)/user/libgui.so
 LIBGUI_SO_OBJS := $(patsubst user/libgui/%.c,$(BUILD)/user/libgui_pic/%.o,$(wildcard user/libgui/*.c))
-GUI_PROGRAMS := wm guidemo term fbdemo
+GUI_PROGRAMS := wm guidemo term fbdemo widgets
 
 # The time zones, from the host's tz database, without its copies under posix/ and
 # right/ and anything that isn't a zone.
