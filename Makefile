@@ -14,12 +14,12 @@ OBJS := $(patsubst src/%,$(BUILD)/%.o,$(basename $(wildcard src/*.c src/*.S)))
 
 LIBC := $(BUILD)/user/libc.a
 CRT0 := $(BUILD)/user/libc/crt0.o
-LIBC_OBJS := $(filter-out $(CRT0),$(patsubst user/%,$(BUILD)/user/%.o,$(basename $(wildcard user/libc/*.c user/libc/*.S))))
+LIBC_OBJS := $(filter-out $(CRT0) $(BUILD)/user/libc/ld.o,$(patsubst user/%,$(BUILD)/user/%.o,$(basename $(wildcard user/libc/*.c user/libc/*.S))))
 
-# The same again for /system/lib/libc.so, which dlopen uses to give libraries what the
-# program didn't link in. start.c needs the program to be there, so it stays behind.
+# The same again for /system/lib/libc.so, which programs are linked against. It's
+# also their dynamic linker, which is what ld.c adds.
 LIBC_SO := $(BUILD)/user/libc.so
-LIBC_SO_OBJS := $(patsubst user/libc/%,$(BUILD)/user/libc_pic/%.o,$(basename $(filter-out user/libc/crt0.S user/libc/start.c,$(wildcard user/libc/*.c user/libc/*.S))))
+LIBC_SO_OBJS := $(patsubst user/libc/%,$(BUILD)/user/libc_pic/%.o,$(basename $(filter-out user/libc/crt0.S,$(wildcard user/libc/*.c user/libc/*.S))))
 
 # Programs from elsewhere, built by ports/build.sh.
 DASH := $(BUILD)/ports/dash-0.5.12/src/dash
@@ -47,7 +47,14 @@ USER_CFLAGS := $(BASE_CFLAGS) -Os -fno-asynchronous-unwind-tables -fno-unwind-ta
 	-ffunction-sections -fdata-sections -nostdinc -isystem $(shell $(CC) -print-file-name=include) \
 	-Iuser/libc/include -Iabi
 LDFLAGS := -m elf_x86_64 -nostdlib -static -z max-page-size=0x1000 -z noexecstack
-USER_LDFLAGS := $(LDFLAGS) --gc-sections -z noseparate-code
+USER_LDFLAGS := -m elf_x86_64 -nostdlib -z max-page-size=0x1000 -z noexecstack --gc-sections -z noseparate-code \
+	-Ttext-segment=0x400000 -e _start
+
+# libc.so binds its calls to its own functions, so a program with a function of the
+# same name doesn't change what libc does. Its variables can be the program's copies.
+LIBC_SO_LDFLAGS := -m elf_x86_64 -nostdlib -shared --hash-style=sysv -soname libc.so -Bsymbolic-functions \
+	-e _dlstart -z noexecstack
+DYNAMIC_LDFLAGS := --hash-style=sysv -dynamic-linker /system/lib/libc.so
 
 # Copies a file onto the disk without its debug info.
 install_stripped = strip -s -o $(BUILD)/stripped $(1) && mcopy -i $@ $(BUILD)/stripped ::$(2)
@@ -89,7 +96,7 @@ $(BUILD)/user/libc_pic/%.o: user/libc/%.S
 	$(CC) $(filter-out -fno-pic -fno-pie,$(USER_CFLAGS)) -fPIC -c $< -o $@
 
 $(LIBC_SO): $(LIBC_SO_OBJS)
-	$(LD) -m elf_x86_64 -nostdlib -shared --hash-style=sysv -z noexecstack $^ -o $@
+	$(LD) $(LIBC_SO_LDFLAGS) $^ -o $@
 
 $(KERNEL): $(OBJS) src/linker.ld
 	$(LD) $(LDFLAGS) -T src/linker.ld $(OBJS) -o $@
@@ -98,21 +105,26 @@ $(LIBC): $(LIBC_OBJS)
 	rm -f $@
 	ar rcs $@ $^
 
+# Programs share libc.so, except init: it's linked with all it needs, so that the
+# system still starts if libc.so is missing or broken.
 define PROGRAM
-$(BUILD)/user/$(1).elf: $(CRT0) $(patsubst user/%.c,$(BUILD)/user/%.o,$(wildcard user/$(1)/*.c)) $(LIBC)
-	$$(LD) $$(USER_LDFLAGS) -Ttext-segment=0x400000 -e _start $$+ -o $$@
+$(BUILD)/user/$(1).elf: $(CRT0) $(patsubst user/%.c,$(BUILD)/user/%.o,$(wildcard user/$(1)/*.c)) $(LIBC_SO)
+	$$(LD) $$(USER_LDFLAGS) $$(DYNAMIC_LDFLAGS) $$+ -o $$@
 endef
-$(foreach p,$(PROGRAMS),$(eval $(call PROGRAM,$(p))))
+$(foreach p,$(filter-out init,$(PROGRAMS)),$(eval $(call PROGRAM,$(p))))
 
-# fetch speaks TLS. libc comes again after the libraries, which need it as well.
+$(BUILD)/user/init.elf: $(CRT0) $(patsubst user/%.c,$(BUILD)/user/%.o,$(wildcard user/init/*.c)) $(LIBC)
+	$(LD) $(USER_LDFLAGS) -static $+ -o $@
+
+# fetch speaks TLS, with mbedtls linked in.
 $(BUILD)/user/fetch/fetch.o: USER_CFLAGS += -I$(MBEDTLS)/include -DMBEDTLS_CONFIG_FILE='"$(CURDIR)/ports/mbedtls_config.h"'
 $(BUILD)/user/fetch/fetch.o: | $(MBEDTLS_LIBS)
-$(BUILD)/user/fetch.elf: $(MBEDTLS_LIBS) $(LIBC) $(shell $(CC) -print-libgcc-file-name)
+$(BUILD)/user/fetch.elf: $(MBEDTLS_LIBS) $(shell $(CC) -print-libgcc-file-name)
 
 $(MBEDTLS_LIBS) &: $(LIBC) $(CRT0) ports/build.sh ports/aximos-cc ports/mbedtls_config.h
 	ports/build.sh mbedtls
 
-$(DASH): $(LIBC) $(CRT0) ports/build.sh ports/aximos-cc ports/dash.patch
+$(DASH): $(LIBC_SO) $(CRT0) ports/build.sh ports/aximos-cc ports/dash.patch
 	ports/build.sh dash
 
 $(DISK): $(PROGRAM_ELFS) $(LIBC_SO) $(ROOTFS_FILES) $(DASH)

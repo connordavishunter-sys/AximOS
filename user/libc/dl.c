@@ -9,6 +9,7 @@
 #include <sys/mman.h>
 #include <unistd.h>
 #include "lock.h"
+#include "start.h"
 #include "syscall.h"
 
 #define LIBRARY_DIR "/system/lib"
@@ -22,12 +23,13 @@ struct library {
     char *path;
     int refs;
     bool global;
+    bool init_pending;    // loaded while starting the program, so initialized after it's linked
     char *base;           // what addresses in the file are relative to
     size_t map_size;
     char *map;
     const struct elf64_symbol *symbols;
     const char *strings;
-    uint32_t symbol_count;
+    const uint32_t *hash;
     const struct elf64_dynamic *dynamic;
     struct library *needed[MAX_NEEDED];
     int needed_count;
@@ -36,7 +38,13 @@ struct library {
     void (*fini)(void);
 };
 
+// In the order they were loaded, which is the order symbols are looked for in.
 static struct library *libraries;
+static struct library **libraries_end = &libraries;
+
+// The program, when it was linked against libc.so rather than with libc.a.
+static struct library *program;
+static bool starting;
 static recursive_lock dl_lock;
 static char error_text[ERROR_SIZE];
 static bool has_error;
@@ -134,11 +142,36 @@ static void *find_in_program(const char *name) {
     return NULL;
 }
 
-static void *find_in_library(const struct library *library, const char *name) {
-    for (uint32_t i = 0; i < library->symbol_count; i++) {
+static uint32_t elf_hash(const char *name) {
+    uint32_t h = 0;
+
+    for (const unsigned char *c = (const unsigned char *)name; *c; c++) {
+        h = (h << 4) + *c;
+        h ^= (h & 0xF0000000) >> 24;
+        h &= 0x0FFFFFFF;
+    }
+    return h;
+}
+
+// A program that isn't position independent has its own PLT entry for a libc
+// function it takes the address of, so that address is the function's everywhere,
+// except to the PLT itself, which needs the real one.
+static bool is_program_plt_entry(const struct library *library, const struct elf64_symbol *symbol, bool plt) {
+    return library == program && !plt && symbol->st_shndx == SHN_UNDEF && symbol->st_value
+        && (symbol->st_info & 0xF) == STT_FUNC;
+}
+
+// Through the DT_HASH table: buckets of indexes into the symbols, chained.
+static void *find_in_library(const struct library *library, const char *name, bool plt) {
+    uint32_t buckets = library->hash[0];
+    const uint32_t *bucket = library->hash + 2;
+    const uint32_t *chain = bucket + buckets;
+
+    for (uint32_t i = bucket[elf_hash(name) % buckets]; i != 0; i = chain[i]) {
         const struct elf64_symbol *symbol = &library->symbols[i];
 
-        if (symbol_usable(symbol) && strcmp(library->strings + symbol->st_name, name) == 0)
+        if ((symbol_usable(symbol) || is_program_plt_entry(library, symbol, plt))
+            && strcmp(library->strings + symbol->st_name, name) == 0)
             return library->base + symbol->st_value;
     }
     return NULL;
@@ -146,7 +179,7 @@ static void *find_in_library(const struct library *library, const char *name) {
 
 // Depth first through what a library needs.
 static void *find_in_tree(const struct library *library, const char *name) {
-    void *found = find_in_library(library, name);
+    void *found = find_in_library(library, name, false);
 
     for (int i = 0; !found && i < library->needed_count; i++)
         found = find_in_tree(library->needed[i], name);
@@ -154,13 +187,14 @@ static void *find_in_tree(const struct library *library, const char *name) {
 }
 
 // The program first, then libraries opened as global, then the one asking and what
-// it depends on. The first definition wins, so everyone agrees on one malloc.
-static void *resolve(const struct library *from, const char *name) {
-    void *found = find_in_program(name);
+// it depends on. The first definition wins, so everyone agrees on one malloc. A
+// copy relocation wants the definition the program is copying, so skips the program.
+static void *resolve(const struct library *from, const char *name, const struct library *skip, bool plt) {
+    void *found = program ? NULL : find_in_program(name);
 
     for (const struct library *l = libraries; !found && l; l = l->next) {
-        if (l->global)
-            found = find_in_library(l, name);
+        if (l->global && l != skip)
+            found = find_in_library(l, name, plt);
     }
     return found || !from ? found : find_in_tree(from, name);
 }
@@ -173,7 +207,10 @@ static const uint64_t *find_dynamic(const struct library *library, int64_t tag) 
     return NULL;
 }
 
-static bool relocate(struct library *library, const struct elf64_rela *relocations, size_t size) {
+// libc.so has already pointed itself at itself by the time it links the program, and
+// may have changed variables since, so going over it again only changes what now
+// points somewhere else: to the program's copy of a variable, say.
+static bool relocate(struct library *library, const struct elf64_rela *relocations, size_t size, bool again) {
     size_t count = size / sizeof(*relocations);
 
     for (size_t i = 0; i < count; i++) {
@@ -184,10 +221,11 @@ static bool relocate(struct library *library, const struct elf64_rela *relocatio
         char *value = NULL;
 
         if (type == R_X86_64_RELATIVE) {
-            *where = (uint64_t)library->base + r->r_addend;
+            if (!again)
+                *where = (uint64_t)library->base + r->r_addend;
             continue;
         }
-        if (type != R_X86_64_64 && type != R_X86_64_GLOB_DAT && type != R_X86_64_JUMP_SLOT) {
+        if (type != R_X86_64_64 && type != R_X86_64_GLOB_DAT && type != R_X86_64_JUMP_SLOT && type != R_X86_64_COPY) {
             char number[16];
 
             snprintf(number, sizeof(number), "%u", type);
@@ -197,17 +235,48 @@ static bool relocate(struct library *library, const struct elf64_rela *relocatio
 
         const char *name = library->strings + symbol->st_name;
 
-        value = resolve(library, name);
+        if (type == R_X86_64_COPY) {
+            const char *source = resolve(NULL, name, library, false);
+
+            if (!source) {
+                set_error("%s: undefined symbol %s", library->path, name);
+                return false;
+            }
+            memcpy(where, source, symbol->st_size);
+            continue;
+        }
+
+        value = resolve(library, name, NULL, type == R_X86_64_JUMP_SLOT);
         if (!value && (symbol->st_info >> 4) != STB_WEAK) {
             set_error("%s: undefined symbol %s", library->path, name);
             return false;
         }
-        *where = value ? (uint64_t)value + (type == R_X86_64_64 ? r->r_addend : 0) : 0;
+        uint64_t result = value ? (uint64_t)value + (type == R_X86_64_64 ? r->r_addend : 0) : 0;
+        uint64_t before = (uint64_t)library->base + symbol->st_value + (type == R_X86_64_64 ? r->r_addend : 0);
+
+        if (!again || symbol->st_shndx == SHN_UNDEF || result != before)
+            *where = result;
     }
     return true;
 }
 
 static struct library *open_library(const char *name, bool global);
+
+static void append(struct library *library) {
+    library->next = NULL;
+    *libraries_end = library;
+    libraries_end = &library->next;
+}
+
+static bool relocate_all(struct library *library, bool again) {
+    const uint64_t *rela = find_dynamic(library, DT_RELA);
+    const uint64_t *rela_size = find_dynamic(library, DT_RELASZ);
+    const uint64_t *jmprel = find_dynamic(library, DT_JMPREL);
+    const uint64_t *jmprel_size = find_dynamic(library, DT_PLTRELSZ);
+
+    return (!rela || !rela_size || relocate(library, (const void *)(library->base + *rela), *rela_size, again))
+        && (!jmprel || !jmprel_size || relocate(library, (const void *)(library->base + *jmprel), *jmprel_size, again));
+}
 
 static bool library_is_called(const struct library *library, const char *name) {
     const uint64_t *soname = find_dynamic(library, DT_SONAME);
@@ -232,6 +301,8 @@ static void close_library(struct library *library) {
     for (struct library **link = &libraries; *link; link = &(*link)->next) {
         if (*link == library) {
             *link = library->next;
+            if (libraries_end == &library->next)
+                libraries_end = link;
             break;
         }
     }
@@ -320,11 +391,12 @@ static bool find_tables(struct library *library) {
 
     library->symbols = (const void *)(library->base + *symbols);
     library->strings = library->base + *strings;
-    library->symbol_count = ((const uint32_t *)(library->base + *hash))[1]; // the chain count
+    library->hash = (const void *)(library->base + *hash);
     return true;
 }
 
-static bool load_needed(struct library *library) {
+// What a library needs is global if the program needed it.
+static bool load_needed(struct library *library, bool global) {
     // Anything it wants that the program doesn't have comes from here.
     bool has_libc = false;
 
@@ -343,7 +415,7 @@ static bool load_needed(struct library *library) {
             name = LIBC_NAME;
         }
 
-        struct library *needed = open_library(name, false);
+        struct library *needed = open_library(name, global);
 
         if (!needed)
             return false;
@@ -351,7 +423,7 @@ static bool load_needed(struct library *library) {
     }
 
     if (!has_libc && strstr(library->path, "/" LIBC_NAME) == NULL) {
-        struct library *libc = open_library(LIBC_NAME, false);
+        struct library *libc = open_library(LIBC_NAME, global);
 
         if (libc && library->needed_count < MAX_NEEDED)
             library->needed[library->needed_count++] = libc;
@@ -413,7 +485,7 @@ static struct library *open_library(const char *name, bool global) {
     // A name alone also finds what was opened from anywhere else under that name, so
     // that a library and what depends on it share one copy.
     for (struct library *l = libraries; l; l = l->next) {
-        if (strcmp(l->path, path) == 0 || (!strchr(name, '/') && library_is_called(l, name))) {
+        if (l != program && (strcmp(l->path, path) == 0 || (!strchr(name, '/') && library_is_called(l, name)))) {
             l->refs++;
             l->global |= global;
             return l;
@@ -451,19 +523,8 @@ static struct library *open_library(const char *name, bool global) {
 
     // On the list first, so that libraries needing each other find it.
     if (ok) {
-        library->next = libraries;
-        libraries = library;
-        ok = load_needed(library);
-    }
-
-    if (ok) {
-        const uint64_t *rela = find_dynamic(library, DT_RELA);
-        const uint64_t *rela_size = find_dynamic(library, DT_RELASZ);
-        const uint64_t *jmprel = find_dynamic(library, DT_JMPREL);
-        const uint64_t *jmprel_size = find_dynamic(library, DT_PLTRELSZ);
-
-        ok = (!rela || !rela_size || relocate(library, (const void *)(library->base + *rela), *rela_size))
-            && (!jmprel || !jmprel_size || relocate(library, (const void *)(library->base + *jmprel), *jmprel_size));
+        append(library);
+        ok = load_needed(library, global) && relocate_all(library, false);
     }
 
     if (!ok) {
@@ -491,7 +552,10 @@ static struct library *open_library(const char *name, bool global) {
 
     protect_segments(library, &header, headers);
     free(headers);
-    run_initializers(library);
+    if (starting)
+        library->init_pending = true;
+    else
+        run_initializers(library);
     return library;
 }
 
@@ -509,24 +573,95 @@ static void finish_at_exit(void) {
             l->fini();
         l->fini = NULL;
 
-        int (*flush)(void *) = library_is_called(l, LIBC_NAME) ? find_in_library(l, "fflush") : NULL;
+        int (*flush)(void *) = library_is_called(l, LIBC_NAME) ? find_in_library(l, "fflush", false) : NULL;
 
         if (flush)
             flush(NULL);
     }
 }
 
-void *dlopen(const char *path, int flags) {
-    LOCKED(&dl_lock);
-
+static void register_finish(void) {
     static bool registered;
 
-    if (!path)
-        return &program_handle;
     if (!registered) {
         registered = true;
         atexit(finish_at_exit);
     }
+}
+
+// The program and libc.so are already where the kernel put them.
+static struct library *adopt(const char *path, char *base, const struct elf64_dynamic *dynamic) {
+    struct library *library = calloc(1, sizeof(*library));
+
+    if (!library || !(library->path = strdup(path))) {
+        free(library);
+        set_error("%s: %s", path, strerror(ENOMEM));
+        return NULL;
+    }
+    library->refs = 1;
+    library->global = true;
+    library->base = base;
+    library->dynamic = dynamic;
+    if (!find_tables(library))
+        return NULL;
+    append(library);
+    return library;
+}
+
+// Last loaded first, so that each library is ready before what needs it.
+static void run_pending(struct library *library) {
+    if (!library)
+        return;
+    run_pending(library->next);
+    if (library->init_pending) {
+        library->init_pending = false;
+        run_initializers(library);
+    }
+}
+
+bool __dl_start(char *libc_base, const struct elf64_dynamic *libc_dynamic,
+                const struct elf64_program_header *headers, int count) {
+    char path[PATH_MAX] = "program";
+    char *base = NULL;
+    const struct elf64_dynamic *dynamic = NULL;
+
+    syscall3(SYS_EXE_PATH, (long)path, sizeof(path), 0);
+    for (int i = 0; i < count; i++) {
+        if (headers[i].p_type == PT_PHDR)
+            base = (char *)headers - headers[i].p_vaddr;
+    }
+    for (int i = 0; i < count; i++) {
+        if (headers[i].p_type == PT_DYNAMIC)
+            dynamic = (const void *)(base + headers[i].p_vaddr);
+    }
+    if (!dynamic) {
+        set_error("%s: no dynamic section%s", path, "");
+        return false;
+    }
+
+    // Symbols are looked for in the program, then libc, then what the program needs.
+    // libc goes over its relocations again so that it uses the program's copies.
+    // Nothing is initialized until everything is linked, as the program's copies of
+    // libraries' variables are only filled in then.
+    struct library *libc;
+
+    starting = true;
+    if (!(program = adopt(path, base, dynamic)) || !(libc = adopt(LIBRARY_DIR "/" LIBC_NAME, libc_base, libc_dynamic))
+        || !load_needed(program, true) || !relocate_all(libc, true) || !relocate_all(program, false))
+        return false;
+    starting = false;
+    register_finish();
+    run_pending(libraries);
+    run_initializers(program);
+    return true;
+}
+
+void *dlopen(const char *path, int flags) {
+    LOCKED(&dl_lock);
+
+    if (!path)
+        return &program_handle;
+    register_finish();
     return open_library(path, flags & RTLD_GLOBAL);
 }
 
@@ -536,7 +671,7 @@ void *dlsym(void *handle, const char *name) {
     void *found;
 
     if (handle == RTLD_DEFAULT || handle == &program_handle)
-        found = resolve(NULL, name);
+        found = resolve(NULL, name, NULL, false);
     else
         found = find_in_tree(handle, name);
 

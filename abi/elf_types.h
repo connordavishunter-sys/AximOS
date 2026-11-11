@@ -2,12 +2,19 @@
 
 #include <stdint.h>
 
-// The parts of the ELF format the loader in libc needs.
+// The parts of the ELF format the kernel and the dynamic linker in libc need.
 
 #define PT_LOAD 1
 #define PT_DYNAMIC 2
+#define PT_INTERP 3
+#define PT_PHDR 6
 #define PT_TLS 7
 
+#define PF_X 1
+#define PF_W 2
+#define PF_R 4
+
+#define ET_EXEC 2
 #define ET_DYN 3
 #define EM_X86_64 62
 
@@ -29,14 +36,25 @@
 #define DT_FINI_ARRAYSZ 28
 
 #define R_X86_64_64 1
+#define R_X86_64_COPY 5
 #define R_X86_64_GLOB_DAT 6
 #define R_X86_64_JUMP_SLOT 7
 #define R_X86_64_RELATIVE 8
 
+#define STT_FUNC 2
 #define STB_GLOBAL 1
 #define STB_WEAK 2
 #define SHN_UNDEF 0
 #define SHT_SYMTAB 2
+
+// What the kernel tells a program's dynamic linker, after envp on the stack.
+#define AT_NULL 0
+#define AT_PHDR 3
+#define AT_PHENT 4
+#define AT_PHNUM 5
+#define AT_PAGESZ 6
+#define AT_BASE 7
+#define AT_ENTRY 9
 
 struct elf64_header {
     unsigned char e_ident[16];

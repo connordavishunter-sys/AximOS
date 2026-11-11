@@ -2,10 +2,8 @@
 #include <string.h>
 #include <sys/mman.h>
 #include "lock.h"
+#include "start.h"
 #include "syscall.h"
-
-// Set by the linker, at the start of the program as loaded.
-extern const struct elf64_header __ehdr_start __attribute__((weak));
 
 const void *__tls_image;
 size_t __tls_image_size;
@@ -14,29 +12,31 @@ size_t __tls_align = 1;
 
 static struct thread main_thread;
 
-static void find_tls(void) {
-    if (!&__ehdr_start)
-        return;
+static void find_tls(const struct elf64_program_header *headers, int count) {
+    uintptr_t bias = 0; // where the program went relative to its addresses, if it can move
 
-    const char *base = (const char *)&__ehdr_start;
-    const struct elf64_program_header *ph = (const void *)(base + __ehdr_start.e_phoff);
+    for (int i = 0; i < count; i++) {
+        if (headers[i].p_type == PT_PHDR)
+            bias = (uintptr_t)headers - headers[i].p_vaddr;
+    }
+    for (int i = 0; i < count; i++) {
+        const struct elf64_program_header *ph = &headers[i];
 
-    for (int i = 0; i < __ehdr_start.e_phnum; i++, ph++) {
         if (ph->p_type != PT_TLS)
             continue;
-        __tls_image = (const void *)ph->p_vaddr;
+        __tls_image = (const void *)(bias + ph->p_vaddr);
         __tls_image_size = ph->p_filesz;
         __tls_size = ph->p_memsz;
         __tls_align = ph->p_align ? ph->p_align : 1;
     }
 }
 
-// Sets up the first thread, called before anything else in the program. Its __thread
-// variables go just below the thread pointer, which is where the compiler looks.
-void __libc_start(void) {
+// Sets up the first thread. Its __thread variables go just below the thread pointer,
+// which is where the compiler looks.
+void __libc_set_up(const struct elf64_program_header *headers, int count) {
     struct thread *self = &main_thread;
 
-    find_tls();
+    find_tls(headers, count);
     if (__tls_size) {
         size_t aligned = (__tls_size + __tls_align - 1) & ~(__tls_align - 1);
         size_t total = aligned + sizeof(struct thread) + __tls_align;
@@ -56,3 +56,27 @@ void __libc_start(void) {
     self->exited = 1;
     syscall3(SYS_SET_THREAD_POINTER, (long)self, 0, 0);
 }
+
+#ifdef __PIC__
+// The dynamic linker has done all of it before the program started.
+void __libc_start(void) {
+}
+#else
+// Set by the linker: the start of the program as loaded, and its constructors.
+extern const struct elf64_header __ehdr_start __attribute__((weak));
+extern void (*const __init_array_start[])(void) __attribute__((weak, visibility("hidden")));
+extern void (*const __init_array_end[])(void) __attribute__((weak, visibility("hidden")));
+
+// Called by crt0 before anything else in the program.
+void __libc_start(void) {
+    if (&__ehdr_start) {
+        const char *base = (const char *)&__ehdr_start;
+
+        __libc_set_up((const void *)(base + __ehdr_start.e_phoff), __ehdr_start.e_phnum);
+    } else {
+        __libc_set_up(NULL, 0);
+    }
+    for (void (*const *f)(void) = __init_array_start; f < __init_array_end; f++)
+        (*f)();
+}
+#endif

@@ -1,5 +1,6 @@
 #include <cpu.h>
 #include <elf.h>
+#include <elf_types.h>
 #include <errno_values.h>
 #include <file.h>
 #include <gdt.h>
@@ -288,9 +289,13 @@ static struct interrupt_frame user_frame(uint64_t entry, uint64_t stack) {
     };
 }
 
-// Lays out the strings, argc, argv and envp as the System V ABI expects at entry.
-// Stack pages are writable and in the active address space.
-static uint64_t push_args(const struct exec_args *args) {
+// Lays out the strings, argc, argv, envp and the auxiliary vector as the System V
+// ABI expects at entry. Stack pages are writable and in the active address space.
+static uint64_t push_args(const struct exec_args *args, const struct elf_image *elf) {
+    const uint64_t aux[][2] = {
+        {AT_PHDR, elf->phdr}, {AT_PHENT, sizeof(struct elf64_program_header)}, {AT_PHNUM, elf->phnum},
+        {AT_PAGESZ, PAGE_SIZE}, {AT_BASE, elf->interpreter_base}, {AT_ENTRY, elf->program_entry}, {AT_NULL, 0},
+    };
     uint64_t sp = STACK_TOP;
     uint64_t pointers[MAX_ARGS];
 
@@ -302,7 +307,7 @@ static uint64_t push_args(const struct exec_args *args) {
         pointers[i] = sp;
     }
 
-    sp = (sp - (args->count + 3) * sizeof(uint64_t)) & ~(uint64_t)15;
+    sp = (sp - (args->count + 3 + 2 * sizeof(aux) / sizeof(*aux)) * sizeof(uint64_t)) & ~(uint64_t)15;
 
     uint64_t *out = (uint64_t *)sp;
     *out++ = args->argc;
@@ -311,7 +316,8 @@ static uint64_t push_args(const struct exec_args *args) {
     *out++ = 0;
     for (int i = args->argc; i < args->count; i++)
         *out++ = pointers[i];
-    *out = 0;
+    *out++ = 0;
+    memcpy(out, aux, sizeof(aux));
     return sp;
 }
 
@@ -347,7 +353,7 @@ static int load_image(const struct vfs_node *file, const struct exec_args *args,
     }
 
     image->entry = elf.entry;
-    image->stack = push_args(args);
+    image->stack = push_args(args, &elf);
     image->heap = page_align_up(elf.end);
     return 0;
 }

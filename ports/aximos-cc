@@ -12,13 +12,14 @@ for arg; do
 	esac
 done
 
-# libc.a has everything, so libraries like libm are empty ones. Sharing an archive
+# libc.so has everything, so libraries like libm are empty ones. Sharing an archive
 # name with the host's would link in the host's.
 mkdir -p "$root/build/ports/lib"
 for lib in m rt pthread dl crypt util; do
 	[ -e "$root/build/ports/lib/lib$lib.a" ] || ar rcs "$root/build/ports/lib/lib$lib.a"
 done
 
-exec gcc $cflags -static -no-pie -nostdlib -nostartfiles -L"$root/build/ports/lib" -Wl,-z,max-page-size=0x1000,-z,noexecstack,-z,noseparate-code,--gc-sections \
-	-Wl,-Ttext-segment=0x400000 "$root/build/user/libc/crt0.o" "$@" \
-	"$root/build/user/libc.a" -lgcc "$root/build/user/libc.a"
+exec gcc $cflags -no-pie -nostdlib -nostartfiles -L"$root/build/ports/lib" \
+	-Wl,-z,max-page-size=0x1000,-z,noexecstack,-z,noseparate-code,--gc-sections,-Ttext-segment=0x400000 \
+	-Wl,--hash-style=sysv,-dynamic-linker,/system/lib/libc.so \
+	"$root/build/user/libc/crt0.o" "$@" "$root/build/user/libc.so" -lgcc

@@ -56,12 +56,13 @@ USER_CFLAGS = ['-std=gnu23', '-O2', '-w', '-fno-stack-protector', '-fno-pic', '-
 LINK = ['ld', '-m', 'elf_x86_64', '-nostdlib', '-z', 'max-page-size=0x1000', '-z', 'noexecstack', '-Ttext-segment=0x400000']
 
 
-def compile_program(source, out, static=False):
-    """Builds a test program the way the Makefile builds the system's."""
+def compile_program(source, out, static=False, libraries=(), export=False):
+    """Builds a test program the way the Makefile builds the system's: linked against
+    libc.so and any other libraries, or with libc.a if static."""
     quiet('gcc', *USER_CFLAGS, '-c', source, '-o', out + '.o')
     libc = ['-static', BUILD + '/user/libc.a'] if static else \
-        ['--hash-style=sysv', '-dynamic-linker', '/system/lib/libc.so', BUILD + '/user/libc.so']
-    quiet(*LINK, '-e', '_start', BUILD + '/user/libc/crt0.o', out + '.o', *libc, '-o', out)
+        ['--hash-style=sysv', '-dynamic-linker', '/system/lib/libc.so', *libraries, BUILD + '/user/libc.so']
+    quiet(*LINK, '-rpath-link', WORK, *(['-E'] if export else []), '-e', '_start', BUILD + '/user/libc/crt0.o', out + '.o', *libc, '-o', out)
     return out
 
 
