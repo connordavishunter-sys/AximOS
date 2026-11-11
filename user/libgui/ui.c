@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define MARGIN 10
 #define SPACING 8
@@ -16,6 +17,7 @@
 #define WHEEL_STEP (3 * ROW_HEIGHT)
 #define MENU_WIDTH 180
 #define DROPDOWN_ROWS 8 // at most, with more scrolling
+#define DOUBLE_CLICK_MS 400
 
 #define BACKGROUND 0x1E2129
 #define PANEL 0x181B21 // behind scrolling areas and lists
@@ -106,9 +108,18 @@ bool gui_ui_event(struct gui_ui *ui, const struct gui_message *e) {
         ui->mouse_x = e->x;
         ui->mouse_y = e->y;
         if (e->type == GUI_MOUSE_BUTTON && (e->changed & 1)) {
+            struct timespec now;
+
             ui->mouse_down = e->buttons & 1;
             ui->mouse_pressed |= ui->mouse_down;
             ui->mouse_released |= !ui->mouse_down;
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            if (ui->mouse_down) {
+                long ms = now.tv_sec * 1000 + now.tv_nsec / 1000000;
+
+                ui->double_click = ms - ui->last_press < DOUBLE_CLICK_MS;
+                ui->last_press = ui->double_click ? 0 : ms; // a third press starts again
+            }
         }
         if (e->type == GUI_MOUSE_WHEEL)
             ui->wheel += e->wheel;
@@ -145,6 +156,7 @@ void gui_ui_begin(struct gui_ui *ui) {
     ui->depth = 0;
     fill(ui, 0, 0, all.width, all.height, BACKGROUND);
     ui->hot = 0;
+    ui->cursor = GUI_CURSOR_ARROW;
     ui->next_count = 0;
     ui->next_wheel_owner = 0;
     ui->next_menu_count = 0;
@@ -219,6 +231,9 @@ void gui_ui_end(struct gui_ui *ui) {
     ui->wheel = 0;
     ui->key_count = 0;
     gui_show(ui->window);
+    if (ui->cursor != ui->shown_cursor)
+        gui_set_cursor(ui->window, ui->cursor);
+    ui->shown_cursor = ui->cursor;
     if (ui->again)
         gui_post(&(struct gui_message){.type = GUI_REDRAW, .window = ui->window->id});
     ui->again = false;
@@ -226,6 +241,16 @@ void gui_ui_end(struct gui_ui *ui) {
 
 void gui_same_line(struct gui_ui *ui) {
     ui->layout.same_line = true;
+}
+
+bool gui_shortcut(const struct gui_ui *ui, char letter) {
+    for (int i = 0; i < ui->key_count; i++) {
+        const struct key_event *k = &ui->keys[i];
+
+        if ((k->modifiers & KEY_MOD_CTRL) && (k->text == (uint32_t)(letter & 0x1F) || k->text == (uint32_t)letter))
+            return true;
+    }
+    return false;
 }
 
 struct gui_rect gui_last_rect(const struct gui_ui *ui) {
@@ -260,6 +285,16 @@ static struct gui_rect place(struct gui_ui *ui, int width, int height) {
     if (height > l->line_height)
         l->line_height = height;
     return ui->last;
+}
+
+// From where the next widget goes down to the bottom of what can be seen, for
+// widgets that fill it, but never less than min.
+static int height_left(const struct gui_ui *ui, int min) {
+    int x, y, left;
+
+    next_spot(ui, &x, &y);
+    left = ui->layout.clip.y + ui->layout.clip.height - MARGIN - y;
+    return left > min ? left : min;
 }
 
 // What's left of the line, for widgets that stretch.
@@ -515,6 +550,8 @@ bool gui_textbox(struct gui_ui *ui, const char *label, char *s, size_t size) {
 
     framed(ui, label, FRAME_HEIGHT, &frame);
     interact(ui, id, frame);
+    if (over(ui, frame))
+        ui->cursor = GUI_CURSOR_TEXT;
 
     bool focused = focusable(ui, id);
 
@@ -626,7 +663,7 @@ bool gui_textarea(struct gui_ui *ui, const char *label, char *s, size_t size, in
     bool changed = false, moved = false;
     int line_count = 1;
 
-    framed(ui, label, lines * GUI_CHAR_HEIGHT + 2 * PADDING, &frame);
+    framed(ui, label, lines > 0 ? lines * GUI_CHAR_HEIGHT + 2 * PADDING : height_left(ui, FRAME_HEIGHT), &frame);
     for (const char *p = s; *p; p++)
         line_count += *p == '\n';
     scroll->content = line_count * GUI_CHAR_HEIGHT + 2 * PADDING;
@@ -639,6 +676,8 @@ bool gui_textarea(struct gui_ui *ui, const char *label, char *s, size_t size, in
     struct gui_rect inner = scrolling(ui, id, scroll, frame);
     int fits = (inner.width - 2 * PADDING) / GUI_CHAR_WIDTH;
 
+    if (over(ui, inner))
+        ui->cursor = GUI_CURSOR_TEXT;
     own_cursor(ui, id, strlen(s));
 
     // Long lines scroll sideways, all together, to keep the cursor in sight.
@@ -850,13 +889,15 @@ bool gui_dropdown(struct gui_ui *ui, const char *label, const char *const *items
     return *selected != before;
 }
 
-bool gui_list(struct gui_ui *ui, const char *label, const char *const *items, int count, int *selected, int rows) {
+int gui_list(struct gui_ui *ui, const char *label, const char *const *items, int count, int *selected, int rows) {
     uint32_t id = id_of(label);
     struct gui_scroll *scroll = scroll_of(ui, id);
     struct gui_rect frame, was;
     int before = *selected;
+    bool activated = false;
 
-    framed(ui, label, rows * ROW_HEIGHT + 4, &frame);
+    framed(ui, label, rows > 0 ? rows * ROW_HEIGHT + 4 : height_left(ui, ROW_HEIGHT + 4), &frame);
+    rows = (frame.height - 4) / ROW_HEIGHT;
     scroll->content = count * ROW_HEIGHT + 4;
     if (over(ui, frame) && ui->mouse_pressed)
         ui->focus = id;
@@ -877,6 +918,7 @@ bool gui_list(struct gui_ui *ui, const char *label, const char *const *items, in
             *selected = code == KEY_HOME ? 0 : count - 1;
         else
             moved = false;
+        activated |= code == KEY_ENTER && count;
     }
     *selected = *selected >= count ? count - 1 : *selected < 0 ? 0 : *selected;
 
@@ -898,8 +940,10 @@ bool gui_list(struct gui_ui *ui, const char *label, const char *const *items, in
 
         if (r.y >= inner.y + inner.height)
             break;
-        if (over(ui, r) && ui->mouse_pressed)
+        if (over(ui, r) && ui->mouse_pressed) {
+            activated |= ui->double_click && i == *selected;
             *selected = i;
+        }
         if (i == *selected || over(ui, r))
             fill(ui, r.x, r.y, r.width, r.height, i == *selected ? ACCENT : FRAME_HOT);
         draw_fitted(ui, r.x + 6, r.y + (ROW_HEIGHT - GUI_CHAR_HEIGHT) / 2, r.width - 12, items[i], 255, TEXT);
@@ -907,7 +951,7 @@ bool gui_list(struct gui_ui *ui, const char *label, const char *const *items, in
     ui->layout.clip = was;
     if (focused)
         draw_focus(ui, frame);
-    return *selected != before;
+    return activated ? GUI_LIST_ACTIVATED : *selected != before ? GUI_LIST_CHANGED : 0;
 }
 
 // Up and Down go through the open menu's items, and Left and Right to the menus
@@ -997,13 +1041,7 @@ void gui_menu_end(struct gui_ui *ui) {
 void gui_scroll_begin(struct gui_ui *ui, const char *label, int height) {
     uint32_t id = id_of(label);
     struct gui_scroll *scroll = scroll_of(ui, id);
-    int x, y;
-
-    next_spot(ui, &x, &y);
-    if (height <= 0)
-        height = whole(ui).height - MARGIN - y;
-
-    struct gui_rect area = place(ui, room(ui), height > FRAME_HEIGHT ? height : FRAME_HEIGHT);
+    struct gui_rect area = place(ui, room(ui), height > 0 ? height : height_left(ui, FRAME_HEIGHT));
 
     fill(ui, area.x, area.y, area.width, area.height, PANEL);
 

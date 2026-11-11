@@ -25,7 +25,7 @@ LIBC_SO_OBJS := $(patsubst user/libc/%,$(BUILD)/user/libc_pic/%.o,$(basename $(f
 # against. The apps go in /system/bin/gui, where wm's start menu finds them.
 LIBGUI_SO := $(BUILD)/user/libgui.so
 LIBGUI_SO_OBJS := $(patsubst user/libgui/%.c,$(BUILD)/user/libgui_pic/%.o,$(wildcard user/libgui/*.c))
-GUI_APPS := guidemo term fbdemo widgets
+GUI_APPS := guidemo term fbdemo widgets editor files
 
 # The time zones, from the host's tz database, without its copies under posix/ and
 # right/ and anything that isn't a zone.

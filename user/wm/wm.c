@@ -32,6 +32,18 @@
 #define MIN_WIDTH 120
 #define MIN_HEIGHT 48
 
+// Shadows reach SHADOW past the frame, moved SHADOW_DROP down, and are darkest,
+// out of 255, at SHADOW_ALPHA. Their strength, out of 256, fades over FADE_MS
+// between what's right for focused windows and the rest, and from nothing for
+// new windows.
+#define SHADOW 16
+#define SHADOW_DROP 4
+#define SHADOW_ALPHA 120
+#define SHADOW_FOCUSED 256
+#define SHADOW_UNFOCUSED 140
+#define FADE_MS 180
+#define FRAME_MS 16
+
 #define TASKBAR_HEIGHT 28
 #define TASKBAR_BUTTON_WIDTH 160
 #define LAUNCHER_WIDTH 64
@@ -97,6 +109,9 @@ struct window {
     // The edges being dragged by a resize. When the left or top one moves, the
     // window moves with each new size so the opposite edge stays still.
     int resize_edges;
+
+    enum gui_cursor cursor; // what the program wants over its contents
+    int shadow, shadow_target;
 };
 
 enum part { PART_NONE, PART_CONTENT, PART_TITLE, PART_CLOSE, PART_MAXIMIZE, PART_MINIMIZE, PART_RESIZE };
@@ -111,6 +126,9 @@ static struct window *windows[MAX_WINDOWS]; // bottom first
 static int window_count;
 static uint32_t next_id = 1;
 static struct window *focused;
+
+static uint8_t falloff[SHADOW + 1][SHADOW + 1];
+static long fade_clock; // when shadows last stepped, or 0 when none are fading
 
 static struct rect damage[MAX_DAMAGE];
 static int damage_count;
@@ -134,18 +152,58 @@ static bool super_down, super_alone; // Super pressed, and nothing else since
 // The Alt+Tab switcher, while Alt is held: which window it's on, counting from the top.
 static int switch_choice = -1;
 
-static const char *const cursor[] = {
+// Cursors, in black X and white dots, each with the point that's on the mouse's
+// position. The up and down arrow is the left and right one turned, and one
+// diagonal is the other mirrored.
+static const char *const arrow_rows[] = {
     "X           ", "XX          ", "X.X         ", "X..X        ", "X...X       ",
     "X....X      ", "X.....X     ", "X......X    ", "X.......X   ", "X........X  ",
     "X.........X ", "X......XXXXX", "X...X..X    ", "X..XX..X    ", "X.X  X..X   ",
     "XX   X..X   ", "X     X..X  ", "      X..X  ", "       XX   ",
 };
-#define CURSOR_WIDTH 12
-#define CURSOR_HEIGHT ((int)(sizeof(cursor) / sizeof(cursor[0])))
+static const char *const text_rows[] = {
+    "XXX XXX", "X..X..X", "XXX.XXX", "  X.X  ", "  X.X  ", "  X.X  ", "  X.X  ", "  X.X  ",
+    "  X.X  ", "  X.X  ", "  X.X  ", "  X.X  ", "  X.X  ", "XXX.XXX", "X..X..X", "XXX XXX",
+};
+static const char *const across_rows[] = {
+    "    X         X    ", "   XX         XX   ", "  X.XXXXXXXXXXX.X  ",
+    " X...............X ", "X.................X", " X...............X ",
+    "  X.XXXXXXXXXXX.X  ", "   XX         XX   ", "    X         X    ",
+};
+static const char *const diagonal_rows[] = {
+    "XXXXXX       ", "X....X       ", "X...X        ", "X....X       ", "X.X...X      ",
+    "XX X...X     ", "    X...X    ", "     X...X XX", "      X...X.X", "       X....X",
+    "        X...X", "       X....X", "       XXXXXX",
+};
+
+struct cursor_shape {
+    const char *const *rows;
+    int width, height; // of rows, before turning
+    int hot_x, hot_y;  // after
+    bool turned, mirrored;
+};
+
+#define ROWS(r, width) r, width, (int)(sizeof(r) / sizeof(r[0]))
+static const struct cursor_shape shapes[] = {
+    [GUI_CURSOR_ARROW] = {ROWS(arrow_rows, 12), 0, 0, false, false},
+    [GUI_CURSOR_TEXT] = {ROWS(text_rows, 7), 3, 8, false, false},
+    [GUI_CURSOR_RESIZE_H] = {ROWS(across_rows, 19), 9, 4, false, false},
+    [GUI_CURSOR_RESIZE_V] = {ROWS(across_rows, 19), 4, 9, true, false},
+    [GUI_CURSOR_RESIZE_NWSE] = {ROWS(diagonal_rows, 13), 6, 6, false, false},
+    [GUI_CURSOR_RESIZE_NESW] = {ROWS(diagonal_rows, 13), 6, 6, false, true},
+};
+static enum gui_cursor cursor_shown = GUI_CURSOR_ARROW;
 
 static struct rect frame_of(const struct window *w) {
     return (struct rect){w->x - BORDER, w->y - TITLE_HEIGHT - BORDER, w->canvas.width + 2 * BORDER,
                          w->canvas.height + TITLE_HEIGHT + 2 * BORDER};
+}
+
+// The frame and its shadow.
+static struct rect extent_of(const struct window *w) {
+    struct rect f = frame_of(w);
+
+    return (struct rect){f.x - SHADOW, f.y - SHADOW + SHADOW_DROP, f.width + 2 * SHADOW, f.height + 2 * SHADOW};
 }
 
 // The title bar's buttons from the right: close, maximize, minimize.
@@ -216,6 +274,10 @@ static int menu_item_at(int x, int y) {
     return -1;
 }
 
+static bool overlaps(struct rect a, struct rect b) {
+    return a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
+}
+
 static struct rect bounds(struct rect a, struct rect b) {
     int x = a.x < b.x ? a.x : b.x, y = a.y < b.y ? a.y : b.y;
     int right = a.x + a.width > b.x + b.width ? a.x + a.width : b.x + b.width;
@@ -260,8 +322,57 @@ static void damage_taskbar(void) {
     add_damage(taskbar());
 }
 
+static struct rect cursor_rect(void) {
+    const struct cursor_shape *c = &shapes[cursor_shown];
+    int width = c->turned ? c->height : c->width, height = c->turned ? c->width : c->height;
+
+    return (struct rect){cursor_x - c->hot_x, cursor_y - c->hot_y, width, height};
+}
+
 static void damage_cursor(void) {
-    add_damage((struct rect){cursor_x, cursor_y, CURSOR_WIDTH, CURSOR_HEIGHT});
+    add_damage(cursor_rect());
+}
+
+// How dark a shadow is by how far left or right, and up or down, a point is from
+// the frame: (1 - d^2 / SHADOW^2)^2, which falls smoothly to nothing without
+// needing a square root.
+static void make_falloff(void) {
+    for (int dx = 0; dx <= SHADOW; dx++) {
+        for (int dy = 0; dy <= SHADOW; dy++) {
+            long t = SHADOW * SHADOW - dx * dx - dy * dy;
+
+            falloff[dx][dy] = t > 0 ? SHADOW_ALPHA * t * t / (SHADOW * SHADOW * SHADOW * SHADOW) : 0;
+        }
+    }
+}
+
+// Darkens what's under a window's shadow, outside its frame, by blending black over it.
+static void draw_shadow(struct gui_canvas *c, const struct window *w, int ox, int oy) {
+    struct rect f = frame_of(w), e = extent_of(w), s = {f.x, f.y + SHADOW_DROP, f.width, f.height};
+    struct rect area = {ox, oy, c->width, c->height};
+    int x0 = e.x > area.x ? e.x : area.x, x1 = e.x + e.width < area.x + area.width ? e.x + e.width : area.x + area.width;
+    int y0 = e.y > area.y ? e.y : area.y, y1 = e.y + e.height < area.y + area.height ? e.y + e.height : area.y + area.height;
+
+    for (int y = y0; y < y1; y++) {
+        uint32_t *row = c->pixels + (long)(y - oy) * c->stride - ox;
+        int dy = y < s.y ? s.y - y : y >= s.y + s.height ? y - (s.y + s.height - 1) : 0;
+        bool beside_frame = y >= f.y && y < f.y + f.height;
+
+        for (int x = x0; x < x1; x++) {
+            if (beside_frame && x >= f.x && x < f.x + f.width) {
+                x = f.x + f.width - 1; // the window covers this part
+                continue;
+            }
+
+            int dx = x < s.x ? s.x - x : x >= s.x + s.width ? x - (s.x + s.width - 1) : 0;
+            int a = dx > SHADOW || dy > SHADOW ? 0 : falloff[dx][dy] * w->shadow >> 8;
+            uint32_t p = row[x];
+
+            if (a)
+                row[x] = ((p >> 16 & 0xFF) * (255 - a) / 255) << 16 | ((p >> 8 & 0xFF) * (255 - a) / 255) << 8
+                       | (p & 0xFF) * (255 - a) / 255;
+        }
+    }
 }
 
 static void draw_window(struct gui_canvas *c, const struct window *w, int ox, int oy) {
@@ -381,12 +492,16 @@ static void draw_switcher(struct gui_canvas *c, int ox, int oy) {
 }
 
 static void draw_cursor(struct gui_canvas *c, int ox, int oy) {
-    for (int row = 0; row < CURSOR_HEIGHT; row++) {
-        for (int col = 0; col < CURSOR_WIDTH; col++) {
-            char p = cursor[row][col];
+    const struct cursor_shape *shape = &shapes[cursor_shown];
+    struct rect r = cursor_rect();
+
+    for (int y = 0; y < r.height; y++) {
+        for (int x = 0; x < r.width; x++) {
+            int col = shape->turned ? y : x, row = shape->turned ? x : y;
+            char p = shape->rows[row][shape->mirrored ? shape->width - 1 - col : col];
 
             if (p != ' ')
-                gui_fill(c, cursor_x + col - ox, cursor_y + row - oy, 1, 1, p == 'X' ? 0x000000 : 0xFFFFFF);
+                gui_fill(c, r.x + x - ox, r.y + y - oy, 1, 1, p == 'X' ? 0x000000 : 0xFFFFFF);
         }
     }
 }
@@ -401,11 +516,10 @@ static void compose(struct rect r) {
     gui_fill(&c, 0, 0, r.width, r.height, DESKTOP_COLOR);
     gui_text(&c, GUI_CHAR_WIDTH - r.x, hint_y - r.y, HINT, HINT_COLOR, 1);
     for (int i = 0; i < window_count; i++) {
-        struct rect f = frame_of(windows[i]);
-
-        if (!windows[i]->minimized && f.x < r.x + r.width && r.x < f.x + f.width && f.y < r.y + r.height
-            && r.y < f.y + f.height)
+        if (!windows[i]->minimized && overlaps(extent_of(windows[i]), r)) {
+            draw_shadow(&c, windows[i], r.x, r.y);
             draw_window(&c, windows[i], r.x, r.y);
+        }
     }
     if (r.y + r.height > bar.y)
         draw_taskbar(&c, r.x, r.y);
@@ -463,6 +577,36 @@ static void send_to(struct window *w, struct gui_message m) {
     queue_message(w->client, &m);
 }
 
+static long now_ms(void) {
+    struct timespec now;
+
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return now.tv_sec * 1000 + now.tv_nsec / 1000000;
+}
+
+// Moves each shadow a step towards its target, returning whether any has further
+// to go. The steps are by time, so they take FADE_MS however often they come.
+static bool fade_shadows(void) {
+    long now = now_ms(), step = fade_clock ? (now - fade_clock) * SHADOW_FOCUSED / FADE_MS : 0;
+    bool fading = false;
+
+    for (int i = 0; i < window_count; i++) {
+        struct window *w = windows[i];
+        int left = w->shadow_target - w->shadow;
+
+        if (!left)
+            continue;
+        w->shadow += left > 0 ? (left < step ? left : step) : (-left < step ? left : -step);
+        fading |= w->shadow != w->shadow_target;
+        if (!w->minimized)
+            add_damage(extent_of(w));
+    }
+    // A step too small to move anything waits for more time to pass.
+    if (!fading || step || !fade_clock)
+        fade_clock = fading ? now : 0;
+    return fading;
+}
+
 static void set_focus(struct window *w) {
     if (w == focused)
         return;
@@ -470,11 +614,13 @@ static void set_focus(struct window *w) {
     if (focused) {
         send_to(focused, (struct gui_message){.type = GUI_FOCUS, .focused = 0});
         damage_title(focused);
+        focused->shadow_target = SHADOW_UNFOCUSED;
     }
     focused = w;
     if (w) {
         send_to(w, (struct gui_message){.type = GUI_FOCUS, .focused = 1});
         damage_title(w);
+        w->shadow_target = SHADOW_FOCUSED;
     }
 }
 
@@ -491,7 +637,7 @@ static void raise_window(struct window *w) {
 
     memmove(&windows[i], &windows[i + 1], (window_count - i - 1) * sizeof(*windows));
     windows[window_count - 1] = w;
-    add_damage(frame_of(w));
+    add_damage(extent_of(w));
 }
 
 // Maps the pixels a message names, and removes the name.
@@ -532,7 +678,7 @@ static void focus_top(void) {
 
 static void minimize(struct window *w) {
     w->minimized = true;
-    add_damage(frame_of(w));
+    add_damage(extent_of(w));
     damage_taskbar();
     if (focused == w)
         focus_top();
@@ -548,7 +694,7 @@ static void show(struct window *w) {
 static void remove_window(struct window *w) {
     int i = index_of(w);
 
-    add_damage(frame_of(w));
+    add_damage(extent_of(w));
     if (switch_choice >= 0) {
         add_damage(switcher());
         switch_choice = window_count > 1 ? switch_choice % (window_count - 1) : -1;
@@ -604,7 +750,7 @@ static void create_window(struct client *client, const struct gui_message *m) {
     if (switch_choice >= 0)
         add_damage(switcher());
     queue_message(client, &reply);
-    add_damage(frame_of(w));
+    add_damage(extent_of(w));
     set_focus(w);
 }
 
@@ -628,18 +774,20 @@ static void take_buffer(struct window *w, const struct gui_message *m) {
 
     if (!map_buffer(m, &c))
         return;
-    add_damage(frame_of(w));
+    add_damage(extent_of(w));
     if (w->resize_edges & EDGE_LEFT)
         w->x += w->canvas.width - c.width;
     if (w->resize_edges & EDGE_TOP)
         w->y += w->canvas.height - c.height;
     unmap_buffer(&w->canvas);
     w->canvas = c;
-    add_damage(frame_of(w));
+    add_damage(extent_of(w));
     w->asking = false;
     if (w->want_width != w->asked_width || w->want_height != w->asked_height)
         ask_size(w, w->want_width, w->want_height);
 }
+
+static void update_cursor(void);
 
 static void handle_message(struct client *client, const struct gui_message *m) {
     struct window *w = find_window(client, m->window);
@@ -659,6 +807,20 @@ static void handle_message(struct client *client, const struct gui_message *m) {
     case GUI_BUFFER:
         if (w)
             take_buffer(w, m);
+        break;
+    case GUI_TITLE:
+        if (w) {
+            memcpy(w->title, m->text, sizeof(w->title));
+            w->title[sizeof(w->title) - 1] = '\0';
+            damage_title(w);
+            damage_taskbar();
+        }
+        break;
+    case GUI_CURSOR:
+        if (w && m->x >= 0 && m->x <= GUI_CURSOR_RESIZE_NESW) {
+            w->cursor = m->x;
+            update_cursor();
+        }
         break;
     }
 }
@@ -814,10 +976,10 @@ static void choose(int index) {
 }
 
 static void move_window(struct window *w, int x, int y) {
-    add_damage(frame_of(w));
+    add_damage(extent_of(w));
     w->x = x;
     w->y = y;
-    add_damage(frame_of(w));
+    add_damage(extent_of(w));
 }
 
 // Puts a window's frame on part of the desktop, keeping where it was to go back to.
@@ -982,6 +1144,7 @@ static void handle_mouse(const struct mouse_event *e) {
         grabbed = NULL;
         resizing = NULL;
     }
+    update_cursor();
 }
 
 static void finish_switch(bool chosen) {
@@ -1050,6 +1213,32 @@ static void super_key(const struct key_event *e) {
         else
             open_menu();
     }
+}
+
+static enum gui_cursor resize_cursor(int edges) {
+    bool across = edges & (EDGE_LEFT | EDGE_RIGHT), down = edges & (EDGE_TOP | EDGE_BOTTOM);
+
+    if (across && down)
+        return !(edges & EDGE_LEFT) == !(edges & EDGE_TOP) ? GUI_CURSOR_RESIZE_NWSE : GUI_CURSOR_RESIZE_NESW;
+    return across ? GUI_CURSOR_RESIZE_H : GUI_CURSOR_RESIZE_V;
+}
+
+// The cursor shows what dragging would do: resize on an edge, and over a window's
+// contents, whatever its program wants.
+static void update_cursor(void) {
+    enum part part = PART_NONE;
+    int edges = 0;
+    struct window *w = resizing ? resizing : grabbed ? grabbed : window_at(cursor_x, cursor_y, &part, &edges);
+    enum gui_cursor shape = resizing                                         ? resize_cursor(resizing->resize_edges)
+                          : grabbed || (w && part == PART_CONTENT && !menu_open) ? w->cursor
+                          : part == PART_RESIZE && !dragging                 ? resize_cursor(edges)
+                                                                             : GUI_CURSOR_ARROW;
+
+    if (shape == cursor_shown)
+        return;
+    damage_cursor();
+    cursor_shown = shape;
+    damage_cursor();
 }
 
 // Super with something else is for wm, and every other key goes to the focused window.
@@ -1131,6 +1320,7 @@ int main(int argc, char **argv) {
     add_damage((struct rect){0, 0, screen.width, screen.height});
     for (int i = 1; i < argc; i++)
         launch(argv[i]);
+    make_falloff();
     printf("wm: running at %dx%d\n", screen.width, screen.height);
     fflush(stdout);
 
@@ -1143,14 +1333,17 @@ int main(int argc, char **argv) {
             fds[3 + i].fd = clients[i] ? clients[i]->fd : -1;
             fds[3 + i].events = clients[i] ? POLLIN | (clients[i]->out_used ? POLLOUT : 0) : 0;
         }
+        bool fading = fade_shadows();
+
         redraw();
 
-        // The clock changes at the start of each minute.
+        // The clock changes at the start of each minute, and fading shadows each frame.
         struct timespec now;
         clock_gettime(CLOCK_REALTIME, &now);
         int until_minute = (60 - now.tv_sec % 60) * 1000 - now.tv_nsec / 1000000;
+        int timeout = fading ? FRAME_MS : until_minute > 0 ? until_minute : 1;
 
-        int ready = poll(fds, 3 + MAX_CLIENTS, until_minute > 0 ? until_minute : 1);
+        int ready = poll(fds, 3 + MAX_CLIENTS, timeout);
 
         if (ready < 0 && errno != EINTR)
             return fail("poll");

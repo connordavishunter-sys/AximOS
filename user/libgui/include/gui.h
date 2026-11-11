@@ -19,6 +19,8 @@ enum gui_message_type {
     GUI_DAMAGE, // x, y, width and height of what changed
     GUI_DESTROY,
     GUI_BUFFER, // new pixels, width by height, named in buffer, after a resize
+    GUI_TITLE,  // a new title, in text
+    GUI_CURSOR, // the mouse cursor to show over the window: x is a gui_cursor
 
     // From wm. Mouse positions are inside the window.
     GUI_CREATED,
@@ -32,6 +34,16 @@ enum gui_message_type {
 
     // From libgui itself, through gui_post: draw the window again.
     GUI_REDRAW,
+};
+
+// The shapes of mouse cursor wm draws.
+enum gui_cursor {
+    GUI_CURSOR_ARROW,
+    GUI_CURSOR_TEXT,
+    GUI_CURSOR_RESIZE_H,    // left and right
+    GUI_CURSOR_RESIZE_V,    // up and down
+    GUI_CURSOR_RESIZE_NWSE, // top left and bottom right
+    GUI_CURSOR_RESIZE_NESW, // top right and bottom left
 };
 
 struct gui_message {
@@ -81,6 +93,9 @@ void gui_destroy_window(struct gui_window *window);
 // draw on. wm goes on showing the old size until the next update. Returns
 // false, leaving the window as it was, if memory ran out.
 bool gui_resize(struct gui_window *window, int width, int height);
+
+void gui_set_title(struct gui_window *window, const char *title);
+void gui_set_cursor(struct gui_window *window, enum gui_cursor cursor);
 
 // Shows what was drawn on part of a window's canvas, or all of it with gui_show.
 void gui_update(struct gui_window *window, int x, int y, int width, int height);
@@ -157,6 +172,8 @@ struct gui_ui {
     // This frame's input.
     int mouse_x, mouse_y;
     bool mouse_down, mouse_pressed, mouse_released;
+    bool double_click; // the press was the second in quick succession
+    long last_press;   // when the last press was, in milliseconds
     int wheel;
     struct key_event keys[GUI_UI_MAX_KEYS];
     int key_count;
@@ -164,6 +181,7 @@ struct gui_ui {
     // Widgets by the hash of their label: under the mouse, being pressed or
     // dragged, and with the keyboard.
     uint32_t hot, active, focus;
+    enum gui_cursor cursor, shown_cursor; // what the widget under the mouse wants, and what wm shows
     size_t text_cursor; // in the text box that last had the keyboard
     uint32_t text_owner;
     int drag_offset; // from the top of a scroll bar's thumb to the mouse
@@ -231,22 +249,29 @@ void gui_label(struct gui_ui *ui, const char *format, ...) __attribute__((format
 void gui_separator(struct gui_ui *ui);
 void gui_progress(struct gui_ui *ui, float fraction);
 
+// Whether Ctrl and a letter were pressed this frame, for shortcuts.
+bool gui_shortcut(const struct gui_ui *ui, char letter);
+
 // These return true when they're pressed, or when what they hold changes.
 bool gui_button(struct gui_ui *ui, const char *label);
 bool gui_checkbox(struct gui_ui *ui, const char *label, bool *value);
 bool gui_slider(struct gui_ui *ui, const char *label, int *value, int min, int max);
 bool gui_textbox(struct gui_ui *ui, const char *label, char *text, size_t size);
 
-// Text of several lines, lines tall, scrolling to keep the cursor in sight. Enter
-// starts a new line.
+// Text of several lines, lines tall, or down to the bottom of the window if lines
+// is 0, scrolling to keep the cursor in sight. Enter starts a new line.
 bool gui_textarea(struct gui_ui *ui, const char *label, char *text, size_t size, int lines);
 
 // Picks one of count items, shown when clicked in a list under it, which scrolls
 // when there are too many. Up and Down change it, open or not.
 bool gui_dropdown(struct gui_ui *ui, const char *label, const char *const *items, int count, int *selected);
 
-// All of count items in a list rows tall, which scrolls, with selected highlighted.
-bool gui_list(struct gui_ui *ui, const char *label, const char *const *items, int count, int *selected, int rows);
+// All of count items in a list rows tall, or down to the bottom of the window if
+// rows is 0, which scrolls, with selected highlighted. Returns GUI_LIST_CHANGED
+// when the selection changes, and GUI_LIST_ACTIVATED when the selected item is
+// double-clicked or Enter is pressed on it.
+enum { GUI_LIST_CHANGED = 1, GUI_LIST_ACTIVATED };
+int gui_list(struct gui_ui *ui, const char *label, const char *const *items, int count, int *selected, int rows);
 
 // A bar of menus across the top, which goes first in a frame. Each gui_menu that
 // returns true is open, and has its items next, then gui_menu_end. An item returns

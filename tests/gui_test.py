@@ -123,8 +123,8 @@ try:
     check('dragging the left edge resizes', v.wait('guidemo: size 520 280', 5, at), v.text(at))
     time.sleep(0.5)
     w, h, px = v.screenshot()
-    check('and moves the window left', px(42, 200) == PAPER and px(562, 200) == DESKTOP,
-          f'{px(42, 200):x} {px(562, 200):x}')
+    check('and moves the window left', px(50, 200) == PAPER and px(558, 200) == PAPER and px(562, 200) != PAPER,
+          f'{px(50, 200):x} {px(558, 200):x} {px(562, 200):x}')
     at = v.mark()
     mouse.to(300, 56, 1); mouse.to(300, 26); v.mouse(buttons=0)
     check('dragging the top edge resizes', v.wait('guidemo: size 520 310', 5, at), v.text(at))
@@ -161,15 +161,15 @@ try:
     w, h, px = v.screenshot()
     check('shown again', px(1000, 400) == PAPER, hex(px(1000, 400)))
 
-    # The menu lists /system/bin/gui above the launcher, 24 pixels an app: fbdemo,
-    # guidemo, term, widgets. Then a line, Reboot and Shut down.
-    menu_top = bar - 6 * 24 - 9 - 8
+    # The menu lists /system/bin/gui above the launcher, 24 pixels an app: editor,
+    # fbdemo, files, guidemo, term, widgets. Then a line, Reboot and Shut down.
+    menu_top = bar - 8 * 24 - 9 - 8
     mouse.click(36, bar + 14)
     time.sleep(0.5)
     w, h, px = v.screenshot()
     check('the launcher opens the menu', px(150, menu_top + 10) == FOCUSED, hex(px(150, menu_top + 10)))
     at = v.mark()
-    mouse.click(100, menu_top + 4 + 2 * 24 + 12)
+    mouse.click(100, menu_top + 4 + 4 * 24 + 12)
     check('clicking term in the menu opens a terminal', v.wait('guidemo: focus 0', 10, at), v.text(at))
     time.sleep(1)
     w, h, px = v.screenshot()

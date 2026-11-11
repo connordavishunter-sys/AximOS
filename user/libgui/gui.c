@@ -189,6 +189,17 @@ void gui_update(struct gui_window *window, int x, int y, int width, int height) 
     gui_send(connection, &message);
 }
 
+void gui_set_title(struct gui_window *window, const char *title) {
+    struct gui_message message = {.type = GUI_TITLE, .window = window->id};
+
+    snprintf(message.text, sizeof(message.text), "%s", title);
+    gui_send(connection, &message);
+}
+
+void gui_set_cursor(struct gui_window *window, enum gui_cursor cursor) {
+    gui_send(connection, &(struct gui_message){.type = GUI_CURSOR, .window = window->id, .x = cursor});
+}
+
 void gui_show(struct gui_window *window) {
     gui_update(window, 0, 0, window->canvas.width, window->canvas.height);
 }
