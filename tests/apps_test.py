@@ -1,7 +1,8 @@
 """Checks the file manager and text editor together, the mouse cursor's shapes, and
 window shadows."""
 import re, time
-from vm import VM, check, finish
+from PIL import Image
+from vm import ROOT, VM, WORK, check, disk_copy, finish, mkdir, put
 
 DESKTOP = 0x1E2430
 BLACK, WHITE = 0x000000, 0xFFFFFF
@@ -44,6 +45,7 @@ class Pointer:
 v = VM()
 try:
     check('prompt at boot', v.wait('/$ ', 30), v.text())
+    v.run('echo none > /system/etc/wallpaper') # the plain colour, to look for
     v.run('echo hello > /tmp/hello.txt')
     o = v.run('ls /system/bin/gui'); check('editor and files are apps', 'editor' in o and 'files' in o, o)
 
@@ -180,6 +182,90 @@ try:
     v.key('meta_l-shift-q'); time.sleep(1)
     o = v.run('cat /tmp/greeting.txt; ls /tmp')
     check('the saved file, renamed', 'hello world\n' in o and 'hello.txt' not in o and 'copy.txt' in o, o)
+finally:
+    v.close()
+
+
+# The wallpaper, icons, and the viewer with an image of each kind: four squares
+# of colour, 200x150, which show in the middle of its 240 pixel square window.
+QUARTERS = ((230, 40, 50), (40, 200, 70), (50, 80, 230), (250, 210, 40))
+picture = Image.new('RGB', (200, 150))
+for i, colour in enumerate(QUARTERS):
+    picture.paste(colour, ((i % 2) * 100, (i // 2) * 75, (i % 2) * 100 + 100, (i // 2) * 75 + 75))
+img = disk_copy('images')
+mkdir(img, '/images')
+for name, options in (('squares.png', {}), ('squares.jpg', {'quality': 95}), ('squares.bmp', {})):
+    picture.save(f'{WORK}/{name}', **options)
+    put(img, f'{WORK}/{name}', '/images/' + name)
+
+# What the wallpaper should look like: scaled to cover 1280x800, cut equally.
+wall = Image.open(ROOT + '/rootfs/system/share/wallpapers/default.jpg').convert('RGB')
+scale = max(1280 / wall.width, 800 / wall.height)
+wall = wall.resize((round(wall.width * scale), round(wall.height * scale)), Image.BILINEAR)
+wall = wall.crop(((wall.width - 1280) // 2, (wall.height - 800) // 2, (wall.width - 1280) // 2 + 1280,
+                  (wall.height - 800) // 2 + 800))
+
+
+def near(p, want, tolerance):
+    return all(abs(a - b) <= tolerance for a, b in zip(channels(p), want))
+
+
+v = VM(disk=img)
+try:
+    check('prompt at boot', v.wait('/$ ', 30), v.text())
+    at = v.mark()
+    v.type("wm 'viewer /images/squares.png'\n")
+    check('the viewer shows a PNG', v.wait('viewer: showing /images/squares.png 200x150', 10, at), v.text(at))
+    time.sleep(1)
+    mouse = Pointer(v)
+    mouse.to(1270, 790)
+    w, h, px = v.screenshot()
+    spots = ((1200, 40), (900, 600), (1150, 380), (600, 700))
+    check('the wallpaper', all(near(px(x, y), wall.getpixel((x, y)), 12) for x, y in spots),
+          [(hex(px(x, y)), wall.getpixel((x, y))) for x, y in spots])
+
+    def squares_shown(tolerance):
+        w, h, px = v.screenshot()
+        got = [px(100 + (i % 2) * 100 + 50, 129 + (i // 2) * 75 + 37) for i in range(4)]
+        return all(near(p, c, tolerance) for p, c in zip(got, QUARTERS)), [hex(p) for p in got]
+
+    ok, detail = squares_shown(0)
+    check('with the right colours', ok, detail)
+    check("and its icon in the title bar", px(93, 72) != 0x3D63DD, hex(px(93, 72)))
+    for name, tolerance in (('squares.jpg', 6), ('squares.bmp', 0)):
+        at = v.mark()
+        v.key('meta_l-q'); time.sleep(0.5)
+        v.key('meta_l-shift-q'); time.sleep(1)
+        v.type(f"wm 'viewer /images/{name}'\n")
+        check(f'and a {name[-3:].upper()}', v.wait(f'viewer: showing /images/{name} 200x150', 10, at), v.text(at))
+        time.sleep(1)
+        ok, detail = squares_shown(tolerance)
+        check(f'the {name[-3:].upper()} looks the same', ok, detail)
+
+    # The start menu has each app's icon.
+    v.key('meta_l'); time.sleep(0.5)
+    w, h, px = v.screenshot()
+    menu_top = 772 - 9 * 24 - 9 - 8
+    icon = [px(4 + 6 + 8, menu_top + 4 + i * 24 + 12) for i in range(3)]
+    check('icons in the start menu', all(p not in (0x141821, 0x3D63DD) for p in icon), [hex(p) for p in icon])
+    v.key('esc')
+
+    # Files opens a picture in the viewer.
+    v.key('meta_l-q'); time.sleep(0.5)
+    v.key('meta_l-shift-q'); time.sleep(1)
+    at = v.mark()
+    v.type("wm 'files /images'\n")
+    check('files lists the pictures', v.wait('files: in /images: squares.bmp squares.jpg squares.png', 10, at),
+          v.text(at))
+    v.wait('files: list at', 5, at)
+    time.sleep(1)
+    x, y, lw, lh = map(int, re.findall(r'files: list at (\d+) (\d+) (\d+) (\d+)', v.text())[-1])
+    w, h, px = v.screenshot()
+    check('with picture icons', px(80 + x + 2 + 5 + 8, 84 + y + 2 + 11) not in (0x181B21, 0x3D63DD),
+          hex(px(80 + x + 2 + 5 + 8, 84 + y + 2 + 11)))
+    mouse = Pointer(v)
+    mouse.double_click(80 + x + 60, 84 + y + 2 + 2 * 22 + 11)
+    check('and opens one in the viewer', v.wait('viewer: showing /images/squares.png 200x150', 10, at), v.text(at))
 finally:
     v.close()
 finish()

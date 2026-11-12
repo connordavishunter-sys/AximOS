@@ -14,6 +14,7 @@ def count(px, x0, y0, x1, y1, color):
 v = VM()
 try:
     check('prompt at boot', v.wait('/$ ', 30), v.text())
+    v.run('echo none > /system/etc/wallpaper') # the plain colour, to look for
     o = v.run('ls /dev'); check('/dev/keyboard exists', 'keyboard' in o, o)
     o = v.run('guidemo; echo st=$?'); check('guidemo without wm', "wm isn't running" in o and 'st=1' in o, o)
 
@@ -97,6 +98,7 @@ class Pointer:
 v = VM()
 try:
     check('prompt at boot', v.wait('/$ ', 30), v.text())
+    v.run('echo none > /system/etc/wallpaper') # the plain colour, to look for
     at = v.mark()
     v.type('wm guidemo\n')
     check('wm starts guidemo', v.wait('guidemo: window 1', 10, at), v.text(at))
@@ -162,8 +164,8 @@ try:
     check('shown again', px(1000, 400) == PAPER, hex(px(1000, 400)))
 
     # The menu lists /system/bin/gui above the launcher, 24 pixels an app: editor,
-    # fbdemo, files, guidemo, term, widgets. Then a line, Reboot and Shut down.
-    menu_top = bar - 8 * 24 - 9 - 8
+    # fbdemo, files, guidemo, term, viewer, widgets. Then a line, Reboot and Shut down.
+    menu_top = bar - 9 * 24 - 9 - 8
     mouse.click(36, bar + 14)
     time.sleep(0.5)
     w, h, px = v.screenshot()

@@ -19,6 +19,7 @@
 #define EXECL_MAX_ARGS 32
 
 char **environ;
+char *program_invocation_name;
 bool __threaded;
 
 // System calls return a negative errno on failure.

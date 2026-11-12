@@ -63,6 +63,12 @@ static void fill(struct gui_ui *ui, int x, int y, int width, int height, uint32_
     gui_fill(&c, x - ui->layout.clip.x, y - ui->layout.clip.y, width, height, color);
 }
 
+static void draw_image(struct gui_ui *ui, int x, int y, const struct gui_image *image) {
+    struct gui_canvas c = clipped(ui);
+
+    gui_draw_image(&c, x - ui->layout.clip.x, y - ui->layout.clip.y, image);
+}
+
 static void text(struct gui_ui *ui, int x, int y, const char *s, uint32_t color, int scale) {
     struct gui_canvas c = clipped(ui);
 
@@ -1055,6 +1061,11 @@ bool gui_dropdown(struct gui_ui *ui, const char *label, const char *const *items
 }
 
 int gui_list(struct gui_ui *ui, const char *label, const char *const *items, int count, int *selected, int rows) {
+    return gui_list_icons(ui, label, items, NULL, count, selected, rows);
+}
+
+int gui_list_icons(struct gui_ui *ui, const char *label, const char *const *items, const struct gui_image *const *icons,
+                   int count, int *selected, int rows) {
     uint32_t id = id_of(label);
     struct gui_scroll *scroll = scroll_of(ui, id);
     struct gui_rect frame, was;
@@ -1109,9 +1120,13 @@ int gui_list(struct gui_ui *ui, const char *label, const char *const *items, int
             activated |= ui->double_click && i == *selected;
             *selected = i;
         }
+        int text_x = icons ? 12 + GUI_ICON_SIZE : 6;
+
         if (i == *selected || over(ui, r))
             fill(ui, r.x, r.y, r.width, r.height, i == *selected ? ACCENT : FRAME_HOT);
-        draw_fitted(ui, r.x + 6, r.y + (ROW_HEIGHT - GUI_CHAR_HEIGHT) / 2, r.width - 12, items[i], 255, TEXT);
+        if (icons && icons[i])
+            draw_image(ui, r.x + 5, r.y + (ROW_HEIGHT - GUI_ICON_SIZE) / 2, icons[i]);
+        draw_fitted(ui, r.x + text_x, r.y + (ROW_HEIGHT - GUI_CHAR_HEIGHT) / 2, r.width - text_x - 6, items[i], 255, TEXT);
     }
     ui->layout.clip = was;
     if (focused)

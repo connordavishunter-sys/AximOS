@@ -38,6 +38,7 @@ class Pointer:
 v = VM()
 try:
     check('prompt at boot', v.wait('/$ ', 30), v.text())
+    v.run('echo none > /system/etc/wallpaper') # the plain colour, to look for
     at = v.mark()
     v.type('wm widgets\n')
     check('widgets starts', v.wait('widgets: at textbox', 10, at), v.text(at))

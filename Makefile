@@ -25,7 +25,7 @@ LIBC_SO_OBJS := $(patsubst user/libc/%,$(BUILD)/user/libc_pic/%.o,$(basename $(f
 # against. The apps go in /system/bin/gui, where wm's start menu finds them.
 LIBGUI_SO := $(BUILD)/user/libgui.so
 LIBGUI_SO_OBJS := $(patsubst user/libgui/%.c,$(BUILD)/user/libgui_pic/%.o,$(wildcard user/libgui/*.c))
-GUI_APPS := guidemo term fbdemo widgets editor files
+GUI_APPS := guidemo term fbdemo widgets editor files viewer
 
 # The time zones, from the host's tz database, without its copies under posix/ and
 # right/ and anything that isn't a zone.
@@ -81,6 +81,9 @@ QEMU_Q35 := $(QEMU_BASE) -M q35 -drive file=$(DISK),format=raw,if=none,id=disk \
 	-device ide-hd,drive=disk,bus=ide.1
 
 .PHONY: all help built run run-uefi run-ide run-ide-uefi build-run test clean
+
+# A recipe that fails leaves nothing behind that looks up to date.
+.DELETE_ON_ERROR:
 
 all: $(ISO) $(DISK)
 
@@ -161,7 +164,7 @@ $(DISK): $(PROGRAM_ELFS) $(LIBC_SO) $(LIBGUI_SO) $(ROOTFS_FILES) $(DASH) | $(ZON
 	rm -f $@
 	mkfs.fat -F 32 -C $@ $$(($(DISK_SIZE_MB) * 1024))
 	mcopy -s -i $@ rootfs/system ::/
-	mmd -i $@ ::/system/boot ::/system/bin ::/system/bin/gui ::/system/lib ::/system/share ::/tmp
+	mmd -i $@ ::/system/boot ::/system/bin ::/system/bin/gui ::/system/lib ::/tmp
 	mcopy -s -i $@ $(ZONES) ::/system/share/
 	$(call install_stripped,$(LIBC_SO),/system/lib/libc.so)
 	$(call install_stripped,$(LIBGUI_SO),/system/lib/libgui.so)

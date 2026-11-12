@@ -1289,11 +1289,6 @@ uint64_t process_brk(uint64_t end) {
         }
     }
     mm_unmap_range(new_top, old_top);
-
-    if (new_top != old_top)
-        kprintf("process: pid %u heap %lx -> %lx, %lu pages free\n",
-                current->pid, old_top, new_top, mm_free_page_count());
-
     current->s->heap_end = end;
     return current->s->heap_end;
 }

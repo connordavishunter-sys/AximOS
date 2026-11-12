@@ -10,6 +10,7 @@
 
 #define MAX_ENTRIES 1024
 #define EDITOR "/system/bin/gui/editor"
+#define VIEWER "/system/bin/gui/viewer"
 
 struct entry {
     char name[NAME_MAX + 1];
@@ -20,6 +21,7 @@ struct entry {
 static struct entry entries[MAX_ENTRIES];
 static char labels[MAX_ENTRIES][NAME_MAX + 2]; // names, with / after folders
 static const char *items[MAX_ENTRIES];
+static const struct gui_image *icons[MAX_ENTRIES];
 static int count, selected;
 static char folder[PATH_MAX] = "/", typed[PATH_MAX], new_name[NAME_MAX + 1];
 static char status[PATH_MAX + 64], deleting[PATH_MAX];
@@ -81,6 +83,8 @@ static bool read_folder(const char *path, const char *select) {
     for (int i = 0; i < count; i++) {
         snprintf(labels[i], sizeof(labels[i]), "%s%s", entries[i].name, entries[i].folder ? "/" : "");
         items[i] = labels[i];
+        icons[i] = strncmp(folder, "/system/bin", 11) || entries[i].folder ? gui_file_icon(entries[i].name, entries[i].folder)
+                                                                         : gui_icon("program");
         printf(" %s", labels[i]);
         if (select && !strcmp(entries[i].name, select))
             selected = i;
@@ -110,7 +114,7 @@ static void start(const char *program, const char *argument) {
     }
 }
 
-// Folders open here, and files in the editor.
+// Folders open here, pictures in the viewer and other files in the editor.
 static void open_selected(void) {
     char path[PATH_MAX];
 
@@ -122,7 +126,7 @@ static void open_selected(void) {
         return;
     }
     printf("files: opening %s\n", path);
-    start(EDITOR, path);
+    start(icons[selected] == gui_icon("image") ? VIEWER : EDITOR, path);
 }
 
 static void run_selected(void) {
@@ -259,7 +263,7 @@ static void frame(struct gui_ui *ui) {
 
     gui_label(ui, "%s", status);
 
-    int result = gui_list(ui, "##entries", items, count, &selected, 0);
+    int result = gui_list_icons(ui, "##entries", items, icons, count, &selected, 0);
 
     report_list(ui);
     if (result == GUI_LIST_ACTIVATED) {

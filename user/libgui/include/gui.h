@@ -21,6 +21,7 @@ enum gui_message_type {
     GUI_BUFFER, // new pixels, width by height, named in buffer, after a resize
     GUI_TITLE,  // a new title, in text
     GUI_CURSOR, // the mouse cursor to show over the window: x is a gui_cursor
+    GUI_ICON,   // the program's name in text, which picks its icon
 
     // The clipboard, which wm keeps. Text goes either way in shared memory named
     // in buffer, width bytes long, which whoever gets it maps and then removes.
@@ -101,6 +102,10 @@ void gui_destroy_window(struct gui_window *window);
 bool gui_resize(struct gui_window *window, int width, int height);
 
 void gui_set_title(struct gui_window *window, const char *title);
+
+// Icons are /system/share/icons/apps/name.png, and a new window has the one named
+// after the program, as it was run.
+void gui_set_icon(struct gui_window *window, const char *name);
 void gui_set_cursor(struct gui_window *window, enum gui_cursor cursor);
 
 // Puts text on the clipboard, returning false if memory ran out.
@@ -134,6 +139,32 @@ void gui_copy(struct gui_canvas *canvas, int x, int y, const struct gui_canvas *
 #define GUI_CHAR_HEIGHT 16
 void gui_text(struct gui_canvas *canvas, int x, int y, const char *text, uint32_t color, int scale);
 int gui_text_width(const char *text, int scale);
+
+// Images, as pixels of 0xAARRGGBB, from PNG, JPEG and BMP files. Each returns
+// false if it couldn't, with gui_image_error saying why.
+struct gui_image {
+    uint32_t *pixels;
+    int width, height;
+};
+
+bool gui_image_load(const char *path, struct gui_image *image);
+bool gui_image_decode(const void *data, size_t size, struct gui_image *image);
+const char *gui_image_error(void);
+void gui_image_free(struct gui_image *image);
+
+// A smoothly scaled copy, to be freed as well.
+bool gui_image_scale(const struct gui_image *from, int width, int height, struct gui_image *to);
+
+// Draws an image, blending what's partly transparent with what's under it.
+void gui_draw_image(struct gui_canvas *canvas, int x, int y, const struct gui_image *image);
+
+// Icons, 16 pixels square, from /system/share/icons/name.png, loaded once and
+// kept. NULL if there's no such icon.
+#define GUI_ICON_SIZE 16
+const struct gui_image *gui_icon(const char *name);
+
+// The icon for a file by what its name ends in, or for a folder.
+const struct gui_image *gui_file_icon(const char *name, bool folder);
 
 // Widgets, drawn immediately in the style of Dear ImGui. Each frame, a program
 // calls them in order, top to bottom, and each draws itself and says what was done
@@ -293,6 +324,10 @@ bool gui_dropdown(struct gui_ui *ui, const char *label, const char *const *items
 enum { GUI_LIST_CHANGED = 1, GUI_LIST_ACTIVATED };
 int gui_list(struct gui_ui *ui, const char *label, const char *const *items, int count, int *selected, int rows);
 
+// The same, with an icon before each item, where icons has one that isn't NULL.
+int gui_list_icons(struct gui_ui *ui, const char *label, const char *const *items, const struct gui_image *const *icons,
+                   int count, int *selected, int rows);
+
 // A bar of menus across the top, which goes first in a frame. Each gui_menu that
 // returns true is open, and has its items next, then gui_menu_end. An item returns
 // true when it's chosen. F10 opens the first menu from the keyboard, the arrows move
@@ -321,6 +356,7 @@ struct gui_file_picker {
     char path[GUI_PATH_MAX]; // what was chosen
     char status[GUI_PATH_MAX + 64], replacing[GUI_PATH_MAX];
     char **items;
+    const struct gui_image **icons;
     int count, selected;
 };
 

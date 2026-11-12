@@ -13,7 +13,9 @@ static void forget(struct gui_file_picker *p) {
     for (int i = 0; i < p->count; i++)
         free(p->items[i]);
     free(p->items);
+    free(p->icons);
     p->items = NULL;
+    p->icons = NULL;
     p->count = p->selected = 0;
 }
 
@@ -92,6 +94,9 @@ static bool read_folder(struct gui_file_picker *p, const char *path) {
     }
     closedir(dir);
     qsort(p->items, p->count, sizeof(*p->items), compare_items);
+    p->icons = malloc((p->count ? p->count : 1) * sizeof(*p->icons));
+    for (int i = 0; p->icons && i < p->count; i++)
+        p->icons[i] = gui_file_icon(p->items[i], p->items[i][strlen(p->items[i]) - 1] == '/');
     snprintf(p->status, sizeof(p->status), "%d item%s", p->count, p->count == 1 ? "" : "s");
     p->replacing[0] = '\0';
     return true;
@@ -179,7 +184,8 @@ int gui_file_picker(struct gui_ui *ui, struct gui_file_picker *p) {
 
     // Choosing a file puts its name in the box, and double-clicking it or a
     // folder opens that.
-    int was = p->selected, picked = gui_list(ui, "##files", (const char *const *)p->items, p->count, &p->selected, 0);
+    int was = p->selected;
+    int picked = gui_list_icons(ui, "##files", (const char *const *)p->items, p->icons, p->count, &p->selected, 0);
     char *item = p->count ? p->items[p->selected] : NULL;
     bool item_folder = item && item[strlen(item) - 1] == '/';
 

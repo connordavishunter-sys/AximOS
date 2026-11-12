@@ -6,6 +6,8 @@ _start:
     leaq 8(%rsp), %r13
     leaq 8(%r13,%r12,8), %r14
     movq %r14, environ(%rip)
+    movq (%r13), %rax
+    movq %rax, program_invocation_name(%rip)
     call __libc_start
     movq %r12, %rdi
     movq %r13, %rsi

@@ -50,6 +50,14 @@
 #define LAUNCHER_WIDTH 64
 
 #define APPS_DIR "/system/bin/gui"
+#define ICONS "/system/share/icons"
+#define MAX_ICONS 32
+#define ICON_SIZE 16
+
+// The wallpaper is this, unless /system/etc/wallpaper names another, or "none"
+// for the plain colour.
+#define WALLPAPER_SETTING "/system/etc/wallpaper"
+#define DEFAULT_WALLPAPER "/system/share/wallpapers/default.jpg"
 #define MAX_APPS 32
 #define MENU_WIDTH 200
 #define ITEM_HEIGHT 24 // in the start menu and the Alt+Tab switcher
@@ -94,6 +102,7 @@ struct window {
     uint32_t id;
     int x, y;
     char title[GUI_TITLE_MAX];
+    char app[GUI_TITLE_MAX]; // the program, which picks its icon
     struct gui_canvas canvas;
     bool minimized;
 
@@ -130,6 +139,12 @@ static uint32_t next_id = 1;
 static struct window *focused;
 
 static uint8_t falloff[SHADOW + 1][SHADOW + 1];
+static struct gui_canvas wallpaper; // the screen's part of the scaled image, if there is one
+static struct {
+    char name[GUI_TITLE_MAX];
+    struct gui_image image; // no pixels if there's no such icon
+} icons[MAX_ICONS];
+static int icon_count;
 static char *clipboard;
 static size_t clipboard_length;
 
@@ -402,6 +417,32 @@ static void draw_shadow(struct gui_canvas *c, const struct window *w, int ox, in
     }
 }
 
+// An app's icon, loaded the first time it's wanted, or the plain program icon.
+static const struct gui_image *app_icon(const char *name) {
+    char path[sizeof(ICONS) + 16 + GUI_TITLE_MAX];
+
+    for (int i = 0; i < icon_count; i++) {
+        if (!strcmp(icons[i].name, name))
+            return icons[i].image.pixels ? &icons[i].image : name[0] ? app_icon("") : NULL;
+    }
+    if (icon_count == MAX_ICONS)
+        return NULL;
+    snprintf(icons[icon_count].name, sizeof(icons[icon_count].name), "%s", name);
+    if (name[0])
+        snprintf(path, sizeof(path), ICONS "/apps/%s.png", name);
+    else
+        snprintf(path, sizeof(path), ICONS "/program.png");
+    gui_image_load(path, &icons[icon_count++].image);
+    return app_icon(name);
+}
+
+static void draw_icon(struct gui_canvas *c, const char *app, int x, int y, int ox, int oy) {
+    const struct gui_image *icon = app_icon(app);
+
+    if (icon)
+        gui_draw_image(c, x - ox, y - oy, icon);
+}
+
 static void draw_window(struct gui_canvas *c, const struct window *w, int ox, int oy) {
     struct rect frame = frame_of(w), close = button_of(w, 0), maximize = button_of(w, 1), minimize = button_of(w, 2);
     uint32_t title_color = w == focused ? TITLE_FOCUSED : TITLE_UNFOCUSED;
@@ -413,7 +454,8 @@ static void draw_window(struct gui_canvas *c, const struct window *w, int ox, in
     gui_fill(c, frame.x - ox, frame.y - oy, BORDER, frame.height, BORDER_COLOR);
     gui_fill(c, frame.x + frame.width - BORDER - ox, frame.y - oy, BORDER, frame.height, BORDER_COLOR);
     gui_fill(c, w->x - ox, w->y - TITLE_HEIGHT - oy, w->canvas.width, TITLE_HEIGHT, title_color);
-    gui_text(c, w->x + 8 - ox, text_y, w->title, TITLE_TEXT, 1);
+    draw_icon(c, w->app, w->x + 5, w->y - TITLE_HEIGHT + (TITLE_HEIGHT - ICON_SIZE) / 2, ox, oy);
+    gui_text(c, w->x + 10 + ICON_SIZE - ox, text_y, w->title, TITLE_TEXT, 1);
 
     // A title too long for the bar goes under the buttons.
     gui_fill(c, minimize.x - 4 - ox, w->y - TITLE_HEIGHT - oy, w->x + w->canvas.width - minimize.x + 4, TITLE_HEIGHT,
@@ -479,7 +521,9 @@ static void draw_taskbar(struct gui_canvas *c, int ox, int oy) {
         uint32_t color = w == focused ? TITLE_FOCUSED : w->minimized ? TASKBAR_MINIMIZED : TASKBAR_BUTTON;
 
         gui_fill(c, b.x - ox, b.y - oy, b.width, b.height, color);
-        fitted_text(c, b.x + 8 - ox, text_y, b.width - 16, w->title, w->minimized ? TASKBAR_DIM_TEXT : TITLE_TEXT);
+        draw_icon(c, w->app, b.x + 4, b.y + (b.height - ICON_SIZE) / 2, ox, oy);
+        fitted_text(c, b.x + 8 + ICON_SIZE - ox, text_y, b.width - 12 - ICON_SIZE, w->title,
+                    w->minimized ? TASKBAR_DIM_TEXT : TITLE_TEXT);
     }
 
     strftime(clock, sizeof(clock), "%H:%M", localtime(&now));
@@ -491,11 +535,16 @@ static void draw_panel(struct gui_canvas *c, struct rect r, int ox, int oy) {
     gui_fill(c, r.x + 1 - ox, r.y + 1 - oy, r.width - 2, r.height - 2, TASKBAR_COLOR);
 }
 
-static void draw_item(struct gui_canvas *c, struct rect r, const char *text, bool chosen, uint32_t color, int ox,
-                      int oy) {
+// A row in the menu or the switcher, with the icon of app, if it's not NULL.
+static void draw_item(struct gui_canvas *c, struct rect r, const char *text, const char *app, bool chosen,
+                      uint32_t color, int ox, int oy) {
+    int text_x = 12 + ICON_SIZE;
+
     if (chosen)
         gui_fill(c, r.x - ox, r.y - oy, r.width, r.height, TITLE_FOCUSED);
-    fitted_text(c, r.x + 8 - ox, r.y + (r.height - GUI_CHAR_HEIGHT) / 2 - oy, r.width - 16, text, color);
+    if (app)
+        draw_icon(c, app, r.x + 6, r.y + (r.height - ICON_SIZE) / 2, ox, oy);
+    fitted_text(c, r.x + text_x - ox, r.y + (r.height - GUI_CHAR_HEIGHT) / 2 - oy, r.width - text_x - 8, text, color);
 }
 
 static void draw_menu(struct gui_canvas *c, int ox, int oy) {
@@ -503,10 +552,10 @@ static void draw_menu(struct gui_canvas *c, int ox, int oy) {
 
     draw_panel(c, m, ox, oy);
     if (!app_count)
-        draw_item(c, menu_item(0), "No apps in " APPS_DIR, false, TASKBAR_DIM_TEXT, ox, oy);
+        draw_item(c, menu_item(0), "No apps in " APPS_DIR, NULL, false, TASKBAR_DIM_TEXT, ox, oy);
     for (int i = 0; i < menu_items(); i++)
-        draw_item(c, menu_item(i), i < app_count ? apps[i] : power_items[i - app_count], i == menu_choice, TITLE_TEXT,
-                  ox, oy);
+        draw_item(c, menu_item(i), i < app_count ? apps[i] : power_items[i - app_count], i < app_count ? apps[i] : NULL,
+                  i == menu_choice, TITLE_TEXT, ox, oy);
     gui_fill(c, m.x + 8 - ox, first_power.y - MENU_GAP / 2 - 1 - oy, m.width - 16, 1, TASKBAR_LINE);
 }
 
@@ -517,7 +566,7 @@ static void draw_switcher(struct gui_canvas *c, int ox, int oy) {
     for (int i = 0; i < window_count; i++) {
         struct window *w = switcher_window(i);
 
-        draw_item(c, (struct rect){s.x + 4, s.y + 4 + i * ITEM_HEIGHT, s.width - 8, ITEM_HEIGHT}, w->title,
+        draw_item(c, (struct rect){s.x + 4, s.y + 4 + i * ITEM_HEIGHT, s.width - 8, ITEM_HEIGHT}, w->title, w->app,
                   i == switch_choice, w->minimized ? TASKBAR_DIM_TEXT : TITLE_TEXT, ox, oy);
     }
 }
@@ -550,7 +599,10 @@ static void compose(struct rect r) {
             first = i;
     }
     if (first < 0) {
-        gui_fill(&c, 0, 0, r.width, r.height, DESKTOP_COLOR);
+        if (wallpaper.pixels)
+            gui_copy(&c, 0, 0, &wallpaper, r.x, r.y, r.width, r.height);
+        else
+            gui_fill(&c, 0, 0, r.width, r.height, DESKTOP_COLOR);
         gui_text(&c, GUI_CHAR_WIDTH - r.x, hint_y - r.y, HINT, HINT_COLOR, 1);
         first = 0;
     }
@@ -915,6 +967,14 @@ static void handle_message(struct client *client, const struct gui_message *m) {
         break;
     case GUI_CLIPBOARD_GET:
         send_clipboard(client);
+        break;
+    case GUI_ICON:
+        if (w) {
+            memcpy(w->app, m->text, sizeof(w->app));
+            w->app[sizeof(w->app) - 1] = '\0';
+            add_damage(extent_of(w));
+            damage_taskbar();
+        }
         break;
     case GUI_CURSOR:
         if (w && m->x >= 0 && m->x <= GUI_CURSOR_RESIZE_NESW) {
@@ -1379,6 +1439,40 @@ static void handle_key(const struct key_event *e) {
         send_to(focused, (struct gui_message){.type = GUI_KEY, .key = *e});
 }
 
+// Scaled to cover the screen, keeping its shape, with what's left over either side
+// cut off equally.
+static void load_wallpaper(void) {
+    char path[256] = DEFAULT_WALLPAPER;
+    FILE *setting = fopen(WALLPAPER_SETTING, "r");
+    struct gui_image image, scaled;
+
+    if (setting && fgets(path, sizeof(path), setting))
+        path[strcspn(path, "\n")] = '\0';
+    if (setting)
+        fclose(setting);
+    if (!strcmp(path, "none"))
+        return;
+    if (!gui_image_load(path, &image)) {
+        printf("wm: wallpaper %s: %s\n", path, gui_image_error());
+        return;
+    }
+
+    bool wider = (long)screen.width * image.height >= (long)screen.height * image.width;
+    int width = wider ? screen.width : (int)((long)image.width * screen.height / image.height);
+    int height = wider ? (int)((long)image.height * screen.width / image.width) : screen.height;
+    bool ok = gui_image_scale(&image, width, height, &scaled);
+
+    gui_image_free(&image);
+    if (!ok) {
+        printf("wm: wallpaper %s: %s\n", path, gui_image_error());
+        return;
+    }
+    for (long i = 0; i < (long)width * height; i++)
+        scaled.pixels[i] &= 0xFFFFFF;
+    wallpaper = (struct gui_canvas){scaled.pixels + (long)(height - screen.height) / 2 * width + (width - screen.width) / 2,
+                                    screen.width, screen.height, width};
+}
+
 static int fail(const char *what) {
     dprintf(STDERR_FILENO, "wm: %s: %s\n", what, strerror(errno));
     return 1;
@@ -1421,6 +1515,7 @@ int main(int argc, char **argv) {
     for (int i = 1; i < argc; i++)
         launch(argv[i]);
     make_falloff();
+    load_wallpaper();
     printf("wm: running at %dx%d\n", screen.width, screen.height);
     fflush(stdout);
 

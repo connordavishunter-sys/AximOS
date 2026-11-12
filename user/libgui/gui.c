@@ -112,7 +112,10 @@ struct gui_window *gui_create_window(const char *title, int width, int height) {
     window->shown = shown;
     while (gui_receive(connection, &message)) {
         if (message.type == GUI_CREATED && message.window) {
+            const char *name = program_invocation_name ? strrchr(program_invocation_name, '/') : NULL;
+
             window->id = message.window;
+            gui_set_icon(window, name ? name + 1 : program_invocation_name ? program_invocation_name : "");
             return window;
         }
         if (message.type == GUI_CREATED)
@@ -230,6 +233,13 @@ void gui_set_title(struct gui_window *window, const char *title) {
     struct gui_message message = {.type = GUI_TITLE, .window = window->id};
 
     snprintf(message.text, sizeof(message.text), "%s", title);
+    gui_send(connection, &message);
+}
+
+void gui_set_icon(struct gui_window *window, const char *name) {
+    struct gui_message message = {.type = GUI_ICON, .window = window->id};
+
+    snprintf(message.text, sizeof(message.text), "%s", name);
     gui_send(connection, &message);
 }
 
