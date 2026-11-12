@@ -64,19 +64,40 @@
 #define MENU_GAP 9     // between the apps and the power items
 #define SWITCHER_WIDTH 360
 
-#define DESKTOP_COLOR 0x1E2430
-#define HINT_COLOR 0x5C677D
-#define BORDER_COLOR 0x0E1118
-#define TITLE_FOCUSED 0x3D63DD
-#define TITLE_UNFOCUSED 0x3A4150
+// Colours, from the theme the settings choose. What's on the focused title bar,
+// the red close button and the grey ones is white in both.
+struct theme {
+    uint32_t desktop, hint, border, title_focused, title_unfocused, title_text_unfocused;
+    uint32_t taskbar, taskbar_line, taskbar_button, taskbar_minimized, text, dim_text;
+};
+
+static const struct theme dark = {
+    .desktop = 0x1E2430, .hint = 0x5C677D, .border = 0x0E1118, .title_focused = 0x3D63DD,
+    .title_unfocused = 0x3A4150, .title_text_unfocused = 0xFFFFFF, .taskbar = 0x141821, .taskbar_line = 0x2A3140,
+    .taskbar_button = 0x2E3646, .taskbar_minimized = 0x1D222C, .text = 0xFFFFFF, .dim_text = 0x8A93A6,
+};
+static const struct theme light = {
+    .desktop = 0xD5DBE6, .hint = 0x6B7488, .border = 0x9AA2B2, .title_focused = 0x3D63DD,
+    .title_unfocused = 0xD9DDE5, .title_text_unfocused = 0x2B2F38, .taskbar = 0xEDEFF3, .taskbar_line = 0xC9CED8,
+    .taskbar_button = 0xDCE0E8, .taskbar_minimized = 0xE8EBF0, .text = 0x1E2129, .dim_text = 0x7A8396,
+};
+static const struct theme *theme = &dark;
+
+#define DESKTOP_COLOR (theme->desktop)
+#define HINT_COLOR (theme->hint)
+#define BORDER_COLOR (theme->border)
+#define TITLE_FOCUSED (theme->title_focused)
+#define TITLE_UNFOCUSED (theme->title_unfocused)
+#define TITLE_TEXT_UNFOCUSED (theme->title_text_unfocused)
+#define TASKBAR_COLOR (theme->taskbar)
+#define TASKBAR_LINE (theme->taskbar_line)
+#define TASKBAR_BUTTON (theme->taskbar_button)
+#define TASKBAR_MINIMIZED (theme->taskbar_minimized)
+#define TASKBAR_TEXT (theme->text)
+#define TASKBAR_DIM_TEXT (theme->dim_text)
 #define TITLE_TEXT 0xFFFFFF
 #define CLOSE_COLOR 0xE5484D
 #define BUTTON_COLOR 0x56607A
-#define TASKBAR_COLOR 0x141821
-#define TASKBAR_LINE 0x2A3140
-#define TASKBAR_BUTTON 0x2E3646
-#define TASKBAR_MINIMIZED 0x1D222C
-#define TASKBAR_DIM_TEXT 0x8A93A6
 
 // Super+Enter runs this.
 #define LAUNCH_COMMAND "term"
@@ -139,6 +160,7 @@ static uint32_t next_id = 1;
 static struct window *focused;
 
 static uint8_t falloff[SHADOW + 1][SHADOW + 1];
+static struct gui_settings settings;
 static struct gui_canvas wallpaper; // the screen's part of the scaled image, if there is one
 static struct {
     char name[GUI_TITLE_MAX];
@@ -221,6 +243,8 @@ static struct rect frame_of(const struct window *w) {
 static struct rect extent_of(const struct window *w) {
     struct rect f = frame_of(w);
 
+    if (!settings.shadows)
+        return f;
     return (struct rect){f.x - SHADOW, f.y - SHADOW + SHADOW_DROP, f.width + 2 * SHADOW, f.height + 2 * SHADOW};
 }
 
@@ -455,7 +479,7 @@ static void draw_window(struct gui_canvas *c, const struct window *w, int ox, in
     gui_fill(c, frame.x + frame.width - BORDER - ox, frame.y - oy, BORDER, frame.height, BORDER_COLOR);
     gui_fill(c, w->x - ox, w->y - TITLE_HEIGHT - oy, w->canvas.width, TITLE_HEIGHT, title_color);
     draw_icon(c, w->app, w->x + 5, w->y - TITLE_HEIGHT + (TITLE_HEIGHT - ICON_SIZE) / 2, ox, oy);
-    gui_text(c, w->x + 10 + ICON_SIZE - ox, text_y, w->title, TITLE_TEXT, 1);
+    gui_text(c, w->x + 10 + ICON_SIZE - ox, text_y, w->title, w == focused ? TITLE_TEXT : TITLE_TEXT_UNFOCUSED, 1);
 
     // A title too long for the bar goes under the buttons.
     gui_fill(c, minimize.x - 4 - ox, w->y - TITLE_HEIGHT - oy, w->x + w->canvas.width - minimize.x + 4, TITLE_HEIGHT,
@@ -507,13 +531,13 @@ static void draw_taskbar(struct gui_canvas *c, int ox, int oy) {
     struct window *list[MAX_WINDOWS];
     int count = windows_by_age(list);
     int text_y = bar.y + (TASKBAR_HEIGHT - GUI_CHAR_HEIGHT) / 2 - oy;
-    char clock[8];
+    char clock[16], *shown;
     time_t now = time(NULL);
 
     gui_fill(c, bar.x - ox, bar.y - oy, bar.width, bar.height, TASKBAR_COLOR);
     gui_fill(c, bar.x - ox, bar.y - oy, bar.width, 1, TASKBAR_LINE);
     gui_fill(c, l.x - ox, l.y - oy, l.width, l.height, TASKBAR_BUTTON);
-    gui_text(c, l.x + (l.width - gui_text_width("Apps", 1)) / 2 - ox, text_y, "Apps", TITLE_TEXT, 1);
+    gui_text(c, l.x + (l.width - gui_text_width("Apps", 1)) / 2 - ox, text_y, "Apps", TASKBAR_TEXT, 1);
 
     for (int i = 0; i < count; i++) {
         struct rect b = taskbar_button(i, count);
@@ -523,11 +547,13 @@ static void draw_taskbar(struct gui_canvas *c, int ox, int oy) {
         gui_fill(c, b.x - ox, b.y - oy, b.width, b.height, color);
         draw_icon(c, w->app, b.x + 4, b.y + (b.height - ICON_SIZE) / 2, ox, oy);
         fitted_text(c, b.x + 8 + ICON_SIZE - ox, text_y, b.width - 12 - ICON_SIZE, w->title,
-                    w->minimized ? TASKBAR_DIM_TEXT : TITLE_TEXT);
+                    w == focused ? TITLE_TEXT : w->minimized ? TASKBAR_DIM_TEXT : TASKBAR_TEXT);
     }
 
-    strftime(clock, sizeof(clock), "%H:%M", localtime(&now));
-    gui_text(c, bar.width - gui_text_width(clock, 1) - 12 - ox, text_y, clock, TITLE_TEXT, 1);
+    // 12 hour time goes without a leading zero, as people write it.
+    strftime(clock, sizeof(clock), settings.clock_12_hour ? "%I:%M %p" : "%H:%M", localtime(&now));
+    shown = clock + (settings.clock_12_hour && clock[0] == '0');
+    gui_text(c, bar.width - gui_text_width(shown, 1) - 12 - ox, text_y, shown, TASKBAR_TEXT, 1);
 }
 
 static void draw_panel(struct gui_canvas *c, struct rect r, int ox, int oy) {
@@ -544,7 +570,8 @@ static void draw_item(struct gui_canvas *c, struct rect r, const char *text, con
         gui_fill(c, r.x - ox, r.y - oy, r.width, r.height, TITLE_FOCUSED);
     if (app)
         draw_icon(c, app, r.x + 6, r.y + (r.height - ICON_SIZE) / 2, ox, oy);
-    fitted_text(c, r.x + text_x - ox, r.y + (r.height - GUI_CHAR_HEIGHT) / 2 - oy, r.width - text_x - 8, text, color);
+    fitted_text(c, r.x + text_x - ox, r.y + (r.height - GUI_CHAR_HEIGHT) / 2 - oy, r.width - text_x - 8, text,
+                chosen ? TITLE_TEXT : color);
 }
 
 static void draw_menu(struct gui_canvas *c, int ox, int oy) {
@@ -555,7 +582,7 @@ static void draw_menu(struct gui_canvas *c, int ox, int oy) {
         draw_item(c, menu_item(0), "No apps in " APPS_DIR, NULL, false, TASKBAR_DIM_TEXT, ox, oy);
     for (int i = 0; i < menu_items(); i++)
         draw_item(c, menu_item(i), i < app_count ? apps[i] : power_items[i - app_count], i < app_count ? apps[i] : NULL,
-                  i == menu_choice, TITLE_TEXT, ox, oy);
+                  i == menu_choice, TASKBAR_TEXT, ox, oy);
     gui_fill(c, m.x + 8 - ox, first_power.y - MENU_GAP / 2 - 1 - oy, m.width - 16, 1, TASKBAR_LINE);
 }
 
@@ -567,7 +594,7 @@ static void draw_switcher(struct gui_canvas *c, int ox, int oy) {
         struct window *w = switcher_window(i);
 
         draw_item(c, (struct rect){s.x + 4, s.y + 4 + i * ITEM_HEIGHT, s.width - 8, ITEM_HEIGHT}, w->title, w->app,
-                  i == switch_choice, w->minimized ? TASKBAR_DIM_TEXT : TITLE_TEXT, ox, oy);
+                  i == switch_choice, w->minimized ? TASKBAR_DIM_TEXT : TASKBAR_TEXT, ox, oy);
     }
 }
 
@@ -608,7 +635,8 @@ static void compose(struct rect r) {
     }
     for (int i = first; i < window_count; i++) {
         if (!windows[i]->minimized && overlaps(extent_of(windows[i]), r)) {
-            draw_shadow(&c, windows[i], r.x, r.y);
+            if (settings.shadows)
+                draw_shadow(&c, windows[i], r.x, r.y);
             draw_window(&c, windows[i], r.x, r.y);
         }
     }
@@ -734,6 +762,13 @@ static void raise_window(struct window *w) {
     memmove(&windows[i], &windows[i + 1], (window_count - i - 1) * sizeof(*windows));
     windows[window_count - 1] = w;
     add_damage(extent_of(w));
+}
+
+// Settings change the colours, shadows and clock, so everything is drawn again.
+static void load_settings(void) {
+    gui_settings_load(&settings);
+    theme = settings.light ? &light : &dark;
+    add_damage((struct rect){0, 0, screen.width, screen.height});
 }
 
 // Opens shared memory a message names, removing the name. Returns its file, or -1.
@@ -967,6 +1002,13 @@ static void handle_message(struct client *client, const struct gui_message *m) {
         break;
     case GUI_CLIPBOARD_GET:
         send_clipboard(client);
+        break;
+    case GUI_SETTINGS:
+        load_settings();
+        for (int i = 0; i < MAX_CLIENTS; i++) {
+            if (clients[i])
+                queue_message(clients[i], &(struct gui_message){.type = GUI_SETTINGS});
+        }
         break;
     case GUI_ICON:
         if (w) {
@@ -1516,6 +1558,7 @@ int main(int argc, char **argv) {
         launch(argv[i]);
     make_falloff();
     load_wallpaper();
+    load_settings();
     printf("wm: running at %dx%d\n", screen.width, screen.height);
     fflush(stdout);
 

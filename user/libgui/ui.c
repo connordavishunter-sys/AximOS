@@ -19,19 +19,38 @@
 #define DROPDOWN_ROWS 8 // at most, with more scrolling
 #define DOUBLE_CLICK_MS 400
 
-#define BACKGROUND 0x1E2129
-#define PANEL 0x181B21 // behind scrolling areas and lists
-#define POPUP 0x2B303B
-#define TEXT 0xE6E8EE
-#define DIM_TEXT 0x8A93A6
-#define FRAME 0x2B303B
-#define FRAME_HOT 0x363D4B
-#define ACCENT 0x3D63DD
-#define ACCENT_HOT 0x5578E8
-#define FOCUS_RING 0x8FA8F5
-#define SEPARATOR 0x3A4150
-#define SELECTION 0x34519E
-#define THUMB 0x4A5263
+// Colours, from the theme the settings choose.
+struct theme {
+    uint32_t background, panel, popup, text, dim_text, frame, frame_hot, accent, accent_hot, on_accent;
+    uint32_t focus_ring, separator, selection, thumb;
+};
+
+static const struct theme dark = {
+    .background = 0x1E2129, .panel = 0x181B21, .popup = 0x2B303B, .text = 0xE6E8EE, .dim_text = 0x8A93A6,
+    .frame = 0x2B303B, .frame_hot = 0x363D4B, .accent = 0x3D63DD, .accent_hot = 0x5578E8, .on_accent = 0xFFFFFF,
+    .focus_ring = 0x8FA8F5, .separator = 0x3A4150, .selection = 0x34519E, .thumb = 0x4A5263,
+};
+static const struct theme light = {
+    .background = 0xF3F4F7, .panel = 0xFFFFFF, .popup = 0xFFFFFF, .text = 0x1E2129, .dim_text = 0x6B7280,
+    .frame = 0xE2E5EB, .frame_hot = 0xD3D8E1, .accent = 0x3D63DD, .accent_hot = 0x5578E8, .on_accent = 0xFFFFFF,
+    .focus_ring = 0x5578E8, .separator = 0xC9CED8, .selection = 0xB9CAF7, .thumb = 0xB4BBC8,
+};
+static const struct theme *theme = &dark;
+
+#define BACKGROUND (theme->background)
+#define PANEL (theme->panel) // behind scrolling areas and lists
+#define POPUP (theme->popup)
+#define TEXT (theme->text)
+#define DIM_TEXT (theme->dim_text)
+#define FRAME (theme->frame)
+#define FRAME_HOT (theme->frame_hot)
+#define ACCENT (theme->accent)
+#define ACCENT_HOT (theme->accent_hot)
+#define ON_ACCENT (theme->on_accent) // text on the accent
+#define FOCUS_RING (theme->focus_ring)
+#define SEPARATOR (theme->separator)
+#define SELECTION (theme->selection)
+#define THUMB (theme->thumb)
 
 static struct gui_rect intersect(struct gui_rect a, struct gui_rect b) {
     int x = a.x > b.x ? a.x : b.x, y = a.y > b.y ? a.y : b.y;
@@ -103,8 +122,16 @@ static uint32_t id_of(const char *label) {
     return hash ? hash : 1;
 }
 
+static void load_theme(void) {
+    struct gui_settings settings;
+
+    gui_settings_load(&settings);
+    theme = settings.light ? &light : &dark;
+}
+
 void gui_ui_init(struct gui_ui *ui, struct gui_window *window) {
     *ui = (struct gui_ui){.window = window, .window_focused = true, .mouse_x = -1, .mouse_y = -1};
+    load_theme();
 }
 
 bool gui_ui_event(struct gui_ui *ui, const struct gui_message *e) {
@@ -141,6 +168,9 @@ bool gui_ui_event(struct gui_ui *ui, const struct gui_message *e) {
     case GUI_RESIZE:
         return gui_resize(ui->window, e->width, e->height);
     case GUI_REDRAW:
+        return true;
+    case GUI_SETTINGS:
+        load_theme();
         return true;
     }
     return false;
@@ -411,8 +441,10 @@ bool gui_button(struct gui_ui *ui, const char *label) {
     bool focused = focusable(ui, id);
 
     clicked |= focused && (key_pressed(ui, KEY_ENTER) || key_pressed(ui, KEY_SPACE));
-    fill(ui, r.x, r.y, r.width, r.height, ui->active == id && ui->hot == id ? ACCENT : ui->hot == id ? FRAME_HOT : FRAME);
-    draw_label(ui, r.x + PADDING + 2, r.y + PADDING, label, TEXT);
+    bool pressed = ui->active == id && ui->hot == id;
+
+    fill(ui, r.x, r.y, r.width, r.height, pressed ? ACCENT : ui->hot == id ? FRAME_HOT : FRAME);
+    draw_label(ui, r.x + PADDING + 2, r.y + PADDING, label, pressed ? ON_ACCENT : TEXT);
     if (focused)
         draw_focus(ui, r);
     return clicked;
@@ -965,7 +997,8 @@ static bool popup_item(struct gui_ui *ui, const char *label, bool keyed, bool ma
     ui->item_y += ROW_HEIGHT;
     ui->item_index++;
     fill(ui, r.x, r.y, r.width, r.height, is_over || keyed ? ACCENT : marked ? FRAME_HOT : POPUP);
-    draw_fitted(ui, r.x + 8, r.y + (ROW_HEIGHT - GUI_CHAR_HEIGHT) / 2, r.width - 16, label, shown_length(label), TEXT);
+    draw_fitted(ui, r.x + 8, r.y + (ROW_HEIGHT - GUI_CHAR_HEIGHT) / 2, r.width - 16, label, shown_length(label),
+                is_over || keyed ? ON_ACCENT : TEXT);
 
     // What was drawn before it may show what it changes, so the frame goes again.
     ui->again |= chosen;
@@ -1126,7 +1159,8 @@ int gui_list_icons(struct gui_ui *ui, const char *label, const char *const *item
             fill(ui, r.x, r.y, r.width, r.height, i == *selected ? ACCENT : FRAME_HOT);
         if (icons && icons[i])
             draw_image(ui, r.x + 5, r.y + (ROW_HEIGHT - GUI_ICON_SIZE) / 2, icons[i]);
-        draw_fitted(ui, r.x + text_x, r.y + (ROW_HEIGHT - GUI_CHAR_HEIGHT) / 2, r.width - text_x - 6, items[i], 255, TEXT);
+        draw_fitted(ui, r.x + text_x, r.y + (ROW_HEIGHT - GUI_CHAR_HEIGHT) / 2, r.width - text_x - 6, items[i], 255,
+                    i == *selected ? ON_ACCENT : TEXT);
     }
     ui->layout.clip = was;
     if (focused)
@@ -1191,7 +1225,7 @@ bool gui_menu(struct gui_ui *ui, const char *label) {
     if (ui->popup == id)
         menu_keys(ui, id);
     fill(ui, r.x, r.y, r.width, r.height, ui->popup == id ? ACCENT : is_over ? FRAME_HOT : FRAME);
-    draw_label(ui, r.x + PADDING + 3, r.y + PADDING, label, TEXT);
+    draw_label(ui, r.x + PADDING + 3, r.y + PADDING, label, ui->popup == id ? ON_ACCENT : TEXT);
     if (ui->popup != id)
         return false;
     popup_begin(ui, (struct gui_rect){r.x, r.y + r.height, MENU_WIDTH, 0});

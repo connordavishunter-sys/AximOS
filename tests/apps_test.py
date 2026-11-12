@@ -245,7 +245,7 @@ try:
     # The start menu has each app's icon.
     v.key('meta_l'); time.sleep(0.5)
     w, h, px = v.screenshot()
-    menu_top = 772 - 9 * 24 - 9 - 8
+    menu_top = 772 - 10 * 24 - 9 - 8
     icon = [px(4 + 6 + 8, menu_top + 4 + i * 24 + 12) for i in range(3)]
     check('icons in the start menu', all(p not in (0x141821, 0x3D63DD) for p in icon), [hex(p) for p in icon])
     v.key('esc')

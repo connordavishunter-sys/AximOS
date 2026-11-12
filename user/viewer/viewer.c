@@ -3,7 +3,6 @@
 #include <string.h>
 #include <unistd.h>
 
-#define BACKGROUND 0x1E2129
 #define CHECK 8 // squares behind what's transparent
 #define CHECK_LIGHT 0x3A3F4B
 #define CHECK_DARK 0x2E323C
@@ -12,6 +11,7 @@
 #define MIN_SIZE 240
 
 static struct gui_window *window;
+static uint32_t background, text_colour; // from the theme
 static struct gui_image image, fitted; // as it is, and as it's shown
 
 // The image fitted into the window, never made bigger than it is, in the middle,
@@ -20,9 +20,9 @@ static void draw(void) {
     struct gui_canvas *c = &window->canvas;
     int w = image.width, h = image.height;
 
-    gui_fill(c, 0, 0, c->width, c->height, BACKGROUND);
+    gui_fill(c, 0, 0, c->width, c->height, background);
     if (!image.pixels) {
-        gui_text(c, 16, 16, "No image: open one from Files.", 0xE6E8EE, 1);
+        gui_text(c, 16, 16, "No image: open one from Files.", text_colour, 1);
         gui_show(window);
         return;
     }
@@ -54,6 +54,14 @@ static void draw(void) {
     gui_show(window);
 }
 
+static void use_theme(void) {
+    struct gui_settings settings;
+
+    gui_settings_load(&settings);
+    background = settings.light ? 0xF3F4F7 : 0x1E2129;
+    text_colour = settings.light ? 0x1E2129 : 0xE6E8EE;
+}
+
 // Shows a PNG, JPEG or BMP file.
 int main(int argc, char **argv) {
     help_option(argc, argv, "usage: viewer [image]\n"
@@ -83,8 +91,13 @@ int main(int argc, char **argv) {
         dprintf(STDERR_FILENO, "viewer: couldn't make a window\n");
         return 1;
     }
+    use_theme();
     draw();
     while (gui_next_event(&e) && e.type != GUI_CLOSE) {
+        if (e.type == GUI_SETTINGS) {
+            use_theme();
+            draw();
+        }
         if (e.type == GUI_KEY && e.key.pressed && e.key.code == KEY_ESCAPE)
             break;
         if (e.type == GUI_RESIZE && gui_resize(window, e.width, e.height))

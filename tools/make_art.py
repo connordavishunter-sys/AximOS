@@ -101,6 +101,16 @@ def demo(d, s):
     d.arc((4.5 * s, 6 * s, 11.5 * s, 12 * s), 20, 160, fill=(60, 50, 40), width=int(1.2 * s))
 
 
+def gear(d, s):
+    c, teeth = 8 * s, 8
+    for i in range(teeth):
+        angle = i * 2 * math.pi / teeth
+        x, y = c + 5.6 * s * math.cos(angle), c + 5.6 * s * math.sin(angle)
+        d.ellipse((x - 1.8 * s, y - 1.8 * s, x + 1.8 * s, y + 1.8 * s), fill=(150, 160, 180))
+    d.ellipse((c - 5.5 * s, c - 5.5 * s, c + 5.5 * s, c + 5.5 * s), fill=(150, 160, 180))
+    d.ellipse((c - 2.3 * s, c - 2.3 * s, c + 2.3 * s, c + 2.3 * s), fill=(0, 0, 0, 0))
+
+
 def squares(d, s):
     for i, colour in enumerate(((230, 70, 80), (70, 190, 110), (70, 120, 230), (240, 190, 60))):
         x, y = 1.5 + (i % 2) * 7, 1.5 + (i // 2) * 7
@@ -114,5 +124,5 @@ for name, paint in (('folder', folder), ('file', page), ('text', lambda d, s: pa
                     ('image', picture_icon), ('program', program)):
     icon(paint).save(f'{SHARE}/icons/{name}.png', optimize=True)
 for name, paint in (('term', terminal), ('editor', editor), ('files', files), ('widgets', widgets),
-                    ('guidemo', demo), ('fbdemo', squares), ('viewer', picture_icon)):
+                    ('guidemo', demo), ('fbdemo', squares), ('viewer', picture_icon), ('settings', gear)):
     icon(paint).save(f'{SHARE}/icons/apps/{name}.png', optimize=True)

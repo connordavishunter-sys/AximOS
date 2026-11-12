@@ -23,6 +23,9 @@ enum gui_message_type {
     GUI_CURSOR, // the mouse cursor to show over the window: x is a gui_cursor
     GUI_ICON,   // the program's name in text, which picks its icon
 
+    // Either way: settings have changed, and wm, then every program, loads them again.
+    GUI_SETTINGS,
+
     // The clipboard, which wm keeps. Text goes either way in shared memory named
     // in buffer, width bytes long, which whoever gets it maps and then removes.
     GUI_CLIPBOARD_SET, // width and buffer, or width 0 to empty it
@@ -139,6 +142,19 @@ void gui_copy(struct gui_canvas *canvas, int x, int y, const struct gui_canvas *
 #define GUI_CHAR_HEIGHT 16
 void gui_text(struct gui_canvas *canvas, int x, int y, const char *text, uint32_t color, int scale);
 int gui_text_width(const char *text, int scale);
+
+// The desktop's settings, kept in /system/etc/gui.conf.
+struct gui_settings {
+    bool light;         // the light theme, rather than the dark one
+    bool shadows;       // under windows
+    bool clock_12_hour; // on the taskbar, rather than 24 hour
+};
+
+void gui_settings_load(struct gui_settings *settings);
+bool gui_settings_save(const struct gui_settings *settings);
+
+// Tells wm the settings have changed, and through it every program with a window.
+void gui_settings_changed(void);
 
 // Images, as pixels of 0xAARRGGBB, from PNG, JPEG and BMP files. Each returns
 // false if it couldn't, with gui_image_error saying why.

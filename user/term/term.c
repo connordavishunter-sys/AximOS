@@ -27,11 +27,12 @@
 #define KEY_C 0x2E
 #define KEY_V 0x2F
 
-// The console's colours, then the defaults, which aren't any of them.
+// The console's colours, then the defaults, which aren't any of them and follow
+// the theme.
 #define BRIGHT 8
 #define DEFAULT_FOREGROUND 16
 #define DEFAULT_BACKGROUND 17
-static const uint32_t palette[18] = {
+static uint32_t palette[18] = {
     0x000000, 0xCC3333, 0x33AA33, 0xCCAA33, 0x3366CC, 0xAA44AA, 0x33AAAA, 0xC0C0C0,
     0x666666, 0xFF6666, 0x66DD66, 0xFFDD66, 0x6699FF, 0xDD77DD, 0x66DDDD, 0xFFFFFF,
     0xD8DEE9, 0x161A22,
@@ -403,6 +404,14 @@ static bool send_key(int master, const struct key_event *key) {
     return sequence || text;
 }
 
+static void use_theme(void) {
+    struct gui_settings settings;
+
+    gui_settings_load(&settings);
+    palette[DEFAULT_FOREGROUND] = settings.light ? 0x1E2129 : 0xD8DEE9;
+    palette[DEFAULT_BACKGROUND] = settings.light ? 0xFAFAFA : 0x161A22;
+}
+
 static void scroll_view(int lines) {
     view = clamp(view + lines, 0, history_count);
     mark_all_dirty();
@@ -589,6 +598,7 @@ int main(int argc, char **argv) {
     for (int r = 0; r < rows; r++)
         clear_cells(r, 0, cols);
     gui_set_cursor(window, GUI_CURSOR_TEXT);
+    use_theme();
     paint_background();
     draw();
     gui_show(window);
@@ -645,6 +655,12 @@ int main(int argc, char **argv) {
                 dirty[row] = true;
             } else if (e.type == GUI_RESIZE) {
                 resize(master, e.width, e.height);
+            } else if (e.type == GUI_SETTINGS) {
+                use_theme();
+                paint_background();
+                draw();
+                draw_scrollbar();
+                gui_show(window);
             } else if (e.type == GUI_CLOSE) {
                 running = false;
             }
