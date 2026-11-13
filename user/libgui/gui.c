@@ -1,4 +1,6 @@
 #include <errno.h>
+#include <poll.h>
+#include <time.h>
 #include <fcntl.h>
 #include <gui.h>
 #include <stdio.h>
@@ -309,11 +311,87 @@ const struct gui_screen *gui_screen(void) {
     return &screen;
 }
 
+static struct timer {
+    int id, ms; // id 0 when it isn't running
+    bool repeat;
+    int64_t due;
+} timers[GUI_MAX_TIMERS];
+static int last_timer;
+
+static int64_t now_ms(void) {
+    struct timespec t;
+
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (int64_t)t.tv_sec * 1000 + t.tv_nsec / 1000000;
+}
+
+int gui_timer_start(int ms, bool repeat) {
+    for (int i = 0; i < GUI_MAX_TIMERS; i++) {
+        if (!timers[i].id) {
+            timers[i] = (struct timer){++last_timer, ms > 0 ? ms : 1, repeat, now_ms() + ms};
+            return timers[i].id;
+        }
+    }
+    return -1;
+}
+
+void gui_timer_stop(int timer) {
+    for (int i = 0; i < GUI_MAX_TIMERS; i++) {
+        if (timers[i].id == timer)
+            timers[i].id = 0;
+    }
+}
+
+// The timer due soonest, or NULL when none are running.
+static struct timer *next_timer(void) {
+    struct timer *next = NULL;
+
+    for (int i = 0; i < GUI_MAX_TIMERS; i++) {
+        if (timers[i].id && (!next || timers[i].due < next->due))
+            next = &timers[i];
+    }
+    return next;
+}
+
+// Fills in event and returns true if a timer is due.
+static bool timer_due(struct gui_message *event) {
+    struct timer *t = next_timer();
+    int64_t now = now_ms();
+
+    if (!t || t->due > now)
+        return false;
+    *event = (struct gui_message){.type = GUI_TIMER, .x = t->id};
+    if (!t->repeat)
+        t->id = 0;
+    t->due = t->due + t->ms > now ? t->due + t->ms : now + t->ms;
+    return true;
+}
+
+// Waits for wm until the next timer is due. False means a timer is.
+static bool wait_for_wm(void) {
+    struct timer *t = next_timer();
+    struct pollfd fd = {.fd = connection, .events = POLLIN};
+
+    if (!t)
+        return true;
+    for (;;) {
+        int64_t wait = t->due - now_ms();
+        int ready = poll(&fd, 1, wait > 0 ? (int)wait : 0);
+
+        if (ready >= 0 || errno != EINTR)
+            return ready != 0; // an error is for gui_receive to find
+    }
+}
+
 bool gui_next_event(struct gui_message *event) {
     if (queue_count > 0) {
         *event = queue[queue_head];
         queue_head = (queue_head + 1) % QUEUE_SIZE;
         queue_count--;
+    } else if (timer_due(event)) {
+        return true;
+    } else if (!wait_for_wm()) {
+        return timer_due(event) || gui_next_event(event);
     } else if (!gui_receive(connection, event)) {
         return false;
     }

@@ -47,6 +47,7 @@ enum gui_message_type {
 
     // From libgui itself, through gui_post: draw the window again.
     GUI_REDRAW,
+    GUI_TIMER, // x is the timer that's due
 };
 
 // The shapes of mouse cursor wm draws.
@@ -130,6 +131,13 @@ bool gui_next_event(struct gui_message *event);
 
 // Puts an event at the end of those gui_next_event gives, as if it came from wm.
 void gui_post(const struct gui_message *event);
+
+// gui_next_event gives a GUI_TIMER every ms milliseconds, or only once without
+// repeat, with x the number this returns. A timer that's fallen behind doesn't
+// make up what it missed. Returns -1 when GUI_MAX_TIMERS are running.
+#define GUI_MAX_TIMERS 16
+int gui_timer_start(int ms, bool repeat);
+void gui_timer_stop(int timer);
 
 // Reads or writes one whole message on a connection, for wm.
 bool gui_receive(int fd, struct gui_message *message);

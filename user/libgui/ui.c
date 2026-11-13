@@ -177,6 +177,7 @@ bool gui_ui_event(struct gui_ui *ui, const struct gui_message *e) {
         return gui_resize(ui->window, e->width, e->height);
     case GUI_REDRAW:
     case GUI_SCREEN:
+    case GUI_TIMER:
         return true;
     case GUI_SETTINGS:
         load_theme();
