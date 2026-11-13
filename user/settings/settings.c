@@ -53,6 +53,11 @@ static char resolution_names[MAX_RESOLUTIONS][16];
 static const char *resolutions[MAX_RESOLUTIONS];
 static int resolution_count, picked = -1, wanted_width, wanted_height; // picked, until it's applied
 
+// After a new resolution, it goes back to the one before unless told to keep it,
+// in case the screen can't show it.
+#define KEEP_SECONDS 15
+static int keep_left, keep_timer, old_width, old_height;
+
 static int compare(const void *a, const void *b) {
     return strcmp(*(char *const *)a, *(char *const *)b);
 }
@@ -205,6 +210,26 @@ static void list_resolutions(void) {
         resolutions[i] = resolution_names[i];
 }
 
+static void set_resolution(int width, int height) {
+    char name[32];
+
+    settings.width = width;
+    settings.height = height;
+    snprintf(name, sizeof(name), "%dx%d", width, height);
+    save(name);
+}
+
+static void stop_countdown(void) {
+    gui_timer_stop(keep_timer);
+    keep_left = 0;
+}
+
+static void go_back(void) {
+    printf("settings: going back to %dx%d\n", old_width, old_height);
+    stop_countdown();
+    set_resolution(old_width, old_height);
+}
+
 // What wm made of a resolution asked for.
 static void screen_changed(void) {
     const struct gui_screen *s = gui_screen();
@@ -212,6 +237,11 @@ static void screen_changed(void) {
     printf("settings: screen %dx%d%s\n", s->width, s->height, s->can_resize ? "" : " fixed");
     if (wanted_width && (s->width != wanted_width || s->height != wanted_height))
         snprintf(status, sizeof(status), "The screen couldn't be %dx%d", wanted_width, wanted_height);
+    else if (wanted_width) {
+        keep_left = KEEP_SECONDS;
+        keep_timer = gui_timer_start(1000, true);
+        printf("settings: keep? %d\n", keep_left);
+    }
     wanted_width = 0;
     picked = -1;
     list_resolutions();
@@ -219,7 +249,7 @@ static void screen_changed(void) {
 
 // Says where a widget is when that changes, for the tests to find it.
 static void report(struct gui_ui *ui, int index, const char *what) {
-    static struct gui_rect places[8 + MAX_WALLPAPERS];
+    static struct gui_rect places[10 + MAX_WALLPAPERS];
     struct gui_rect r = gui_last_rect(ui);
 
     if (memcmp(&places[index], &r, sizeof(r)))
@@ -254,7 +284,7 @@ static void appearance(struct gui_ui *ui) {
             gui_settings_changed();
         }
         snprintf(label, sizeof(label), "wallpaper %s", wallpapers[i].name);
-        report(ui, 8 + i, label);
+        report(ui, 10 + i, label);
     }
 }
 
@@ -277,12 +307,12 @@ static void display(struct gui_ui *ui) {
     if (gui_dropdown(ui, "Resolution", resolutions, resolution_count, &shown_at))
         picked = shown_at;
     report(ui, 2, "resolution");
-    if (gui_button(ui, "Apply") && picked >= 0 && picked != at) {
-        sscanf(resolutions[picked], "%dx%d", &settings.width, &settings.height);
-        wanted_width = settings.width;
-        wanted_height = settings.height;
+    if (gui_button(ui, "Apply") && picked >= 0 && picked != at && !keep_left) {
+        old_width = s->width;
+        old_height = s->height;
+        sscanf(resolutions[picked], "%dx%d", &wanted_width, &wanted_height);
         status[0] = '\0';
-        save(resolutions[picked]);
+        set_resolution(wanted_width, wanted_height);
     }
     report(ui, 7, "apply");
     gui_same_line(ui);
@@ -316,11 +346,31 @@ static void date_and_time(struct gui_ui *ui) {
     report(ui, 6, "zones");
 }
 
+// Asks whether to keep the new resolution, above whichever tab is showing.
+static void keep_strip(struct gui_ui *ui) {
+    gui_label(ui, "Keep this resolution? Going back in %d second%s.", keep_left, keep_left == 1 ? "" : "s");
+    if (gui_button(ui, "Keep")) {
+        printf("settings: kept %dx%d\n", settings.width, settings.height);
+        stop_countdown();
+        ui->again = true; // without the strip
+    }
+    report(ui, 8, "keep");
+    gui_same_line(ui);
+    if (gui_button(ui, "Go back") || gui_key(ui, KEY_ESCAPE)) {
+        go_back();
+        ui->again = true;
+    }
+    report(ui, 9, "go back");
+    gui_separator(ui);
+}
+
 static void frame(struct gui_ui *ui) {
     int was = tab;
 
     gui_ui_begin(ui);
     gui_tabs(ui, tabs, TABS, &tab, NULL);
+    if (keep_left)
+        keep_strip(ui);
     if (tab != was) {
         printf("settings: tab %s\n", tabs[tab]);
         status[0] = '\0';
@@ -367,9 +417,13 @@ int main(int argc, char **argv) {
     while (gui_next_event(&e) && e.type != GUI_CLOSE) {
         if (e.type == GUI_SCREEN)
             screen_changed();
+        if (e.type == GUI_TIMER && e.x == keep_timer && keep_left && --keep_left == 0)
+            go_back();
         if (gui_ui_event(&ui, &e))
             frame(&ui);
     }
+    if (keep_left) // closed without saying to keep it
+        go_back();
     gui_destroy_window(window);
     return 0;
 }

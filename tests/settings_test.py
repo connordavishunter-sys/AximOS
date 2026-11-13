@@ -16,6 +16,11 @@ class Pointer:
         self.v.mouse(x - self.x, y - self.y, buttons)
         self.x, self.y = x, y
 
+    def home(self):
+        """To the top left corner, wherever it was, as a resolution change moves it."""
+        self.v.mouse(-3000, -3000)
+        self.x, self.y = 0, 0
+
     def click(self, x, y):
         self.to(x, y, 1)
         self.v.mouse(buttons=0)
@@ -124,6 +129,22 @@ try:
     check('with the taskbar at the bottom', px(700, 758) == LIGHT_TASKBAR, hex(px(700, 758)))
     check('and settings where it was', px(SETTINGS_X + 5, SETTINGS_Y + 300) == LIGHT_BACKGROUND,
           hex(px(SETTINGS_X + 5, SETTINGS_Y + 300)))
+    check('it asks whether to keep it', v.wait('settings: keep? 15', 5, at), v.text(at))
+    time.sleep(0.5)
+    at = v.mark()
+    mouse.home()
+    mouse.click(*middle('keep', 10))
+    check('Keep keeps it', v.wait('settings: kept 1024x768', 5, at), v.text(at))
+
+    # Another, which it goes back from when nothing's said for 15 seconds.
+    time.sleep(0.5)
+    at = v.mark()
+    mouse.click(*middle('resolution')); time.sleep(0.3)
+    v.key('up'); v.key('ret'); time.sleep(0.5)
+    mouse.click(*middle('apply', 10))
+    check('a smaller one', v.wait('wm: running at 800x600', 5, at) and v.wait('settings: keep? 15', 5, at), v.text(at))
+    check('goes back by itself', v.wait('settings: going back to 1024x768', 20, at)
+          and v.wait('wm: running at 1024x768', 5, at), v.text(at))
 
     v.key('meta_l-shift-q'); time.sleep(1)
     o = v.run('cat /system/etc/gui.conf /system/etc/timezone /system/etc/wallpaper; date +%Z')
