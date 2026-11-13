@@ -233,6 +233,7 @@ struct gui_ui {
     int mouse_x, mouse_y;
     bool mouse_down, mouse_pressed, mouse_released;
     bool double_click; // the press was the second in quick succession
+    bool right_pressed;
     long last_press;   // when the last press was, in milliseconds
     int wheel;
     struct key_event keys[GUI_UI_MAX_KEYS];
@@ -268,7 +269,11 @@ struct gui_ui {
     // menu has the keyboard: Up and Down move menu_choice through its items, of
     // which it had menu_items last frame, and Left and Right go to the next menu.
     uint32_t menus[GUI_UI_MAX_MENUS], next_menus[GUI_UI_MAX_MENUS];
-    int menu_count, next_menu_count, menu_choice, menu_items;
+    int menu_count, next_menu_count, menu_choice, menu_items, menu_height;
+    int menu_x, menu_y; // where the mouse was when a context menu opened
+
+    // The item in a list the last right-click was on, or -1 if none was.
+    int clicked_item;
     struct key_event menu_keys[GUI_UI_MAX_KEYS];
     int menu_key_count;
 
@@ -316,6 +321,9 @@ bool gui_shortcut(const struct gui_ui *ui, char letter);
 // Whether a key was pressed this frame.
 bool gui_key(const struct gui_ui *ui, uint16_t code);
 
+// Whether the widget with label has the keyboard.
+bool gui_focused(const struct gui_ui *ui, const char *label);
+
 // Gives the widget with label the keyboard, and if it holds text, selects all of it.
 void gui_set_focus(struct gui_ui *ui, const char *label, const char *text);
 
@@ -351,7 +359,21 @@ int gui_list_icons(struct gui_ui *ui, const char *label, const char *const *item
 void gui_menu_bar(struct gui_ui *ui);
 bool gui_menu(struct gui_ui *ui, const char *label);
 bool gui_menu_item(struct gui_ui *ui, const char *label);
+void gui_menu_separator(struct gui_ui *ui);
 void gui_menu_end(struct gui_ui *ui);
+
+// A menu that opens where area is right-clicked, returning true while it's open,
+// to be followed by its items and gui_menu_end like gui_menu. Right-clicking a list
+// selects the item clicked, and says which in clicked_item.
+bool gui_context_menu(struct gui_ui *ui, const char *label, struct gui_rect area);
+
+// A bar of tabs across the top, which goes first in a frame, named names, with
+// active the one shown. Clicking a tab, or Ctrl+Tab and Ctrl+Shift+Tab, changes
+// active and returns GUI_TABS_CHANGED. A tab's x, or Ctrl+W for the active one,
+// returns GUI_TABS_CLOSE with closing set to it, and + or Ctrl+T GUI_TABS_NEW, for
+// the program to add or take away the tab.
+enum { GUI_TABS_CHANGED = 1, GUI_TABS_NEW, GUI_TABS_CLOSE };
+int gui_tabs(struct gui_ui *ui, const char *const *names, int count, int *active, int *closing);
 
 // The widgets between these go in an area height tall, or down to the bottom of
 // the window if height is 0, which the wheel and a scroll bar scroll when they

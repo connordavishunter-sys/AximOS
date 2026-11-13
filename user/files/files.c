@@ -1,5 +1,6 @@
 #include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <gui.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -9,8 +10,15 @@
 #include <unistd.h>
 
 #define MAX_ENTRIES 1024
+#define MAX_TABS 8
 #define EDITOR "/system/bin/gui/editor"
 #define VIEWER "/system/bin/gui/viewer"
+#define TERM "/system/bin/gui/term"
+#define LIST "##entries"
+#define ADDRESS "##folder"
+#define ANSWER "##answer"
+#define KEY_F2 (KEY_F1 + 1)
+#define KEY_F5 (KEY_F1 + 4)
 
 struct entry {
     char name[NAME_MAX + 1];
@@ -18,14 +26,27 @@ struct entry {
     off_t size;
 };
 
+// Each tab is a folder, and what was selected in it. The one shown is listed.
+struct tab {
+    char folder[PATH_MAX], selected[NAME_MAX + 1], name[NAME_MAX + 1];
+};
+
+static struct tab tabs[MAX_TABS];
+static const char *tab_names[MAX_TABS];
+static int tab_count, current;
+
 static struct entry entries[MAX_ENTRIES];
 static char labels[MAX_ENTRIES][NAME_MAX + 2]; // names, with / after folders
 static const char *items[MAX_ENTRIES];
 static const struct gui_image *icons[MAX_ENTRIES];
 static int count, selected;
-static char folder[PATH_MAX] = "/", typed[PATH_MAX], new_name[NAME_MAX + 1];
-static char status[PATH_MAX + 64], deleting[PATH_MAX];
+static char *folder = tabs[0].folder, typed[PATH_MAX], status[PATH_MAX + 64];
 static bool quitting;
+
+// What the strip under the address bar is asking, if anything.
+static enum { NOTHING, RENAMING, NEW_FOLDER, NEW_FILE, DELETING } asking;
+static char answer[NAME_MAX + 1];
+static bool ask_focus; // the answer box, or the Delete button, gets the keyboard
 
 static void path_of(char *out, const char *name) {
     snprintf(out, PATH_MAX, "%s%s%s", folder, strcmp(folder, "/") ? "/" : "", name);
@@ -49,8 +70,15 @@ static void describe(void) {
         snprintf(status, sizeof(status), "%s: %lld bytes", e->name, (long long)e->size);
 }
 
-// Lists a folder, going there, and choosing the entry called select if there is one.
+static void name_tab(struct tab *t) {
+    const char *slash = strrchr(t->folder, '/');
+
+    snprintf(t->name, sizeof(t->name), "%s", slash && slash[1] ? slash + 1 : "/");
+}
+
+// Lists a folder, going there in this tab, and choosing the entry called select if there is one.
 static bool read_folder(const char *path, const char *select) {
+    char went[PATH_MAX];
     DIR *dir = opendir(path);
     struct dirent *d;
 
@@ -58,9 +86,11 @@ static bool read_folder(const char *path, const char *select) {
         snprintf(status, sizeof(status), "Can't open %s: %s", path, strerror(errno));
         return false;
     }
-    snprintf(folder, sizeof(folder), "%s", path);
-    for (size_t n = strlen(folder); n > 1 && folder[n - 1] == '/'; n--)
-        folder[n - 1] = '\0';
+    snprintf(went, sizeof(went), "%s", path); // path may be folder itself
+    for (size_t n = strlen(went); n > 1 && went[n - 1] == '/'; n--)
+        went[n - 1] = '\0';
+    snprintf(folder, PATH_MAX, "%s", went);
+    name_tab(&tabs[current]);
     count = 0;
     while (count < MAX_ENTRIES && (d = readdir(dir))) {
         struct entry *e = &entries[count];
@@ -91,9 +121,16 @@ static bool read_folder(const char *path, const char *select) {
     }
     printf("\n");
     snprintf(typed, sizeof(typed), "%s", folder);
-    deleting[0] = '\0';
+    asking = NOTHING;
     describe();
     return true;
+}
+
+static void refresh(void) {
+    char name[NAME_MAX + 1];
+
+    snprintf(name, sizeof(name), "%s", count ? entries[selected].name : "");
+    read_folder(folder, name);
 }
 
 static void go_up(void) {
@@ -107,176 +144,292 @@ static void go_up(void) {
     read_folder(parent[0] ? parent : "/", slash + 1);
 }
 
-static void start(const char *program, const char *argument) {
+// Keeps what's selected in this tab, for when it's shown again.
+static void remember(void) {
+    if (count)
+        snprintf(tabs[current].selected, sizeof(tabs[current].selected), "%s", entries[selected].name);
+}
+
+static void show_tab(int index) {
+    current = index;
+    folder = tabs[current].folder;
+    if (!read_folder(folder, tabs[current].selected))
+        read_folder("/", NULL);
+    printf("files: tab %d of %d\n", current + 1, tab_count);
+}
+
+static void new_tab(const char *path) {
+    if (tab_count == MAX_TABS) {
+        snprintf(status, sizeof(status), "There can be %d tabs at most", MAX_TABS);
+        return;
+    }
+    snprintf(tabs[tab_count].folder, PATH_MAX, "%s", path);
+    tabs[tab_count].selected[0] = '\0';
+    tab_names[tab_count] = tabs[tab_count].name;
+    remember();
+    show_tab(tab_count++);
+}
+
+// The last tab closing closes the window.
+static void close_tab(int index) {
+    if (tab_count == 1) {
+        quitting = true;
+        return;
+    }
+    remember();
+    memmove(&tabs[index], &tabs[index + 1], (tab_count - index - 1) * sizeof(*tabs));
+    tab_count--;
+    current = current > index || current == tab_count ? current - 1 : current;
+    for (int i = 0; i < tab_count; i++)
+        tab_names[i] = tabs[i].name;
+    show_tab(current);
+}
+
+static void start(const char *program, const char *argument, const char *in) {
     if (fork() == 0) {
+        if (in && chdir(in) < 0)
+            _exit(127);
         execl(program, program, argument, (char *)NULL);
         _exit(127);
     }
+}
+
+static const struct entry *chosen(void) {
+    return count ? &entries[selected] : NULL;
+}
+
+static void open_with(const char *program) {
+    char path[PATH_MAX];
+
+    path_of(path, chosen()->name);
+    printf("files: opening %s\n", path);
+    start(program, path, NULL);
 }
 
 // Folders open here, pictures in the viewer and other files in the editor.
 static void open_selected(void) {
     char path[PATH_MAX];
 
-    if (!count)
+    if (!chosen())
         return;
-    path_of(path, entries[selected].name);
-    if (entries[selected].folder) {
+    path_of(path, chosen()->name);
+    if (chosen()->folder)
         read_folder(path, NULL);
-        return;
-    }
-    printf("files: opening %s\n", path);
-    start(icons[selected] == gui_icon("image") ? VIEWER : EDITOR, path);
+    else
+        open_with(icons[selected] == gui_icon("image") ? VIEWER : EDITOR);
 }
 
 static void run_selected(void) {
     char path[PATH_MAX];
 
-    if (!count || entries[selected].folder)
-        return;
-    path_of(path, entries[selected].name);
+    path_of(path, chosen()->name);
     printf("files: running %s\n", path);
-    start(path, NULL);
+    start(path, NULL, NULL);
 }
 
-// Deleting takes a second press, to be sure.
+static void ask(int what) {
+    asking = what;
+    ask_focus = true;
+    snprintf(answer, sizeof(answer), "%s", what == RENAMING ? chosen()->name : "");
+}
+
+static void copy_path(void) {
+    char path[PATH_MAX];
+
+    path_of(path, chosen()->name);
+    gui_clipboard_set(path, strlen(path));
+    snprintf(status, sizeof(status), "Copied %s", path);
+}
+
 static void delete_selected(void) {
     char path[PATH_MAX];
 
-    if (!count)
-        return;
-    path_of(path, entries[selected].name);
-    if (strcmp(deleting, path)) {
-        snprintf(deleting, sizeof(deleting), "%s", path);
-        snprintf(status, sizeof(status), "Press Delete again to delete %s", entries[selected].name);
-        return;
-    }
-    if ((entries[selected].folder ? rmdir(path) : unlink(path)) < 0) {
-        snprintf(status, sizeof(status), "Can't delete %s: %s", entries[selected].name, strerror(errno));
-        deleting[0] = '\0';
+    path_of(path, chosen()->name);
+    if ((chosen()->folder ? rmdir(path) : unlink(path)) < 0) {
+        snprintf(status, sizeof(status), "Can't delete %s: %s", chosen()->name, strerror(errno));
+        asking = NOTHING;
         return;
     }
     printf("files: deleted %s\n", path);
     read_folder(folder, NULL);
 }
 
-// Renames the selected entry to what's typed in the name box.
-static void rename_selected(void) {
-    char from[PATH_MAX], to[PATH_MAX];
+// Does what the strip asked with the name it was given.
+static void answered(void) {
+    char path[PATH_MAX], from[PATH_MAX];
+    int fd = -1;
 
-    if (!count)
-        return;
-    if (!new_name[0] || strchr(new_name, '/')) {
-        snprintf(status, sizeof(status), "Type the new name first, without a /");
+    if (asking == DELETING) {
+        delete_selected();
         return;
     }
-    path_of(from, entries[selected].name);
-    path_of(to, new_name);
-    if (rename(from, to) < 0) {
-        snprintf(status, sizeof(status), "Can't rename %s: %s", entries[selected].name, strerror(errno));
+    if (!answer[0] || strchr(answer, '/')) {
+        snprintf(status, sizeof(status), "Type a name, without a /");
         return;
     }
-    printf("files: renamed %s to %s\n", from, to);
-    read_folder(folder, new_name);
-    new_name[0] = '\0';
+    path_of(path, answer);
+    if (asking == RENAMING) {
+        path_of(from, chosen()->name);
+        if (rename(from, path) < 0) {
+            snprintf(status, sizeof(status), "Can't rename %s: %s", chosen()->name, strerror(errno));
+            return;
+        }
+        printf("files: renamed %s to %s\n", from, path);
+    } else if (asking == NEW_FOLDER ? mkdir(path, 0755) < 0
+                                    : (fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0644)) < 0 || close(fd) < 0) {
+        snprintf(status, sizeof(status), "Can't make %s: %s", answer, strerror(errno));
+        return;
+    } else {
+        printf("files: made %s\n", path);
+    }
+    read_folder(folder, answer);
 }
 
-static void make_folder(void) {
-    char path[PATH_MAX];
-
-    if (!new_name[0]) {
-        snprintf(status, sizeof(status), "Type the new folder's name first");
-        return;
-    }
-    path_of(path, new_name);
-    if (mkdir(path, 0755) < 0) {
-        snprintf(status, sizeof(status), "Can't make %s: %s", new_name, strerror(errno));
-        return;
-    }
-    printf("files: made %s\n", path);
-    read_folder(folder, new_name);
-    new_name[0] = '\0';
-}
-
-// Says where the list is when that changes, for the tests to find it.
-static void report_list(struct gui_ui *ui) {
-    static struct gui_rect was;
+// Says where a widget is when that changes, for the tests to find it.
+static void report(struct gui_ui *ui, int index, const char *what) {
+    static struct gui_rect places[4];
     struct gui_rect r = gui_last_rect(ui);
 
-    if (memcmp(&r, &was, sizeof(r)))
-        printf("files: list at %d %d %d %d\n", r.x, r.y, r.width, r.height);
-    was = r;
+    if (memcmp(&places[index], &r, sizeof(r)))
+        printf("files: at %s %d %d %d %d\n", what, r.x, r.y, r.width, r.height);
+    places[index] = r;
 }
 
-static void frame(struct gui_ui *ui) {
-    while (waitpid(-1, NULL, WNOHANG) > 0)
-        ; // programs it started that have finished
-    gui_ui_begin(ui);
-    gui_menu_bar(ui);
-    if (gui_menu(ui, "File")) {
-        if (gui_menu_item(ui, "Open"))
-            open_selected();
-        if (gui_menu_item(ui, "Run"))
-            run_selected();
-        if (gui_menu_item(ui, "New folder"))
-            make_folder();
-        if (gui_menu_item(ui, "Rename"))
-            rename_selected();
-        if (gui_menu_item(ui, "Delete"))
-            delete_selected();
-        if (gui_menu_item(ui, "Quit"))
-            quitting = true;
-        gui_menu_end(ui);
-    }
-    if (gui_menu(ui, "Go")) {
-        if (gui_menu_item(ui, "Up"))
-            go_up();
-        if (gui_menu_item(ui, "Root"))
-            read_folder("/", NULL);
-        gui_menu_end(ui);
-    }
-
+static void address_bar(struct gui_ui *ui) {
     if (gui_button(ui, "Up"))
         go_up();
+    report(ui, 0, "up");
     gui_same_line(ui);
     if (gui_button(ui, "Go"))
         read_folder(typed, NULL);
     gui_same_line(ui);
-    gui_textbox(ui, "##folder", typed, sizeof(typed));
+    gui_textbox(ui, ADDRESS, typed, sizeof(typed));
+    report(ui, 1, "address");
+    if (gui_focused(ui, ADDRESS) && gui_key(ui, KEY_ENTER))
+        read_folder(typed, NULL);
+}
 
-    if (gui_button(ui, "Open"))
-        open_selected();
-    gui_same_line(ui);
-    if (gui_button(ui, "Run"))
-        run_selected();
-    gui_same_line(ui);
-    if (gui_button(ui, "Delete"))
-        delete_selected();
-    gui_same_line(ui);
-    if (gui_button(ui, "Rename"))
-        rename_selected();
-    gui_same_line(ui);
-    if (gui_button(ui, "New folder"))
-        make_folder();
-    gui_same_line(ui);
-    gui_textbox(ui, "##name", new_name, sizeof(new_name));
+// Asks for a name, or whether to delete, under the address bar.
+static void asking_strip(struct gui_ui *ui) {
+    static const char *const questions[] = {
+        [RENAMING] = "Rename to", [NEW_FOLDER] = "New folder", [NEW_FILE] = "New file",
+    };
+    bool deleting = asking == DELETING, yes, no;
 
+    if (ask_focus)
+        gui_set_focus(ui, deleting ? "Delete" : ANSWER, deleting ? NULL : answer);
+    ask_focus = false;
+    if (deleting)
+        gui_label(ui, "Delete %s?", chosen()->name);
+    else
+        gui_label(ui, "%s:", questions[asking]);
+    gui_same_line(ui);
+    yes = gui_button(ui, deleting ? "Delete" : "OK");
+    gui_same_line(ui);
+    no = gui_button(ui, "Cancel");
+    if (!deleting) {
+        gui_same_line(ui);
+        gui_textbox(ui, ANSWER, answer, sizeof(answer));
+        yes |= gui_focused(ui, ANSWER) && gui_key(ui, KEY_ENTER);
+    }
+    if (no || gui_key(ui, KEY_ESCAPE))
+        asking = NOTHING;
+    else if (yes)
+        answered();
+}
+
+// Right-clicking an item has what can be done with it, and anywhere else in the
+// list what can be done in the folder.
+static void context_menu(struct gui_ui *ui, struct gui_rect list) {
+    if (!gui_context_menu(ui, "##menu", list))
+        return;
+
+    const struct entry *e = ui->clicked_item >= 0 ? chosen() : NULL;
+    char path[PATH_MAX];
+
+    if (e) {
+        if (gui_menu_item(ui, "Open"))
+            open_selected();
+        if (e->folder && gui_menu_item(ui, "Open in new tab")) {
+            path_of(path, e->name);
+            new_tab(path);
+        }
+        if (!e->folder && gui_menu_item(ui, "Open in Editor"))
+            open_with(EDITOR);
+        if (!e->folder && gui_menu_item(ui, "Run"))
+            run_selected();
+        gui_menu_separator(ui);
+        if (gui_menu_item(ui, "Copy path"))
+            copy_path();
+        if (gui_menu_item(ui, "Rename"))
+            ask(RENAMING);
+        if (gui_menu_item(ui, "Delete"))
+            ask(DELETING);
+    } else {
+        if (gui_menu_item(ui, "New folder"))
+            ask(NEW_FOLDER);
+        if (gui_menu_item(ui, "New file"))
+            ask(NEW_FILE);
+        gui_menu_separator(ui);
+        if (gui_menu_item(ui, "Open terminal here"))
+            start(TERM, NULL, folder);
+        if (gui_menu_item(ui, "Refresh"))
+            refresh();
+    }
+    gui_menu_end(ui);
+}
+
+// Keys for the list, while it has the keyboard.
+static void list_keys(struct gui_ui *ui) {
+    if (!gui_focused(ui, LIST) || asking)
+        return;
+    if (gui_key(ui, KEY_BACKSPACE))
+        go_up();
+    else if (gui_key(ui, KEY_F5))
+        refresh();
+    else if (chosen() && gui_key(ui, KEY_F2))
+        ask(RENAMING);
+    else if (chosen() && gui_key(ui, KEY_DELETE))
+        ask(DELETING);
+}
+
+static void frame(struct gui_ui *ui) {
+    int active = current, closing = 0, result;
+
+    while (waitpid(-1, NULL, WNOHANG) > 0)
+        ; // programs it started that have finished
+    gui_ui_begin(ui);
+    result = gui_tabs(ui, tab_names, tab_count, &active, &closing);
+    if (result == GUI_TABS_CHANGED) {
+        remember();
+        show_tab(active);
+    } else if (result == GUI_TABS_NEW)
+        new_tab(folder);
+    else if (result == GUI_TABS_CLOSE)
+        close_tab(closing);
+    address_bar(ui);
+    if (asking)
+        asking_strip(ui);
     gui_label(ui, "%s", status);
 
-    int result = gui_list_icons(ui, "##entries", items, icons, count, &selected, 0);
+    result = gui_list_icons(ui, LIST, items, icons, count, &selected, 0);
 
-    report_list(ui);
-    if (result == GUI_LIST_ACTIVATED) {
+    struct gui_rect list = gui_last_rect(ui);
+
+    report(ui, 2, "list");
+    if (result == GUI_LIST_ACTIVATED)
         open_selected();
-    } else if (result == GUI_LIST_CHANGED) {
-        deleting[0] = '\0';
+    else if (result == GUI_LIST_CHANGED && (asking == RENAMING || asking == DELETING))
+        asking = NOTHING; // they were about the one that was selected
+    if (result == GUI_LIST_CHANGED)
         describe();
-    }
+    list_keys(ui);
+    context_menu(ui, list);
     gui_ui_end(ui);
     fflush(stdout);
 }
 
-// A window showing what's in a folder, to go about them and open what's there.
+// A window showing what's in folders, in tabs, to go about them and open what's there.
 int main(int argc, char **argv) {
     help_option(argc, argv, "usage: files [folder]\n"
                             "Opens a window showing what's in the folder, or /.\n");
@@ -293,6 +446,8 @@ int main(int argc, char **argv) {
         dprintf(STDERR_FILENO, "files: couldn't make a window\n");
         return 1;
     }
+    tab_count = 1;
+    tab_names[0] = tabs[0].name;
     if (!read_folder(argc > 1 ? argv[1] : "/", NULL))
         read_folder("/", NULL);
     gui_ui_init(&ui, window);

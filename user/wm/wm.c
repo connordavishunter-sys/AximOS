@@ -61,7 +61,7 @@
 #define MAX_APPS 32
 #define MENU_WIDTH 200
 #define ITEM_HEIGHT 24 // in the start menu and the Alt+Tab switcher
-#define MENU_GAP 9     // between the apps and the power items
+#define MENU_GAP 9     // between the apps and Run and the power items
 #define SWITCHER_WIDTH 360
 
 // Colours, from the theme the settings choose. What's on the focused title bar,
@@ -101,7 +101,10 @@ static const struct theme *theme = &dark;
 
 // Super+Enter runs this.
 #define LAUNCH_COMMAND "term"
-#define HINT "Super: apps   Super+Enter: terminal   Alt+Tab: switch   Super+Q: close   Super+arrows: tile   " \
+#define RUN_COMMAND "run" // Super+R, and Run... in the menu
+#define KEY_Q 0x10
+#define KEY_R 0x13
+#define HINT "Super: apps   Super+R: run   Super+Enter: terminal   Alt+Tab: switch   Super+Q: close   Super+arrows: tile   " \
              "Super+Shift+Q: quit"
 
 struct rect {
@@ -269,18 +272,18 @@ static struct rect launcher(void) {
     return (struct rect){4, taskbar().y + 4, LAUNCHER_WIDTH, TASKBAR_HEIGHT - 8};
 }
 
-// The menu's items are the apps, then these.
-static const char *const power_items[] = {"Reboot", "Shut down"};
-#define POWER_ITEMS 2
+// The menu's items are the apps, then these, with RUN_COMMAND's icon for Run.
+enum { ITEM_RUN, ITEM_REBOOT, ITEM_SHUT_DOWN, EXTRA_ITEMS };
+static const char *const extra_items[] = {"Run...", "Reboot", "Shut down"};
 
 static int menu_items(void) {
-    return app_count + POWER_ITEMS;
+    return app_count + EXTRA_ITEMS;
 }
 
 // Just above the launcher, as tall as its apps, with a line for "no apps" if there
 // are none.
 static struct rect menu(void) {
-    int height = ((app_count ? app_count : 1) + POWER_ITEMS) * ITEM_HEIGHT + MENU_GAP + 8;
+    int height = ((app_count ? app_count : 1) + EXTRA_ITEMS) * ITEM_HEIGHT + MENU_GAP + 8;
 
     return (struct rect){launcher().x, taskbar().y - height, MENU_WIDTH, height};
 }
@@ -575,15 +578,16 @@ static void draw_item(struct gui_canvas *c, struct rect r, const char *text, con
 }
 
 static void draw_menu(struct gui_canvas *c, int ox, int oy) {
-    struct rect m = menu(), first_power = menu_item(app_count);
+    struct rect m = menu(), first_extra = menu_item(app_count);
 
     draw_panel(c, m, ox, oy);
     if (!app_count)
         draw_item(c, menu_item(0), "No apps in " APPS_DIR, NULL, false, TASKBAR_DIM_TEXT, ox, oy);
     for (int i = 0; i < menu_items(); i++)
-        draw_item(c, menu_item(i), i < app_count ? apps[i] : power_items[i - app_count], i < app_count ? apps[i] : NULL,
+        draw_item(c, menu_item(i), i < app_count ? apps[i] : extra_items[i - app_count],
+                  i < app_count ? apps[i] : i == app_count + ITEM_RUN ? RUN_COMMAND : NULL,
                   i == menu_choice, TASKBAR_TEXT, ox, oy);
-    gui_fill(c, m.x + 8 - ox, first_power.y - MENU_GAP / 2 - 1 - oy, m.width - 16, 1, TASKBAR_LINE);
+    gui_fill(c, m.x + 8 - ox, first_extra.y - MENU_GAP / 2 - 1 - oy, m.width - 16, 1, TASKBAR_LINE);
 }
 
 static void draw_switcher(struct gui_canvas *c, int ox, int oy) {
@@ -1062,7 +1066,7 @@ static void read_client(int i) {
 }
 
 static void accept_client(int listener) {
-    int fd = accept(listener, NULL, NULL);
+    int fd = accept4(listener, NULL, NULL, SOCK_CLOEXEC);
     int i = 0;
 
     if (fd < 0)
@@ -1172,8 +1176,10 @@ static void close_menu(void) {
 static void choose(int index) {
     if (index >= 0 && index < app_count)
         launch_app(apps[index]);
+    else if (index == app_count + ITEM_RUN)
+        launch(RUN_COMMAND);
     else if (index >= app_count && index < menu_items())
-        reboot(index == app_count ? RB_AUTOBOOT : RB_POWER_OFF);
+        reboot(index == app_count + ITEM_REBOOT ? RB_AUTOBOOT : RB_POWER_OFF);
     close_menu();
 }
 
@@ -1455,16 +1461,16 @@ static void handle_key(const struct key_event *e) {
     super_key(e);
     if (switch_key(e) || menu_key(e))
         return;
-    if (super && e->code == 0x10) {
+    if (super && e->code == KEY_Q) {
         if (e->pressed && (e->modifiers & KEY_MOD_SHIFT))
             quitting = true;
         else if (e->pressed && focused)
             send_to(focused, (struct gui_message){.type = GUI_CLOSE});
         return;
     }
-    if (super && e->code == KEY_ENTER) {
+    if (super && (e->code == KEY_ENTER || e->code == KEY_R)) {
         if (e->pressed)
-            launch(LAUNCH_COMMAND);
+            launch(e->code == KEY_R ? RUN_COMMAND : LAUNCH_COMMAND);
         return;
     }
 
@@ -1531,15 +1537,15 @@ int main(int argc, char **argv) {
     signal(SIGPIPE, SIG_IGN);
 
     struct fb_info info;
-    int fb = open("/dev/fb0", O_RDWR);
+    int fb = open("/dev/fb0", O_RDWR | O_CLOEXEC);
 
     if (fb < 0 || fb_info(fb, &info) < 0)
         return fail("/dev/fb0");
 
-    int mouse = open("/dev/mouse", O_RDONLY | O_NONBLOCK);
-    int keyboard = open("/dev/keyboard", O_RDONLY | O_NONBLOCK);
+    int mouse = open("/dev/mouse", O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    int keyboard = open("/dev/keyboard", O_RDONLY | O_NONBLOCK | O_CLOEXEC);
     struct sockaddr_un address = {.sun_family = AF_UNIX, .sun_path = GUI_SOCKET};
-    int listener = socket(AF_UNIX, SOCK_STREAM, 0);
+    int listener = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0); // none of these for the programs it starts
 
     if (mouse < 0)
         return fail("/dev/mouse");

@@ -18,6 +18,10 @@
 #define MENU_WIDTH 180
 #define DROPDOWN_ROWS 8 // at most, with more scrolling
 #define DOUBLE_CLICK_MS 400
+#define TAB_BAR (FRAME_HEIGHT + 4)
+#define TAB_WIDTH 170 // at most, with narrower ones when there are many
+#define TAB_CLOSE 16
+#define SEPARATOR_HEIGHT 9 // in a menu
 
 // Colours, from the theme the settings choose.
 struct theme {
@@ -155,6 +159,8 @@ bool gui_ui_event(struct gui_ui *ui, const struct gui_message *e) {
                 ui->last_press = ui->double_click ? 0 : ms; // a third press starts again
             }
         }
+        if (e->type == GUI_MOUSE_BUTTON && (e->changed & 2) && (e->buttons & 2))
+            ui->right_pressed = true;
         if (e->type == GUI_MOUSE_WHEEL)
             ui->wheel += e->wheel;
         return true;
@@ -164,6 +170,8 @@ bool gui_ui_event(struct gui_ui *ui, const struct gui_message *e) {
         return e->key.pressed;
     case GUI_FOCUS:
         ui->window_focused = e->focused;
+        if (!e->focused)
+            ui->popup = 0; // menus and dropdowns close when another window is chosen
         return true;
     case GUI_RESIZE:
         return gui_resize(ui->window, e->width, e->height);
@@ -200,9 +208,9 @@ void gui_ui_begin(struct gui_ui *ui) {
     ui->popup_drawn = false;
 
     // An open popup has the mouse when it's over it. A click anywhere else, or
-    // Escape, closes it, and does nothing more.
+    // Escape, closes it, and does nothing more, but a right-click can open another.
     ui->mouse_in_popup = ui->popup && contains(ui->popup_rect, ui->mouse_x, ui->mouse_y);
-    if (ui->popup && ((ui->mouse_pressed && !ui->mouse_in_popup) || key_pressed(ui, KEY_ESCAPE))) {
+    if (ui->popup && (((ui->mouse_pressed || ui->right_pressed) && !ui->mouse_in_popup) || key_pressed(ui, KEY_ESCAPE))) {
         ui->popup = 0;
         ui->mouse_pressed = false;
     }
@@ -229,8 +237,8 @@ void gui_ui_begin(struct gui_ui *ui) {
     for (int i = 0; i < ui->key_count && ui->order_count; i++) {
         int at = -1;
 
-        if (ui->keys[i].code != KEY_TAB)
-            continue;
+        if (ui->keys[i].code != KEY_TAB || (ui->keys[i].modifiers & KEY_MOD_CTRL))
+            continue; // Ctrl+Tab is for tabs
         for (int j = 0; j < ui->order_count; j++) {
             if (ui->order[j] == ui->focus)
                 at = j;
@@ -264,7 +272,7 @@ void gui_ui_end(struct gui_ui *ui) {
     ui->wheel_owner = ui->next_wheel_owner;
     if (ui->mouse_released)
         ui->active = 0;
-    ui->mouse_pressed = ui->mouse_released = false;
+    ui->mouse_pressed = ui->mouse_released = ui->right_pressed = false;
     ui->wheel = 0;
     ui->key_count = 0;
     gui_show(ui->window);
@@ -626,6 +634,10 @@ bool gui_shortcut(const struct gui_ui *ui, char letter) {
 
 bool gui_key(const struct gui_ui *ui, uint16_t code) {
     return key_pressed(ui, code);
+}
+
+bool gui_focused(const struct gui_ui *ui, const char *label) {
+    return ui->focus == id_of(label);
 }
 
 void gui_set_focus(struct gui_ui *ui, const char *label, const char *text) {
@@ -1108,8 +1120,10 @@ int gui_list_icons(struct gui_ui *ui, const char *label, const char *const *item
     framed(ui, label, rows > 0 ? rows * ROW_HEIGHT + 4 : height_left(ui, ROW_HEIGHT + 4), &frame);
     rows = (frame.height - 4) / ROW_HEIGHT;
     scroll->content = count * ROW_HEIGHT + 4;
-    if (over(ui, frame) && ui->mouse_pressed)
+    if (over(ui, frame) && (ui->mouse_pressed || ui->right_pressed)) {
         ui->focus = id;
+        ui->clicked_item = -1;
+    }
 
     bool focused = focusable(ui, id);
     bool moved = false;
@@ -1149,9 +1163,9 @@ int gui_list_icons(struct gui_ui *ui, const char *label, const char *const *item
 
         if (r.y >= inner.y + inner.height)
             break;
-        if (over(ui, r) && ui->mouse_pressed) {
-            activated |= ui->double_click && i == *selected;
-            *selected = i;
+        if (over(ui, r) && (ui->mouse_pressed || ui->right_pressed)) {
+            activated |= ui->mouse_pressed && ui->double_click && i == *selected;
+            *selected = ui->clicked_item = i;
         }
         int text_x = icons ? 12 + GUI_ICON_SIZE : 6;
 
@@ -1171,7 +1185,7 @@ int gui_list_icons(struct gui_ui *ui, const char *label, const char *const *item
 // Up and Down go through the open menu's items, and Left and Right to the menus
 // beside it. One to the left has been drawn already, so the frame goes again.
 static void menu_keys(struct gui_ui *ui, uint32_t id) {
-    int at = 0;
+    int at = -1;
 
     for (int i = 0; i < ui->menu_count; i++) {
         if (ui->menus[i] == id)
@@ -1185,7 +1199,7 @@ static void menu_keys(struct gui_ui *ui, uint32_t id) {
             ui->menu_choice = (ui->menu_choice + 1) % items;
         else if (code == KEY_UP)
             ui->menu_choice = ui->menu_choice <= 0 ? items - 1 : ui->menu_choice - 1;
-        if ((code == KEY_LEFT || code == KEY_RIGHT) && ui->menu_count) {
+        if ((code == KEY_LEFT || code == KEY_RIGHT) && at >= 0) {
             at = (at + (code == KEY_RIGHT ? 1 : ui->menu_count - 1)) % ui->menu_count;
             ui->popup = ui->menus[at];
             ui->menu_choice = 0;
@@ -1247,9 +1261,104 @@ bool gui_menu_item(struct gui_ui *ui, const char *label) {
     return chosen;
 }
 
+void gui_menu_separator(struct gui_ui *ui) {
+    struct gui_rect r = {ui->popup_rect.x, ui->item_y, ui->item_width, SEPARATOR_HEIGHT};
+
+    fill(ui, r.x, r.y, r.width, r.height, POPUP);
+    fill(ui, r.x + 8, r.y + SEPARATOR_HEIGHT / 2, r.width - 16, 1, SEPARATOR);
+    ui->item_y += SEPARATOR_HEIGHT;
+}
+
 void gui_menu_end(struct gui_ui *ui) {
     ui->menu_items = ui->item_index;
+    ui->menu_height = ui->item_y + 4 - ui->popup_rect.y;
     popup_end(ui, ui->item_y);
+}
+
+bool gui_context_menu(struct gui_ui *ui, const char *label, struct gui_rect area) {
+    uint32_t id = id_of(label);
+
+    if (ui->right_pressed && over(ui, area)) {
+        ui->popup = id;
+        ui->popup_is_menu = true;
+        ui->menu_choice = -1;
+        ui->menu_x = ui->mouse_x;
+        ui->menu_y = ui->mouse_y;
+        ui->menu_height = 0;
+        ui->right_pressed = false; // one menu for each click
+        ui->again = true;          // once more, to know how tall it is
+    }
+    if (ui->popup != id)
+        return false;
+    menu_keys(ui, id);
+
+    // Under the mouse, or over it if there isn't room.
+    int y = ui->menu_y + ui->menu_height > whole(ui).height ? ui->menu_y - ui->menu_height : ui->menu_y;
+
+    popup_begin(ui, (struct gui_rect){ui->menu_x, y < 0 ? 0 : y, MENU_WIDTH, 0});
+    return true;
+}
+
+int gui_tabs(struct gui_ui *ui, const char *const *names, int count, int *active, int *closing) {
+    int width = whole(ui).width, plus = FRAME_HEIGHT, result = 0;
+    int tab = count ? (width - 12 - plus) / count : TAB_WIDTH;
+    uint32_t id = id_of("##tabs");
+
+    tab = tab < TAB_WIDTH ? tab : TAB_WIDTH;
+    fill(ui, 0, 0, width, TAB_BAR, FRAME);
+    fill(ui, 0, TAB_BAR, width, 1, SEPARATOR);
+    for (int i = 0; i < count; i++) {
+        struct gui_rect r = {4 + i * tab, 4, tab - 2, TAB_BAR - 4};
+        struct gui_rect x = {r.x + r.width - TAB_CLOSE - 4, r.y + (r.height - TAB_CLOSE) / 2, TAB_CLOSE, TAB_CLOSE};
+        bool on_close = over(ui, x), on_tab = over(ui, r) && !on_close;
+
+        if (interact(ui, id + 2 * i + 1, x)) {
+            *closing = i;
+            result = GUI_TABS_CLOSE;
+        }
+        if (on_tab && ui->mouse_pressed && *active != i) {
+            *active = i;
+            result = GUI_TABS_CHANGED;
+        }
+        if (i == *active) {
+            fill(ui, r.x, r.y, r.width, r.height + 1, BACKGROUND);
+            fill(ui, r.x, r.y, r.width, 2, ACCENT);
+        } else {
+            fill(ui, r.x, r.y, r.width, r.height, on_tab ? FRAME_HOT : FRAME);
+            fill(ui, r.x + r.width + 1, r.y + 4, 1, r.height - 8, SEPARATOR);
+        }
+        draw_fitted(ui, r.x + 8, r.y + (r.height - GUI_CHAR_HEIGHT) / 2 + 1, r.width - 16 - TAB_CLOSE, names[i], 255,
+                    i == *active ? TEXT : DIM_TEXT);
+        if (on_close)
+            fill(ui, x.x, x.y, x.width, x.height, i == *active ? FRAME : SEPARATOR);
+        text(ui, x.x + (TAB_CLOSE - GUI_CHAR_WIDTH) / 2, x.y, "x", on_close ? TEXT : DIM_TEXT, 1);
+    }
+
+    struct gui_rect add = {4 + count * tab + 2, 4 + (TAB_BAR - 4 - plus + 4) / 2, plus, plus - 4};
+
+    if (interact(ui, id, add))
+        result = GUI_TABS_NEW;
+    if (ui->hot == id)
+        fill(ui, add.x, add.y, add.width, add.height, FRAME_HOT);
+    text(ui, add.x + (plus - GUI_CHAR_WIDTH) / 2, add.y + (add.height - GUI_CHAR_HEIGHT) / 2, "+", TEXT, 1);
+
+    for (int i = 0; i < ui->key_count; i++) {
+        const struct key_event *k = &ui->keys[i];
+
+        if (k->code == KEY_TAB && (k->modifiers & KEY_MOD_CTRL) && count) {
+            *active = (*active + (k->modifiers & KEY_MOD_SHIFT ? count - 1 : 1)) % count;
+            result = GUI_TABS_CHANGED;
+        }
+    }
+    if (gui_shortcut(ui, 't'))
+        result = GUI_TABS_NEW;
+    if (gui_shortcut(ui, 'w') && count) {
+        *closing = *active;
+        result = GUI_TABS_CLOSE;
+    }
+    ui->layout.y = TAB_BAR + 1 + MARGIN;
+    ui->again |= result != 0; // what's under the tabs is another folder now
+    return result;
 }
 
 void gui_scroll_begin(struct gui_ui *ui, const char *label, int height) {

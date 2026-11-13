@@ -52,7 +52,7 @@ try:
     at = v.mark()
     v.type("wm 'files /tmp'\n")
     check('files lists the folder', v.wait('files: in /tmp: hello.txt', 10, at), v.text(at))
-    v.wait('files: list at', 5, at)
+    v.wait('files: at list', 5, at)
     time.sleep(1)
     mouse = Pointer(v)
 
@@ -68,9 +68,9 @@ try:
     # boxes, and arrows on the window's edges and corners.
     mouse.to(900, 300)
     check('an arrow on the desktop', mouse.shape() == BLACK, hex(mouse.shape()))
-    mouse.to(80 + 300, 84 + 37 + 13)
+    mouse.to(80 + 300, 84 + 41 + 13)
     check('an I-beam over a text box', mouse.shape() == WHITE, hex(mouse.shape()))
-    mouse.to(80 + 30, 84 + 37 + 13)
+    mouse.to(80 + 25, 84 + 41 + 13)
     check('back to an arrow over a button', mouse.shape() == BLACK, hex(mouse.shape()))
     mouse.to(643, 300)
     check('a resize arrow on the right edge', mouse.shape() == WHITE, hex(mouse.shape()))
@@ -78,7 +78,7 @@ try:
     check('and on the corner', mouse.shape() == WHITE, hex(mouse.shape()))
 
     # Double-clicking a file opens it in the editor.
-    x, y, lw, lh = map(int, re.findall(r'files: list at (\d+) (\d+) (\d+) (\d+)', v.text())[-1])
+    x, y, lw, lh = map(int, re.findall(r'files: at list (\d+) (\d+) (\d+) (\d+)', v.text())[-1])
     at = v.mark()
     mouse.double_click(80 + x + 40, 84 + y + 2 + 11)
     check('double-clicking a file opens the editor', v.wait('editor: opened /tmp/hello.txt 6 bytes', 10, at),
@@ -146,37 +146,44 @@ try:
     check('and closing again closes', v.wait('editor: closed', 5, at), v.text(at))
     time.sleep(0.5)
 
-    # Back in files: a new folder, deleted with two presses. The buttons are Open,
-    # Run, Delete, Rename and New folder, then the name box.
+    # Back in files: right-clicking where there's no item has New folder first,
+    # which asks for a name. Menus open at the mouse, with rows 22 tall from 4 down,
+    # and a line 9 tall between groups.
+    def menu(x, y, row, lines=0):
+        mouse.to(x, y, 2); v.mouse(buttons=0)
+        mouse.click(x + 40, y + 4 + row * 22 + lines * 9 + 11)
+
+    empty = (80 + x + 200, 84 + y + 150)
     at = v.mark()
-    mouse.click(80 + 450, 84 + 71 + 13)
-    v.type('docs')
-    mouse.click(80 + 297, 84 + 71 + 13)
+    menu(*empty, 0)
+    v.type('docs\n')
     check('New folder', v.wait('files: made /tmp/docs', 5, at) and v.wait('files: in /tmp: docs/ copy.txt hello.txt', 5, at),
           v.text(at))
-    mouse.click(80 + 141, 84 + 71 + 13)
+
+    # A folder's menu: Open, Open in new tab, a line, Copy path, Rename and Delete,
+    # which asks first, with the keyboard on its Delete button.
+    at = v.mark()
+    menu(80 + x + 40, 84 + y + 2 + 11, 4, 1)
     time.sleep(0.5)
     check('Delete asks first', 'files: deleted' not in v.text(at), v.text(at))
-    mouse.click(80 + 141, 84 + 71 + 13)
-    check('and deletes on the second press', v.wait('files: deleted /tmp/docs', 5, at), v.text(at))
+    v.key('ret')
+    check('and deletes when told to', v.wait('files: deleted /tmp/docs', 5, at), v.text(at))
 
-    # hello.txt is second now, after copy.txt.
+    # F2 renames hello.txt, second after copy.txt, with its name selected to type over.
     at = v.mark()
     mouse.click(80 + x + 40, 84 + y + 2 + 22 + 11)
-    mouse.click(80 + 450, 84 + 71 + 13)
-    v.type('greeting.txt')
-    mouse.click(80 + 211, 84 + 71 + 13)
+    v.key('f2'); time.sleep(0.3)
+    v.type('greeting.txt\n')
     check('Rename', v.wait('files: renamed /tmp/hello.txt to /tmp/greeting.txt', 5, at), v.text(at))
 
-    # What the editor copied, pasted into the name box, names a new folder.
+    # What the editor copied, pasted as a new folder's name.
     at = v.mark()
-    mouse.click(80 + 450, 84 + 71 + 13)
-    v.key('ctrl-v')
-    mouse.click(80 + 297, 84 + 71 + 13)
+    menu(*empty, 0)
+    v.key('ctrl-v'); v.key('ret')
     check('pasting from another program', v.wait('files: made /tmp/hello world', 5, at), v.text(at))
 
     at = v.mark()
-    mouse.click(80 + 25, 84 + 37 + 13)
+    mouse.click(80 + 25, 84 + 41 + 13)
     check('Up goes to the folder above', v.wait('files: in /: ', 5, at), v.text(at))
 
     v.key('meta_l-shift-q'); time.sleep(1)
@@ -245,7 +252,7 @@ try:
     # The start menu has each app's icon.
     v.key('meta_l'); time.sleep(0.5)
     w, h, px = v.screenshot()
-    menu_top = 772 - 10 * 24 - 9 - 8
+    menu_top = 772 - 11 * 24 - 9 - 8
     icon = [px(4 + 6 + 8, menu_top + 4 + i * 24 + 12) for i in range(3)]
     check('icons in the start menu', all(p not in (0x141821, 0x3D63DD) for p in icon), [hex(p) for p in icon])
     v.key('esc')
@@ -257,9 +264,9 @@ try:
     v.type("wm 'files /images'\n")
     check('files lists the pictures', v.wait('files: in /images: squares.bmp squares.jpg squares.png', 10, at),
           v.text(at))
-    v.wait('files: list at', 5, at)
+    v.wait('files: at list', 5, at)
     time.sleep(1)
-    x, y, lw, lh = map(int, re.findall(r'files: list at (\d+) (\d+) (\d+) (\d+)', v.text())[-1])
+    x, y, lw, lh = map(int, re.findall(r'files: at list (\d+) (\d+) (\d+) (\d+)', v.text())[-1])
     w, h, px = v.screenshot()
     check('with picture icons', px(80 + x + 2 + 5 + 8, 84 + y + 2 + 11) not in (0x181B21, 0x3D63DD),
           hex(px(80 + x + 2 + 5 + 8, 84 + y + 2 + 11)))

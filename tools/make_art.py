@@ -111,6 +111,11 @@ def gear(d, s):
     d.ellipse((c - 2.3 * s, c - 2.3 * s, c + 2.3 * s, c + 2.3 * s), fill=(0, 0, 0, 0))
 
 
+def run(d, s):
+    program(d, s)
+    d.polygon([(6 * s, 7 * s), (11.5 * s, 9.5 * s), (6 * s, 12 * s)], fill=(60, 170, 90))
+
+
 def squares(d, s):
     for i, colour in enumerate(((230, 70, 80), (70, 190, 110), (70, 120, 230), (240, 190, 60))):
         x, y = 1.5 + (i % 2) * 7, 1.5 + (i // 2) * 7
@@ -124,5 +129,5 @@ for name, paint in (('folder', folder), ('file', page), ('text', lambda d, s: pa
                     ('image', picture_icon), ('program', program)):
     icon(paint).save(f'{SHARE}/icons/{name}.png', optimize=True)
 for name, paint in (('term', terminal), ('editor', editor), ('files', files), ('widgets', widgets),
-                    ('guidemo', demo), ('fbdemo', squares), ('viewer', picture_icon), ('settings', gear)):
+                    ('guidemo', demo), ('fbdemo', squares), ('viewer', picture_icon), ('settings', gear), ('run', run)):
     icon(paint).save(f'{SHARE}/icons/apps/{name}.png', optimize=True)

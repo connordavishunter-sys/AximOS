@@ -21,8 +21,8 @@ LIBC_OBJS := $(filter-out $(CRT0) $(BUILD)/user/libc/ld.o,$(patsubst user/%,$(BU
 LIBC_SO := $(BUILD)/user/libc.so
 LIBC_SO_OBJS := $(patsubst user/libc/%,$(BUILD)/user/libc_pic/%.o,$(basename $(filter-out user/libc/crt0.S,$(wildcard user/libc/*.c user/libc/*.S))))
 
-# /system/lib/libgui.so, for programs with windows, which wm and GUI_APPS are linked
-# against. The apps go in /system/bin/gui, where wm's start menu finds them.
+# /system/lib/libgui.so, for programs with windows, which wm, run and GUI_APPS are
+# linked against. The apps go in /system/bin/gui, where wm's start menu finds them.
 LIBGUI_SO := $(BUILD)/user/libgui.so
 LIBGUI_SO_OBJS := $(patsubst user/libgui/%.c,$(BUILD)/user/libgui_pic/%.o,$(wildcard user/libgui/*.c))
 GUI_APPS := guidemo term fbdemo widgets editor files viewer settings
@@ -135,7 +135,7 @@ $(BUILD)/user/$(1).elf: $(CRT0) $(patsubst user/%.c,$(BUILD)/user/%.o,$(wildcard
 	$$(LD) $$(USER_LDFLAGS) $$(DYNAMIC_LDFLAGS) $$+ -o $$@
 endef
 $(foreach p,$(filter-out init,$(PROGRAMS)),$(eval $(call PROGRAM,$(p))))
-$(addprefix $(BUILD)/user/,$(addsuffix .elf,wm $(GUI_APPS))): $(LIBGUI_SO)
+$(addprefix $(BUILD)/user/,$(addsuffix .elf,wm run $(GUI_APPS))): $(LIBGUI_SO)
 
 $(BUILD)/user/init.elf: $(CRT0) $(patsubst user/%.c,$(BUILD)/user/%.o,$(wildcard user/init/*.c)) $(LIBC)
 	$(LD) $(USER_LDFLAGS) -static $+ -o $@

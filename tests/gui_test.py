@@ -164,9 +164,9 @@ try:
     check('shown again', px(1000, 400) == PAPER, hex(px(1000, 400)))
 
     # The menu lists /system/bin/gui above the launcher, 24 pixels an app: editor,
-    # fbdemo, files, guidemo, settings, term, viewer, widgets. Then a line, Reboot
-    # and Shut down.
-    menu_top = bar - 10 * 24 - 9 - 8
+    # fbdemo, files, guidemo, settings, term, viewer, widgets. Then a line, Run...,
+    # Reboot and Shut down.
+    menu_top = bar - 11 * 24 - 9 - 8
     mouse.click(36, bar + 14)
     time.sleep(0.5)
     w, h, px = v.screenshot()
