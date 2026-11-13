@@ -1,38 +1,49 @@
+#include <key_event.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/ioctl.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 #define SHELL_PATH "/system/bin/dash"
+#define WM_PATH "/system/bin/wm"
 #define EXEC_FAILED 127
 
-// Keeps a shell running, and collects any orphans along the way.
-int main(void) {
-    for (;;) {
-        pid_t shell = fork();
+static char *const env[] = {"PATH=/system/bin:/system/bin/gui", "HOME=/", "SHELL=" SHELL_PATH, "PS1=$PWD$ ", NULL};
 
-        if (shell == 0) {
-            char *const argv[] = {SHELL_PATH, NULL};
-            char *const env[] = {"PATH=/system/bin:/system/bin/gui", "HOME=/", "SHELL=" SHELL_PATH, "PS1=$PWD$ ", NULL};
+// Runs a program in its own group, with the terminal to go with it, which it waits
+// for otherwise, and collects any orphans until it's done.
+static int run(const char *path) {
+    pid_t child = fork();
 
-            // Its own group and the terminal to go with it, which it waits for otherwise.
-            setpgid(0, 0);
-            tcsetpgrp(STDIN_FILENO, getpid());
-            execve(SHELL_PATH, argv, env);
-            printf("init: failed to run %s\n", SHELL_PATH);
-            exit(EXEC_FAILED);
-        }
-        if (shell < 0) {
-            printf("init: fork failed\n");
-            return 1;
-        }
-
-        int status;
-        pid_t pid;
-        while ((pid = wait(&status)) != shell)
-            ;
-
-        if (status == EXEC_FAILED)
-            return 1;
+    if (child == 0) {
+        setpgid(0, 0);
+        tcsetpgrp(STDIN_FILENO, getpid());
+        execve(path, (char *const[]){(char *)path, NULL}, env);
+        printf("init: failed to run %s\n", path);
+        exit(EXEC_FAILED);
     }
+    if (child < 0) {
+        printf("init: fork failed\n");
+        exit(1);
+    }
+
+    int status;
+    while (wait(&status) != child)
+        ;
+    return status;
+}
+
+// Starts the desktop, unless Shift is held, and keeps a shell running after it.
+int main(void) {
+    int modifiers = 0;
+
+    ioctl(STDIN_FILENO, KEYBOARD_GET_MODIFIERS, &modifiers);
+    if (modifiers & KEY_MOD_SHIFT)
+        printf("init: Shift is held, so starting the shell\n");
+    else
+        run(WM_PATH);
+    while (run(SHELL_PATH) != EXEC_FAILED)
+        ;
+    return 1;
 }

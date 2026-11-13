@@ -5,6 +5,12 @@
 
 void keyboard_init(void);
 
+// Takes up the modifiers the BIOS saw held, once memory can be mapped.
+void keyboard_read_firmware_modifiers(void);
+
+// The KEY_MOD_ held now.
+uint8_t keyboard_modifiers(void);
+
 // What readers sleep on until a key arrives.
 void *keyboard_channel(void);
 

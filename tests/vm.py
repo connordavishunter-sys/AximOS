@@ -74,9 +74,10 @@ def compile_library(source, out, *needs):
 
 
 class VM:
-    def __init__(self, disk=None, smp=4, timeout=300, extra=(), net='', vmmouse=False):
+    def __init__(self, disk=None, smp=4, timeout=300, extra=(), net='', vmmouse=False, desktop=False):
         """With vmmouse, the mouse is placed where the host says, through QMP, as a
-        desktop's QEMU window does. Without it there's only the relative PS/2 mouse."""
+        desktop's QEMU window does. Without it there's only the relative PS/2 mouse.
+        Shift is held through boot for the shell, unless it's to start the desktop."""
         self.dir = tempfile.mkdtemp(dir=WORK)
         self.log, sock, qmp = self.dir + '/serial.log', self.dir + '/monitor.sock', self.dir + '/qmp.sock'
         drive = f'file={disk},format=raw' if disk else f'file={BUILD}/disk.img,format=raw,snapshot=on'
@@ -86,22 +87,34 @@ class VM:
              '-drive', drive + ',if=none,id=disk', '-device', 'ide-hd,drive=disk,bus=ide.1',
              '-netdev', 'user,id=net0' + net, '-device', 'e1000,netdev=net0',
              '-serial', 'file:' + self.log, '-monitor', f'unix:{sock},server=on,wait=off',
-             *(['-qmp', f'unix:{qmp},server=on,wait=off'] if vmmouse else []), *extra],
+             '-qmp', f'unix:{qmp},server=on,wait=off', *extra],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         while not os.path.exists(sock):
             time.sleep(0.05)
         self.monitor = socket.socket(socket.AF_UNIX)
         self.monitor.connect(sock)
         self.monitor.settimeout(0.05)
-        self.qmp = None
-        if vmmouse:
-            while not os.path.exists(qmp):
-                time.sleep(0.05)
-            q = socket.socket(socket.AF_UNIX)
-            q.connect(qmp)
-            self.qmp = q.makefile('rw')
-            self.qmp.readline()
-            self.qmp_command('qmp_capabilities')
+        while not os.path.exists(qmp):
+            time.sleep(0.05)
+        q = socket.socket(socket.AF_UNIX)
+        q.connect(qmp)
+        self.qmp = q.makefile('rw')
+        self.qmp.readline()
+        self.qmp_command('qmp_capabilities')
+        if not desktop:
+            self.hold_shift()
+
+    def shift(self, down):
+        self.qmp_command('input-send-event', events=[{'type': 'key', 'data': {'down': down, 'key': {'type': 'qcode', 'data': 'shift'}}}])
+
+    def hold_shift(self):
+        """Presses Shift again and again, as a keyboard repeats a held key, until init
+        has seen it."""
+        end = time.time() + 60
+        while 'init: ' not in self.raw() and time.time() < end:
+            self.shift(True)
+            time.sleep(0.05)
+        self.shift(False)
 
     def raw(self):
         return open(self.log, errors='replace').read() if os.path.exists(self.log) else ''

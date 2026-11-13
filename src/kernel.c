@@ -56,6 +56,7 @@ void _start(void) {
     if (!mm_init())
         die("bootloader did not provide a memory map");
     fb_map();
+    keyboard_read_firmware_modifiers();
     if (!acpi_init())
         die("ACPI tables not usable");
     if (!irq_init())

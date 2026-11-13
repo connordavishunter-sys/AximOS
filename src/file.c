@@ -2,6 +2,7 @@
 #include <errno_values.h>
 #include <fb.h>
 #include <file.h>
+#include <key_event.h>
 #include <keyboard.h>
 #include <kmalloc.h>
 #include <mm.h>
@@ -341,6 +342,10 @@ int file_ioctl(struct file *file, uint64_t request, void *arg) {
     }
     if (request == FIONREAD && file->kind == FILE_INET) {
         *(int *)arg = inet_available(file->inet);
+        return 0;
+    }
+    if (request == KEYBOARD_GET_MODIFIERS && (file->kind == FILE_CONSOLE || file->kind == FILE_KEYBOARD)) {
+        *(int *)arg = keyboard_modifiers();
         return 0;
     }
     // The master speaks for its terminal as a whole.

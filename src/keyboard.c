@@ -2,6 +2,8 @@
 #include <io.h>
 #include <key_event.h>
 #include <keyboard.h>
+#include <limine.h>
+#include <mm.h>
 #include <mouse.h>
 #include <process.h>
 #include <signal_numbers.h>
@@ -113,6 +115,31 @@ void keyboard_init(void) {
     outb(PS2_DATA, KEYBOARD_ENABLE_SCANNING);
     wait_output_full();
     flush_output();
+}
+
+__attribute__((used, section(".limine_requests")))
+static volatile struct limine_firmware_type_request firmware_request = {
+    .id = LIMINE_FIRMWARE_TYPE_REQUEST_ID,
+    .revision = 0,
+};
+
+#define BDA_FLAGS 0x417 // the BIOS's record of the held modifiers
+#define BDA_SHIFT 0x03  // right and left
+
+// A Shift held since before the kernel started was only seen by the BIOS, as a
+// keyboard repeats only the last key pressed, and a virtual one nothing at all.
+void keyboard_read_firmware_modifiers(void) {
+    if (!firmware_request.response || firmware_request.response->firmware_type != LIMINE_FIRMWARE_TYPE_X86BIOS)
+        return;
+
+    const volatile uint8_t *low = mm_map_device(0, PAGE_SIZE);
+
+    if (low && (low[BDA_FLAGS] & BDA_SHIFT))
+        modifiers |= KEY_MOD_SHIFT;
+}
+
+uint8_t keyboard_modifiers(void) {
+    return modifiers;
 }
 
 void *keyboard_channel(void) {

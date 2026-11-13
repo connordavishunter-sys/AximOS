@@ -42,6 +42,9 @@
 #define KEY_MOD_SUPER 0x08
 #define KEY_MOD_CAPS_LOCK 0x10
 
+// ioctl on the console or /dev/keyboard: the KEY_MOD_ held now, as an int.
+#define KEYBOARD_GET_MODIFIERS 0x4B01
+
 struct key_event {
     uint16_t code;
     uint8_t pressed;   // 1 when pressed or repeating, 0 when released
