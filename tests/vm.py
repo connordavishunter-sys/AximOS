@@ -1,5 +1,5 @@
 """Boots AximOS in QEMU, types through the monitor and reads the serial console."""
-import os, re, shutil, socket, subprocess, tempfile, time
+import json, os, re, shutil, socket, subprocess, tempfile, time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BUILD = ROOT + '/build'
@@ -74,22 +74,34 @@ def compile_library(source, out, *needs):
 
 
 class VM:
-    def __init__(self, disk=None, smp=4, timeout=300, extra=(), net=''):
+    def __init__(self, disk=None, smp=4, timeout=300, extra=(), net='', vmmouse=False):
+        """With vmmouse, the mouse is placed where the host says, through QMP, as a
+        desktop's QEMU window does. Without it there's only the relative PS/2 mouse."""
         self.dir = tempfile.mkdtemp(dir=WORK)
-        self.log, sock = self.dir + '/serial.log', self.dir + '/monitor.sock'
+        self.log, sock, qmp = self.dir + '/serial.log', self.dir + '/monitor.sock', self.dir + '/qmp.sock'
         drive = f'file={disk},format=raw' if disk else f'file={BUILD}/disk.img,format=raw,snapshot=on'
         self.proc = subprocess.Popen(
             ['timeout', str(timeout), 'qemu-system-x86_64', '-accel', 'kvm', '-cpu', 'host', '-smp', str(smp), '-m', '256M',
-             '-M', 'q35', '-display', 'none', '-boot', 'd', '-cdrom', BUILD + '/aximos.iso',
+             '-M', 'q35,vmport=' + ('on' if vmmouse else 'off'), '-display', 'none', '-boot', 'd', '-cdrom', BUILD + '/aximos.iso',
              '-drive', drive + ',if=none,id=disk', '-device', 'ide-hd,drive=disk,bus=ide.1',
              '-netdev', 'user,id=net0' + net, '-device', 'e1000,netdev=net0',
-             '-serial', 'file:' + self.log, '-monitor', f'unix:{sock},server=on,wait=off', *extra],
+             '-serial', 'file:' + self.log, '-monitor', f'unix:{sock},server=on,wait=off',
+             *(['-qmp', f'unix:{qmp},server=on,wait=off'] if vmmouse else []), *extra],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         while not os.path.exists(sock):
             time.sleep(0.05)
         self.monitor = socket.socket(socket.AF_UNIX)
         self.monitor.connect(sock)
         self.monitor.settimeout(0.05)
+        self.qmp = None
+        if vmmouse:
+            while not os.path.exists(qmp):
+                time.sleep(0.05)
+            q = socket.socket(socket.AF_UNIX)
+            q.connect(qmp)
+            self.qmp = q.makefile('rw')
+            self.qmp.readline()
+            self.qmp_command('qmp_capabilities')
 
     def raw(self):
         return open(self.log, errors='replace').read() if os.path.exists(self.log) else ''
@@ -130,6 +142,22 @@ class VM:
             self.command(f'mouse_move {step_x} {step_y}')
             dx, dy = dx - step_x, dy - step_y
             time.sleep(0.02)
+        if buttons is not None:
+            self.command(f'mouse_button {buttons}')
+        time.sleep(0.2)
+
+    def qmp_command(self, name, **arguments):
+        self.qmp.write(json.dumps({'execute': name, 'arguments': arguments}) + '\n')
+        self.qmp.flush()
+        while 'event' in (reply := json.loads(self.qmp.readline())):
+            pass
+        return reply
+
+    def pointer(self, x, y, buttons=None, width=1280, height=800):
+        """Puts the absolute pointer in the middle of pixel x, y, then sets the buttons."""
+        axis = lambda name, at, size: {'type': 'abs', 'data': {'axis': name, 'value': int((at + 0.5) * 0x8000 / size)}}
+        self.qmp_command('input-send-event', events=[axis('x', x, width), axis('y', y, height)])
+        time.sleep(0.05)
         if buttons is not None:
             self.command(f'mouse_button {buttons}')
         time.sleep(0.2)

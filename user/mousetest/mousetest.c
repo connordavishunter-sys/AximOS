@@ -22,10 +22,10 @@ int main(int argc, char **argv) {
 
     while ((bytes = read(fd, events, sizeof(events))) > 0) {
         for (size_t i = 0; i < bytes / sizeof(events[0]); i++) {
-            x += events[i].dx;
-            y += events[i].dy;
+            x = events[i].absolute ? events[i].x : x + events[i].dx;
+            y = events[i].absolute ? events[i].y : y + events[i].dy;
             wheel += events[i].wheel;
-            printf("x %d y %d wheel %d buttons %c%c%c\n", x, y, wheel,
+            printf("%sx %d y %d wheel %d buttons %c%c%c\n", events[i].absolute ? "at " : "", x, y, wheel,
                    events[i].buttons & MOUSE_BUTTON_LEFT ? 'L' : '-',
                    events[i].buttons & MOUSE_BUTTON_MIDDLE ? 'M' : '-',
                    events[i].buttons & MOUSE_BUTTON_RIGHT ? 'R' : '-');

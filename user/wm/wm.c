@@ -1292,24 +1292,29 @@ static void handle_mouse(const struct mouse_event *e) {
     enum part part;
     int edges;
     uint32_t pressed = e->buttons & ~buttons, released = buttons & ~e->buttons;
+    int x = e->absolute ? (int)((int64_t)e->x * screen.width / (MOUSE_ABSOLUTE_MAX + 1)) : cursor_x + e->dx;
+    int y = e->absolute ? (int)((int64_t)e->y * screen.height / (MOUSE_ABSOLUTE_MAX + 1)) : cursor_y + e->dy;
 
-    if (e->dx || e->dy) {
+    x = x < 0 ? 0 : x >= screen.width ? screen.width - 1 : x;
+    y = y < 0 ? 0 : y >= screen.height ? screen.height - 1 : y;
+
+    bool moved = x != cursor_x || y != cursor_y;
+
+    if (moved) {
         damage_cursor();
-        cursor_x = cursor_x + e->dx < 0 ? 0 : cursor_x + e->dx >= screen.width ? screen.width - 1 : cursor_x + e->dx;
-        cursor_y = cursor_y + e->dy < 0 ? 0 : cursor_y + e->dy >= screen.height ? screen.height - 1 : cursor_y + e->dy;
+        cursor_x = x;
+        cursor_y = y;
         damage_cursor();
     }
     buttons = e->buttons;
 
     // Windows can be dragged partly off the screen, but the title bar stays on it.
-    if (dragging && (e->dx || e->dy)) {
-        int y = cursor_y - drag_y;
+    if (dragging && moved) {
+        int top = cursor_y - drag_y, bottom = desktop().height - BORDER;
 
-        int bottom = desktop().height - BORDER;
-
-        move_window(dragging, cursor_x - drag_x, y < TITLE_HEIGHT ? TITLE_HEIGHT : y > bottom ? bottom : y);
+        move_window(dragging, cursor_x - drag_x, top < TITLE_HEIGHT ? TITLE_HEIGHT : top > bottom ? bottom : top);
     }
-    if (resizing && (e->dx || e->dy)) {
+    if (resizing && moved) {
         int edges = resizing->resize_edges, dx = cursor_x - resize_x, dy = cursor_y - resize_y;
 
         if (edges & EDGE_TOP && dy < -resize_room)
@@ -1319,7 +1324,7 @@ static void handle_mouse(const struct mouse_event *e) {
     }
 
     // The menu highlights what's under the mouse.
-    if (menu_open && (e->dx || e->dy)) {
+    if (menu_open && moved) {
         int choice = menu_item_at(cursor_x, cursor_y);
 
         if (choice >= 0 && choice != menu_choice) {
@@ -1332,7 +1337,7 @@ static void handle_mouse(const struct mouse_event *e) {
 
     if (target && !grabbed && part != PART_CONTENT)
         target = NULL;
-    if (target && (e->dx || e->dy))
+    if (target && moved)
         send_mouse(target, GUI_MOUSE_MOVE, 0, 0);
     if (target && e->wheel)
         send_mouse(target, GUI_MOUSE_WHEEL, 0, e->wheel);
