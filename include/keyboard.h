@@ -11,7 +11,11 @@ void *keyboard_channel(void);
 // Handles IRQ 1 and IRQ 12, which share a controller. Keys become bytes, with the
 // arrow keys and other special keys as the ANSI escape sequences a terminal would
 // send. Mouse data is passed on to the mouse driver.
+// Also called once interrupts are routed, for anything that came before.
 void keyboard_handle_irq(void);
+
+// Takes a byte the controller says came from the keyboard.
+void keyboard_handle_byte(uint8_t byte);
 
 // Copies out whatever is waiting, without blocking. Returns the bytes copied.
 size_t keyboard_read(char *buf, size_t len);

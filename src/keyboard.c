@@ -18,9 +18,14 @@
 
 #define CMD_READ_CONFIG 0x20
 #define CMD_WRITE_CONFIG 0x60
+#define CMD_DISABLE_PORT1 0xAD
 #define CMD_ENABLE_PORT1 0xAE
+#define CMD_DISABLE_PORT2 0xA7
+#define CMD_ENABLE_PORT2 0xA8
 #define CONFIG_IRQ1 0x01
+#define CONFIG_IRQ12 0x02
 #define CONFIG_PORT1_DISABLED 0x10
+#define CONFIG_PORT2_DISABLED 0x20
 #define CONFIG_TRANSLATE 0x40
 #define KEYBOARD_ENABLE_SCANNING 0xF4
 #define TIMEOUT 100000
@@ -79,25 +84,31 @@ static void flush_output(void) {
         inb(PS2_DATA);
 }
 
-// Firmware usually leaves the keyboard ready, but UEFI doesn't have to.
+static void command(uint8_t byte) {
+    wait_input_empty();
+    outb(PS2_COMMAND, byte);
+}
+
+// Sets up the controller for both devices. Firmware usually leaves the keyboard
+// ready, but UEFI doesn't have to. Both ports are off while the config is read,
+// so a key pressed during boot can't be taken for it.
 void keyboard_init(void) {
+    command(CMD_DISABLE_PORT1);
+    command(CMD_DISABLE_PORT2);
     flush_output();
 
-    wait_input_empty();
-    outb(PS2_COMMAND, CMD_READ_CONFIG);
+    command(CMD_READ_CONFIG);
     wait_output_full();
     uint8_t config = inb(PS2_DATA);
 
-    config |= CONFIG_IRQ1 | CONFIG_TRANSLATE;
-    config &= ~CONFIG_PORT1_DISABLED;
-
-    wait_input_empty();
-    outb(PS2_COMMAND, CMD_WRITE_CONFIG);
+    config |= CONFIG_IRQ1 | CONFIG_IRQ12 | CONFIG_TRANSLATE;
+    config &= ~(CONFIG_PORT1_DISABLED | CONFIG_PORT2_DISABLED);
+    command(CMD_WRITE_CONFIG);
     wait_input_empty();
     outb(PS2_DATA, config);
 
-    wait_input_empty();
-    outb(PS2_COMMAND, CMD_ENABLE_PORT1);
+    command(CMD_ENABLE_PORT1);
+    command(CMD_ENABLE_PORT2);
     wait_input_empty();
     outb(PS2_DATA, KEYBOARD_ENABLE_SCANNING);
     wait_output_full();
@@ -208,7 +219,7 @@ static void to_console(uint16_t code) {
     push(&c, 1);
 }
 
-static void handle_scancode(uint8_t byte) {
+void keyboard_handle_byte(uint8_t byte) {
     if (byte == SC_EXTENDED) {
         extended = true;
         return;
@@ -246,7 +257,7 @@ void keyboard_handle_irq(void) {
         if (status & STATUS_FROM_MOUSE)
             mouse_handle_byte(byte);
         else
-            handle_scancode(byte);
+            keyboard_handle_byte(byte);
     }
 }
 

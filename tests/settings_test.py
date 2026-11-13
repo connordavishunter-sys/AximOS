@@ -33,7 +33,7 @@ def count(px, x0, y0, x1, y1, colour):
 v = VM()
 try:
     check('prompt at boot', v.wait('/$ ', 30), v.text())
-    v.run('echo none > /system/etc/wallpaper')
+    v.run('echo none > /system/etc/wallpaper; rm -f /system/etc/gui.conf')
     at = v.mark()
     v.type("wm widgets 'sleep 1; settings'\n") # in that order, so settings is second and on top
     check('settings starts', v.wait('settings: at zones', 10, at), v.text(at))

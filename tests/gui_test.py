@@ -14,7 +14,7 @@ def count(px, x0, y0, x1, y1, color):
 v = VM()
 try:
     check('prompt at boot', v.wait('/$ ', 30), v.text())
-    v.run('echo none > /system/etc/wallpaper') # the plain colour, to look for
+    v.run('echo none > /system/etc/wallpaper; rm -f /system/etc/gui.conf') # the plain colour and default theme, to look for
     o = v.run('ls /dev'); check('/dev/keyboard exists', 'keyboard' in o, o)
     o = v.run('guidemo; echo st=$?'); check('guidemo without wm', "wm isn't running" in o and 'st=1' in o, o)
 
@@ -98,7 +98,7 @@ class Pointer:
 v = VM()
 try:
     check('prompt at boot', v.wait('/$ ', 30), v.text())
-    v.run('echo none > /system/etc/wallpaper') # the plain colour, to look for
+    v.run('echo none > /system/etc/wallpaper; rm -f /system/etc/gui.conf') # the plain colour and default theme, to look for
     at = v.mark()
     v.type('wm guidemo\n')
     check('wm starts guidemo', v.wait('guidemo: window 1', 10, at), v.text(at))

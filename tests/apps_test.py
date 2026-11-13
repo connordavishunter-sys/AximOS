@@ -45,7 +45,7 @@ class Pointer:
 v = VM()
 try:
     check('prompt at boot', v.wait('/$ ', 30), v.text())
-    v.run('echo none > /system/etc/wallpaper') # the plain colour, to look for
+    v.run('echo none > /system/etc/wallpaper; rm -f /system/etc/gui.conf') # the plain colour and default theme, to look for
     v.run('echo hello > /tmp/hello.txt')
     o = v.run('ls /system/bin/gui'); check('editor and files are apps', 'editor' in o and 'files' in o, o)
 

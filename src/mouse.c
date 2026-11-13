@@ -1,5 +1,6 @@
 #include <errno_values.h>
 #include <io.h>
+#include <keyboard.h>
 #include <mouse.h>
 #include <mouse_event.h>
 #include <process.h>
@@ -10,14 +11,10 @@
 #define PS2_COMMAND 0x64
 #define STATUS_OUTPUT_FULL 0x01
 #define STATUS_INPUT_FULL 0x02
+#define STATUS_FROM_MOUSE 0x20
 #define TIMEOUT 1000000
 
-#define CMD_READ_CONFIG 0x20
-#define CMD_WRITE_CONFIG 0x60
-#define CMD_ENABLE_PORT2 0xA8
 #define CMD_SEND_TO_PORT2 0xD4
-#define CONFIG_IRQ12 0x02
-#define CONFIG_PORT2_DISABLED 0x20
 
 #define MOUSE_SET_DEFAULTS 0xF6
 #define MOUSE_SET_SAMPLE_RATE 0xF3
@@ -50,12 +47,18 @@ static void wait_input_empty(void) {
         ;
 }
 
+// The mouse's next reply. Keys pressed meanwhile go to the keyboard, rather than
+// being taken for replies, which would put every reply after them out by one.
 static bool read_response(uint8_t *byte) {
     for (int i = 0; i < TIMEOUT; i++) {
-        if (inb(PS2_STATUS) & STATUS_OUTPUT_FULL) {
-            *byte = inb(PS2_DATA);
+        uint8_t status = inb(PS2_STATUS);
+
+        if (!(status & STATUS_OUTPUT_FULL))
+            continue;
+        *byte = inb(PS2_DATA);
+        if (status & STATUS_FROM_MOUSE)
             return true;
-        }
+        keyboard_handle_byte(*byte);
     }
     return false;
 }
@@ -85,24 +88,6 @@ static void try_enable_wheel(void) {
 }
 
 bool mouse_init(void) {
-    wait_input_empty();
-    outb(PS2_COMMAND, CMD_ENABLE_PORT2);
-
-    wait_input_empty();
-    outb(PS2_COMMAND, CMD_READ_CONFIG);
-
-    uint8_t config;
-    if (!read_response(&config))
-        return false;
-
-    config |= CONFIG_IRQ12;
-    config &= ~CONFIG_PORT2_DISABLED;
-
-    wait_input_empty();
-    outb(PS2_COMMAND, CMD_WRITE_CONFIG);
-    wait_input_empty();
-    outb(PS2_DATA, config);
-
     uint8_t test, id;
     if (!send(MOUSE_RESET) || !read_response(&test) || test != MOUSE_SELF_TEST_PASSED
         || !read_response(&id)) {

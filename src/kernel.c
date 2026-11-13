@@ -68,6 +68,9 @@ void _start(void) {
         irq_enable_isa(IRQ_MOUSE);
         vfs_add_device(VFS_DEVICE_MOUSE);
     }
+    // A key pressed before now may be waiting, and its interrupt lost while masked.
+    // The controller holds one byte at a time, so it would block both devices.
+    keyboard_handle_irq();
     vfs_add_device(VFS_DEVICE_KEYBOARD);
     vfs_add_device(VFS_DEVICE_NULL);
     vfs_add_device(VFS_DEVICE_ZERO);
