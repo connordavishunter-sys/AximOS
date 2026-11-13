@@ -399,8 +399,12 @@ static struct rect cursor_rect(void) {
     return (struct rect){cursor_x - c->hot_x, cursor_y - c->hot_y, width, height};
 }
 
+// A pixel more all round, as a virtual machine's window that smooths the screen
+// while scaling it blends each pixel into the next, and only redraws what changed.
 static void damage_cursor(void) {
-    add_damage(cursor_rect());
+    struct rect r = cursor_rect();
+
+    add_damage((struct rect){r.x - 1, r.y - 1, r.width + 2, r.height + 2});
 }
 
 // How dark a shadow is by how far left or right, and up or down, a point is from
