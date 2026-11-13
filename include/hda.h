@@ -1,21 +1,23 @@
 #pragma once
 
 #include <stdbool.h>
-#include <stddef.h>
 #include <stdint.h>
 
-// Intel High Definition Audio: /dev/audio plays 16-bit stereo, written as it's to
-// be heard, at the rate AUDIO_SET_RATE picks, 48000 to start with.
+// Intel High Definition Audio: a sound card that plays 16-bit stereo, round and
+// round a buffer, at a rate set while it's stopped. audio.c mixes into it.
+
+#define HDA_BUFFER_BYTES (16 * 4096)
 
 // Finds a controller and a codec with somewhere to play, returning false if none.
 bool hda_init(void);
 
-// Only one file can have it open. These return a negative errno.
-int hda_open(void);
-void hda_close(void); // after what's been written has played
-int64_t hda_write(const void *buf, size_t len, bool nonblocking);
-int hda_ioctl(uint64_t request, void *arg);
-bool hda_writable(void);
+bool hda_supports(int rate);
+void hda_set_rate(int rate);
 
-// Called on every tick, to follow where playing has got to.
-void hda_tick(void);
+// Starting plays from the beginning of the buffer, and stopping silences all of it.
+void hda_start(void);
+void hda_stop(void);
+
+// Where in the buffer it's playing, and writing there.
+uint32_t hda_played(void);
+void hda_put(uint32_t offset, const void *data, uint32_t len);

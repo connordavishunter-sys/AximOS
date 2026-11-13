@@ -27,6 +27,7 @@ enum vfs_device {
     VFS_DEVICE_RANDOM,
     VFS_DEVICE_URANDOM,
     VFS_DEVICE_AUDIO,
+    VFS_DEVICE_MIXER,
     VFS_DEVICE_COUNT,
 };
 

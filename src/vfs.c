@@ -48,6 +48,7 @@ static const char *const device_names[VFS_DEVICE_COUNT] = {
     [VFS_DEVICE_RANDOM] = "random",
     [VFS_DEVICE_URANDOM] = "urandom",
     [VFS_DEVICE_AUDIO] = "audio",
+    [VFS_DEVICE_MIXER] = "mixer",
 };
 static bool lock_held;
 static int lock_owner;

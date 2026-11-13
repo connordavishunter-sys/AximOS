@@ -4,7 +4,7 @@
 #include <block.h>
 #include <clock.h>
 #include <fb.h>
-#include <hda.h>
+#include <audio.h>
 #include <console.h>
 #include <cpu.h>
 #include <irq.h>
@@ -96,8 +96,11 @@ void _start(void) {
     if (vfs_lookup("/", INIT_PATH, &init) != VFS_OK || process_spawn_init(&init, INIT_PATH) < 0)
         die("failed to load " INIT_PATH);
 
-    if (hda_init())
+    audio_init();
+    if (audio_present()) {
         vfs_add_device(VFS_DEVICE_AUDIO);
+        vfs_add_device(VFS_DEVICE_MIXER);
+    }
     net_init();
     cpu_start_others();
     process_idle_loop();

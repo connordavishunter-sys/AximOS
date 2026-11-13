@@ -1,9 +1,6 @@
-#include <audio_types.h>
-#include <errno_values.h>
 #include <hda.h>
 #include <mm.h>
 #include <pci.h>
-#include <process.h>
 #include <serial.h>
 #include <string.h>
 
@@ -91,11 +88,7 @@
 
 // The buffer the controller plays from, round and round: a page for each of its
 // entries, which it moves on to in turn.
-#define PAGES 16
-#define BUFFER_BYTES (PAGES * PAGE_SIZE)
-#define GUARD 512                // never written just ahead of where it's playing
-#define IDLE_TICKS 50            // with nothing to play for this long, it stops
-#define DRAIN_TICKS (2 * 100)    // the longest close waits for it to finish
+#define PAGES (HDA_BUFFER_BYTES / PAGE_SIZE)
 #define TIMEOUT 1000000
 
 struct bdl_entry {
@@ -112,8 +105,6 @@ static int codec, stream; // the codec's address, and the output stream's regist
 static uint8_t *pages[PAGES];
 static uint16_t format;
 
-static bool opened, running;
-static uint32_t write_at, play_at, queued, idle;
 
 // The widgets from a pin back to a converter, which are set up to play.
 static uint8_t paths[MAX_PATHS][MAX_PATH], inputs[MAX_PATHS][MAX_PATH]; // and which input each takes
@@ -345,29 +336,51 @@ static int rate_bits(int rate) {
     return -1;
 }
 
-static void stop(void) {
+bool hda_supports(int rate) {
+    return rate_bits(rate) >= 0;
+}
+
+void hda_set_rate(int rate) {
+    format = rate_bits(rate) | FORMAT_16_BIT | FORMAT_STEREO;
+    for (int p = 0; p < path_count; p++)
+        command(paths[p][path_lengths[p] - 1], SET_FORMAT, format);
+}
+
+void hda_stop(void) {
     w8(stream + SD_CTL, r8(stream + SD_CTL) & ~SD_RUN);
     wait_for(stream + SD_CTL, SD_RUN, 0, 8);
-    running = false;
-    write_at = play_at = queued = idle = 0;
     for (int i = 0; i < PAGES; i++)
         memset(pages[i], 0, PAGE_SIZE);
-    process_wakeup(&queued);
 }
 
 // A stream starts from the beginning of the buffer after a reset.
-static void start(void) {
+void hda_start(void) {
     w8(stream + SD_CTL, SD_RESET);
     wait_for(stream + SD_CTL, SD_RESET, SD_RESET, 8);
     w8(stream + SD_CTL, 0);
     wait_for(stream + SD_CTL, SD_RESET, 0, 8);
-    w32(stream + SD_CBL, BUFFER_BYTES);
+    w32(stream + SD_CBL, HDA_BUFFER_BYTES);
     w16(stream + SD_LVI, PAGES - 1);
     w16(stream + SD_FMT, format);
     w8(stream + SD_CTL + 2, STREAM_TAG << 4);
     w8(stream + SD_STS, 0x1C); // clears what it's said before
     w8(stream + SD_CTL, SD_RUN);
-    running = true;
+}
+
+uint32_t hda_played(void) {
+    return r32(stream + SD_LPIB) % HDA_BUFFER_BYTES;
+}
+
+void hda_put(uint32_t offset, const void *data, uint32_t len) {
+    const uint8_t *from = data;
+
+    for (uint32_t done = 0; done < len;) {
+        uint32_t at = (offset + done) % HDA_BUFFER_BYTES, part = PAGE_SIZE - at % PAGE_SIZE;
+
+        part = part < len - done ? part : len - done;
+        memcpy(pages[at / PAGE_SIZE] + at % PAGE_SIZE, from + done, part);
+        done += part;
+    }
 }
 
 static struct pci_device found;
@@ -403,116 +416,4 @@ bool hda_init(void) {
     set_up_paths();
     kprintf("hda: codec %u, playing through %u pin%s\n", codec, path_count, path_count == 1 ? "" : "s");
     return true;
-}
-
-int hda_open(void) {
-    if (!registers)
-        return -ENODEV;
-    if (opened)
-        return -EBUSY;
-    opened = true;
-    return 0;
-}
-
-void hda_close(void) {
-    for (int i = 0; i < DRAIN_TICKS && running && queued; i++)
-        process_sleep_uninterruptible(&queued, 1);
-    stop();
-    opened = false;
-}
-
-// What the controller has played since last time becomes silence, so stopping
-// writing never repeats what came before.
-void hda_tick(void) {
-    if (!running)
-        return;
-
-    uint32_t at = r32(stream + SD_LPIB) % BUFFER_BYTES;
-    uint32_t played = (at + BUFFER_BYTES - play_at) % BUFFER_BYTES;
-
-    for (uint32_t done = 0; done < played;) {
-        uint32_t offset = (play_at + done) % BUFFER_BYTES, n = PAGE_SIZE - offset % PAGE_SIZE;
-
-        n = n < played - done ? n : played - done;
-        memset(pages[offset / PAGE_SIZE] + offset % PAGE_SIZE, 0, n);
-        done += n;
-    }
-    play_at = at;
-    if (played >= queued) {
-        // It's caught up, so what comes next goes just after where it is.
-        queued = 0;
-        write_at = (at + GUARD) % BUFFER_BYTES;
-        if (++idle >= IDLE_TICKS)
-            stop();
-    } else {
-        queued -= played;
-        idle = 0;
-    }
-    process_wakeup(&queued);
-}
-
-static uint32_t room(void) {
-    uint32_t used = queued + GUARD;
-
-    return used < BUFFER_BYTES ? (BUFFER_BYTES - used) & ~(AUDIO_FRAME_BYTES - 1) : 0;
-}
-
-bool hda_writable(void) {
-    return room() > 0;
-}
-
-int64_t hda_write(const void *buf, size_t len, bool nonblocking) {
-    const uint8_t *from = buf;
-    size_t done = 0;
-
-    len &= ~(size_t)(AUDIO_FRAME_BYTES - 1);
-    while (done < len) {
-        uint32_t n = room();
-
-        if (n == 0) {
-            if (nonblocking)
-                break;
-            if (!process_sleep(&queued))
-                return done ? (int64_t)done : -EINTR;
-            continue;
-        }
-        n = n < len - done ? n : len - done;
-        for (uint32_t copied = 0; copied < n;) {
-            uint32_t offset = (write_at + copied) % BUFFER_BYTES, part = PAGE_SIZE - offset % PAGE_SIZE;
-
-            part = part < n - copied ? part : n - copied;
-            memcpy(pages[offset / PAGE_SIZE] + offset % PAGE_SIZE, from + done + copied, part);
-            copied += part;
-        }
-        write_at = (write_at + n) % BUFFER_BYTES;
-        queued += n;
-        done += n;
-        idle = 0;
-        if (!running)
-            start();
-    }
-    return done ? (int64_t)done : -EAGAIN;
-}
-
-int hda_ioctl(uint64_t request, void *arg) {
-    switch (request) {
-    case AUDIO_SET_RATE: {
-        int bits = rate_bits(*(int *)arg);
-
-        if (bits < 0)
-            return -EINVAL;
-        stop();
-        format = bits | FORMAT_16_BIT | FORMAT_STEREO;
-        for (int p = 0; p < path_count; p++)
-            command(paths[p][path_lengths[p] - 1], SET_FORMAT, format);
-        return 0;
-    }
-    case AUDIO_GET_DELAY:
-        *(int *)arg = queued;
-        return 0;
-    case AUDIO_FLUSH:
-        stop();
-        return 0;
-    }
-    return -ENOTTY;
 }

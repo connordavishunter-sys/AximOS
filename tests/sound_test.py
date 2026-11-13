@@ -1,5 +1,6 @@
 """Checks the sound card plays what's written to /dev/audio: a tone in each ear,
-at two rates, with nothing after it, recorded from QEMU's side."""
+at two rates, with nothing after it, two programs' at once, and the volume and
+mute, recorded from QEMU's side."""
 import os, time, wave
 import numpy as np
 from vm import VM, WORK, check, compile_program, disk_copy, finish, put
@@ -20,6 +21,27 @@ def heard(path):
 def pitch(x, rate=48000):
     spectrum = np.abs(np.fft.rfft(x * np.hanning(len(x))))
     return np.argmax(spectrum) * rate / len(x)
+
+
+def pitches(x, rate=48000):
+    """The two strongest, highest first."""
+    spectrum = np.abs(np.fft.rfft(x * np.hanning(len(x))))
+    found = []
+    for i in np.argsort(spectrum)[::-1]:
+        f = i * rate / len(x)
+        if all(abs(f - g) > 50 for g in found):
+            found.append(f)
+        if len(found) == 2:
+            return sorted(found, reverse=True)
+
+
+def recorded(v, name, command, secs=4):
+    path = f'{v.dir}/{name}.wav'
+    v.record(path)
+    time.sleep(0.3)
+    o = v.run(command, secs)
+    v.command('stopcapture 0'); time.sleep(0.5)
+    return o, heard(path)
 
 
 v = VM(disk=img)
@@ -47,6 +69,24 @@ try:
             quiet = np.abs(sound[:, 1]) < 300 # 500 Hz crosses zero for 2 samples at most
             runs = np.diff(np.flatnonzero(np.diff(np.r_[0, quiet.astype(int), 0])))[::2]
             check('without gaps', runs.max(initial=0) < 8, runs.max(initial=0))
+
+    # Two at once, one changed to the other's rate, mixed together.
+    o, sound = recorded(v, 'both', 'tone 48000 1000 500 & tone 44100 700 300; wait', 4)
+    middle = sound[len(sound) // 4: 3 * len(sound) // 4]
+    found = (pitches(middle[:, 0]), pitches(middle[:, 1]))
+    check('two programs play at once, mixed', len(sound) and all(f and abs(f[0] - a) < 10 and abs(f[1] - b) < 10
+          for f, (a, b) in zip(found, ((1000, 700), (500, 300)))), found)
+
+    o = v.run('volume 50')
+    check('volume sets it', 'volume 50' in o, o)
+    o, sound = recorded(v, 'half', 'tone')
+    loudest = np.abs(sound).max(initial=0)
+    check('which plays a quarter as loud', 2700 < loudest < 3300, loudest)
+    v.run('volume mute')
+    o, sound = recorded(v, 'muted', 'tone')
+    check('and muting it silences it', np.abs(sound).max(initial=0) == 0, np.abs(sound).max(initial=0))
+    o = v.run('volume 100 unmute')
+    check('until unmuted', 'volume 100\n' in o, o)
 finally:
     v.close()
 finish()
