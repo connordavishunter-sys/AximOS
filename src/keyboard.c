@@ -1,6 +1,7 @@
 #include <errno_values.h>
 #include <io.h>
 #include <key_event.h>
+#include <irq.h>
 #include <keyboard.h>
 #include <limine.h>
 #include <mm.h>
@@ -70,6 +71,12 @@ static bool events_open;
 
 static uint8_t modifiers;
 static bool extended;
+
+// The key held down, which repeats: every REPEAT_TICKS once it's been held DELAY_TICKS.
+#define DELAY_TICKS 50
+#define REPEAT_TICKS 3
+static uint16_t held;
+static uint64_t held_since;
 
 static void wait_input_empty(void) {
     for (int i = 0; i < TIMEOUT && (inb(PS2_STATUS) & STATUS_INPUT_FULL); i++)
@@ -246,6 +253,42 @@ static void to_console(uint16_t code) {
     push(&c, 1);
 }
 
+static void deliver(uint16_t code, bool pressed) {
+    if (events_open) {
+        if (events_count < EVENT_COUNT) {
+            events[(events_head + events_count++) % EVENT_COUNT] = (struct key_event){
+                .code = code, .pressed = pressed, .modifiers = modifiers, .text = pressed ? key_text(code) : 0,
+            };
+            process_wakeup(events);
+        }
+    } else if (pressed) {
+        to_console(code);
+    }
+}
+
+static bool is_modifier(uint16_t code) {
+    switch (code) {
+    case KEY_LEFT_SHIFT:
+    case KEY_RIGHT_SHIFT:
+    case KEY_LEFT_CTRL:
+    case KEY_RIGHT_CTRL:
+    case KEY_LEFT_ALT:
+    case KEY_RIGHT_ALT:
+    case KEY_LEFT_SUPER:
+    case KEY_RIGHT_SUPER:
+    case KEY_CAPS_LOCK:
+        return true;
+    }
+    return false;
+}
+
+void keyboard_tick(void) {
+    uint64_t held_for = irq_ticks() - held_since;
+
+    if (held && held_for >= DELAY_TICKS && (held_for - DELAY_TICKS) % REPEAT_TICKS == 0)
+        deliver(held, true);
+}
+
 void keyboard_handle_byte(uint8_t byte) {
     if (byte == SC_EXTENDED) {
         extended = true;
@@ -260,17 +303,20 @@ void keyboard_handle_byte(uint8_t byte) {
     if (code == (KEY_EXTENDED | KEY_LEFT_SHIFT) || code == (KEY_EXTENDED | KEY_RIGHT_SHIFT))
         return;
 
-    update_modifiers(code, pressed);
-    if (events_open) {
-        if (events_count < EVENT_COUNT) {
-            events[(events_head + events_count++) % EVENT_COUNT] = (struct key_event){
-                .code = code, .pressed = pressed, .modifiers = modifiers, .text = pressed ? key_text(code) : 0,
-            };
-            process_wakeup(events);
+    // Keys repeat here, at the same pace whatever the keyboard does, so its own
+    // repeats are left out.
+    if (pressed && code == held)
+        return;
+    if (!is_modifier(code)) {
+        if (pressed) {
+            held = code;
+            held_since = irq_ticks();
+        } else if (code == held) {
+            held = 0;
         }
-    } else if (pressed) {
-        to_console(code);
     }
+    update_modifiers(code, pressed);
+    deliver(code, pressed);
 }
 
 // The keyboard and mouse share a controller and one data port, and the status

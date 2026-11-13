@@ -20,6 +20,9 @@ void *keyboard_channel(void);
 // Also called once interrupts are routed, for anything that came before.
 void keyboard_handle_irq(void);
 
+// Called on every tick, to repeat the key held down.
+void keyboard_tick(void);
+
 // Takes a byte the controller says came from the keyboard.
 void keyboard_handle_byte(uint8_t byte);
 

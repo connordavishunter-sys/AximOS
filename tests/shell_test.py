@@ -1,5 +1,5 @@
 """Checks a dash session at the console: builtins, programs, job control and the terminal."""
-import time
+import re, time
 
 from vm import VM, check, finish
 
@@ -53,6 +53,13 @@ try:
     o = v.run('cat /tmp/note'); check('text editor', 'words' in o, o)
     v.run('top -n 2 -d 0.2', 1.5)
     o = v.run('echo after-top'); check('top exits', '\nafter-top\n' in o, o)
+
+    # Holding a key types it, then after half a second again about 30 times a second.
+    v.type('echo ['); v.command('sendkey a 1000'); time.sleep(1.5); v.type(']\n'); time.sleep(0.5)
+    held = re.findall(r'^\[(a+)\]$', v.text(), re.M)
+    check('a held key repeats', held and 12 <= len(held[-1]) <= 20, held)
+    v.command('sendkey shift 1000'); time.sleep(1.5)
+    o = v.run('echo after-shift'); check("Shift doesn't", '\nafter-shift\n' in o and '/$ \n/$' not in o, o)
 
     at = v.mark(); v.type('exit\n')
     check('exit starts a new shell', v.wait('/$ ', 3, at), v.text(at))

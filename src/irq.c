@@ -209,6 +209,7 @@ void irq_handle(const struct interrupt_frame *frame) {
         process_wake_expired();
         net_tick();
         hda_tick();
+        keyboard_tick();
     }
 
     if (vector == VECTOR_TIMER && !this_cpu()->running)
