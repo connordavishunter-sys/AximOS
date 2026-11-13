@@ -14,6 +14,7 @@
 #define FILES "/system/bin/gui/files"
 #define EDITOR "/system/bin/gui/editor"
 #define VIEWER "/system/bin/gui/viewer"
+#define PLAYER "/system/bin/gui/player"
 
 static struct gui_window *window;
 static char command[GUI_PATH_MAX], status[GUI_PATH_MAX + 64];
@@ -79,8 +80,8 @@ static bool start(const char *const argv[]) {
     return pid > 0;
 }
 
-// Folders open in Files, pictures in the viewer and other files in the editor, and
-// anything else is a command for the shell.
+// Folders open in Files, pictures in the viewer, sounds in the player and other
+// files in the editor, and anything else is a command for the shell.
 static void run(void) {
     char first[GUI_PATH_MAX], program[GUI_PATH_MAX];
     struct stat st;
@@ -93,9 +94,11 @@ static void run(void) {
         return;
     }
     if (!strcmp(first, at) && stat(first, &st) == 0 && (S_ISDIR(st.st_mode) || access(first, X_OK) < 0)) {
-        const char *with = S_ISDIR(st.st_mode)                            ? FILES
-                         : gui_file_icon(first, false) == gui_icon("image") ? VIEWER
-                                                                            : EDITOR;
+        const struct gui_image *icon = gui_file_icon(first, false);
+        const char *with = S_ISDIR(st.st_mode)          ? FILES
+                         : icon == gui_icon("image") ? VIEWER
+                         : icon == gui_icon("audio") ? PLAYER
+                                                     : EDITOR;
 
         started = start((const char *[]){with, first, NULL});
     } else if (find_program(first, program)) {

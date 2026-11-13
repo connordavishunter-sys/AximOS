@@ -199,6 +199,7 @@ const struct gui_image *gui_icon(const char *name) {
 const struct gui_image *gui_file_icon(const char *name, bool folder) {
     static const char *const images[] = {"png", "jpg", "jpeg", "bmp", NULL};
     static const char *const texts[] = {"txt", "md", "c", "h", "py", "sh", "conf", "log", "json", "html", "css", NULL};
+    static const char *const sounds[] = {"wav", "mp3", "flac", "ogg", "oga", "opus", "aac", NULL};
     const char *dot = strrchr(name, '.');
 
     if (folder)
@@ -210,6 +211,10 @@ const struct gui_image *gui_file_icon(const char *name, bool folder) {
     for (int i = 0; dot && texts[i]; i++) {
         if (!strcasecmp(dot + 1, texts[i]))
             return gui_icon("text");
+    }
+    for (int i = 0; dot && sounds[i]; i++) {
+        if (!strcasecmp(dot + 1, sounds[i]))
+            return gui_icon("audio");
     }
     return gui_icon("file");
 }

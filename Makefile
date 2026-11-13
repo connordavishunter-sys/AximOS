@@ -8,7 +8,7 @@ KERNEL := $(BUILD)/kernel.elf
 ISO := $(BUILD)/aximos.iso
 ISO_ROOT := $(BUILD)/iso_root
 DISK := $(BUILD)/disk.img
-DISK_SIZE_MB := 64
+DISK_SIZE_MB := 128
 
 OBJS := $(patsubst src/%,$(BUILD)/%.o,$(basename $(wildcard src/*.c src/*.S)))
 
@@ -25,7 +25,20 @@ LIBC_SO_OBJS := $(patsubst user/libc/%,$(BUILD)/user/libc_pic/%.o,$(basename $(f
 # linked against. The apps go in /system/bin/gui, where wm's start menu finds them.
 LIBGUI_SO := $(BUILD)/user/libgui.so
 LIBGUI_SO_OBJS := $(patsubst user/libgui/%.c,$(BUILD)/user/libgui_pic/%.o,$(wildcard user/libgui/*.c))
-GUI_APPS := guidemo term fbdemo widgets editor files viewer settings
+GUI_APPS := guidemo term fbdemo widgets editor files viewer settings player
+
+# /system/lib/libaudio.so reads and writes sound files, through a library for each
+# kind, which it loads when one's first opened. Those wrap libraries from elsewhere,
+# built as archives by ports/build.sh, and Vorbis and Opus share libogg.so.
+LIBAUDIO_SO := $(BUILD)/user/libaudio.so
+CODECS := wav mp3 flac vorbis opus aac
+CODEC_SOS := $(CODECS:%=$(BUILD)/user/lib%.so)
+LIBOGG_SO := $(BUILD)/user/libogg.so
+CODEC_DIR := $(BUILD)/ports/codecs
+CODEC_PORTS := ogg vorbis opus flac mp3 aac
+CODEC_ARCHIVES := $(addprefix $(CODEC_DIR)/,ogg.a vorbis.a opus.a flac.a shine.a faad.a faac.a)
+AUDIO_APPS := convert player
+LIBGCC := $(shell $(CC) -print-libgcc-file-name)
 
 # The time zones, from the host's tz database, without its copies under posix/ and
 # right/ and anything that isn't a zone.
@@ -39,7 +52,7 @@ MBEDTLS_LIBS := $(MBEDTLS)/library/libmbedtls.a $(MBEDTLS)/library/libmbedx509.a
 
 # Every folder in user/ but the libraries is a program. init goes in /system/boot, the
 # GUI apps in /system/bin/gui and the others in /system/bin. rootfs/ is copied onto the disk as it is.
-PROGRAMS := $(filter-out libc libgui,$(notdir $(wildcard user/*)))
+PROGRAMS := $(filter-out libc libgui libaudio codecs,$(notdir $(wildcard user/*)))
 PROGRAM_ELFS := $(PROGRAMS:%=$(BUILD)/user/%.elf)
 PROGRAM_OBJS := $(patsubst user/%.c,$(BUILD)/user/%.o,$(foreach p,$(PROGRAMS),$(wildcard user/$(p)/*.c)))
 ROOTFS_FILES := $(shell find rootfs -type f)
@@ -124,6 +137,42 @@ $(BUILD)/user/libgui_pic/%.o: user/libgui/%.c
 $(LIBGUI_SO): $(LIBGUI_SO_OBJS) $(LIBC_SO)
 	$(LD) -m elf_x86_64 -nostdlib -shared --hash-style=sysv -soname libgui.so -z noexecstack $^ -o $@
 
+SHARED := $(LD) -m elf_x86_64 -nostdlib -shared --hash-style=sysv -z noexecstack
+
+$(BUILD)/user/libaudio_pic/%.o: user/libaudio/%.c
+	@mkdir -p $(@D)
+	$(CC) $(filter-out -fno-pic -fno-pie,$(USER_CFLAGS)) -Iuser/libaudio/include -fPIC -c $< -o $@
+
+$(LIBAUDIO_SO): $(patsubst user/libaudio/%.c,$(BUILD)/user/libaudio_pic/%.o,$(wildcard user/libaudio/*.c)) $(LIBC_SO)
+	$(SHARED) -soname libaudio.so $^ -o $@
+
+$(CODEC_ARCHIVES) &: $(LIBC_SO) ports/build.sh ports/aximos-cc
+	for p in $(CODEC_PORTS); do ports/build.sh $$p || exit 1; done
+
+$(LIBOGG_SO): $(CODEC_ARCHIVES) $(LIBC_SO)
+	$(SHARED) -soname libogg.so --whole-archive $(CODEC_DIR)/ogg.a --no-whole-archive $(LIBC_SO) -o $@
+
+# Each codec is its wrapper, the archives it wraps, and what those need.
+CODEC_INCLUDES_mp3 := -I$(BUILD)/ports/minimp3-ea99364f61c14656440e8d77e9c233ccf3124633 -I$(BUILD)/ports/shine-3.1.1/src/lib
+CODEC_INCLUDES_flac := -I$(BUILD)/ports/flac-1.5.0/include -DFLAC__NO_DLL
+CODEC_INCLUDES_vorbis := -I$(BUILD)/ports/libvorbis-1.3.7/include -I$(BUILD)/ports/libogg-1.3.6/include
+CODEC_INCLUDES_opus := -I$(BUILD)/ports/opus-1.6.1/include -I$(BUILD)/ports/libogg-1.3.6/include
+CODEC_INCLUDES_aac := -I$(BUILD)/ports/faad2-2.11.2/include -I$(BUILD)/ports/faac-faac-2.2/include
+CODEC_LIBS_mp3 := $(CODEC_DIR)/shine.a
+CODEC_LIBS_flac := $(CODEC_DIR)/flac.a
+CODEC_LIBS_vorbis := $(CODEC_DIR)/vorbis.a $(LIBOGG_SO)
+CODEC_LIBS_opus := $(CODEC_DIR)/opus.a $(LIBOGG_SO)
+CODEC_LIBS_aac := $(CODEC_DIR)/faad.a $(CODEC_DIR)/faac.a
+
+$(BUILD)/user/codecs/%.o: user/codecs/%.c | $(CODEC_ARCHIVES)
+	@mkdir -p $(@D)
+	$(CC) $(filter-out -fno-pic -fno-pie -Os,$(USER_CFLAGS)) -O2 -Iuser/libaudio/include $(CODEC_INCLUDES_$*) \
+		-fPIC -c $< -o $@
+
+.SECONDEXPANSION:
+$(CODEC_SOS): $(BUILD)/user/lib%.so: $(BUILD)/user/codecs/%.o $$(CODEC_LIBS_$$*) $(LIBAUDIO_SO) $(LIBC_SO)
+	$(SHARED) -soname lib$*.so $^ $(LIBGCC) -o $@
+
 $(KERNEL): $(OBJS) src/linker.ld
 	$(LD) $(LDFLAGS) -T src/linker.ld $(OBJS) -o $@
 
@@ -139,6 +188,8 @@ $(BUILD)/user/$(1).elf: $(CRT0) $(patsubst user/%.c,$(BUILD)/user/%.o,$(wildcard
 endef
 $(foreach p,$(filter-out init,$(PROGRAMS)),$(eval $(call PROGRAM,$(p))))
 $(addprefix $(BUILD)/user/,$(addsuffix .elf,wm run $(GUI_APPS))): $(LIBGUI_SO)
+$(addprefix $(BUILD)/user/,$(addsuffix .elf,$(AUDIO_APPS))): $(LIBAUDIO_SO)
+$(foreach a,$(AUDIO_APPS),$(BUILD)/user/$(a)/%.o): USER_CFLAGS += -Iuser/libaudio/include
 
 $(BUILD)/user/init.elf: $(CRT0) $(patsubst user/%.c,$(BUILD)/user/%.o,$(wildcard user/init/*.c)) $(LIBC)
 	$(LD) $(USER_LDFLAGS) -static $+ -o $@
@@ -163,7 +214,8 @@ $(ZONES):
 	tar -C $(ZONEINFO) -chf - --exclude=./posix --exclude=./right . | tar -C $@ -xf -
 	find $@ -type f | while read -r f; do [ "$$(head -c 4 "$$f")" = TZif ] || rm "$$f"; done
 
-$(DISK): $(PROGRAM_ELFS) $(LIBC_SO) $(LIBGUI_SO) $(ROOTFS_FILES) $(DASH) | $(ZONES)
+$(DISK): $(PROGRAM_ELFS) $(LIBC_SO) $(LIBGUI_SO) $(LIBAUDIO_SO) $(LIBOGG_SO) $(CODEC_SOS) $(ROOTFS_FILES) $(DASH) \
+		| $(ZONES)
 	rm -f $@
 	mkfs.fat -F 32 -C $@ $$(($(DISK_SIZE_MB) * 1024))
 	mcopy -s -i $@ rootfs/system ::/
@@ -171,6 +223,7 @@ $(DISK): $(PROGRAM_ELFS) $(LIBC_SO) $(LIBGUI_SO) $(ROOTFS_FILES) $(DASH) | $(ZON
 	mcopy -s -i $@ $(ZONES) ::/system/share/
 	$(call install_stripped,$(LIBC_SO),/system/lib/libc.so)
 	$(call install_stripped,$(LIBGUI_SO),/system/lib/libgui.so)
+	for l in $(LIBAUDIO_SO) $(LIBOGG_SO) $(CODEC_SOS); do $(call install_stripped,$$l,/system/lib/$$(basename $$l)); done
 	$(call install_stripped,$(BUILD)/user/init.elf,/system/boot/init)
 	for p in $(filter-out init $(GUI_APPS),$(PROGRAMS)); do $(call install_stripped,$(BUILD)/user/$$p.elf,/system/bin/$$p); done
 	for p in $(GUI_APPS); do $(call install_stripped,$(BUILD)/user/$$p.elf,/system/bin/gui/$$p); done

@@ -228,6 +228,24 @@ def run(d, s):
     d.polygon([(6 * s, 7 * s), (11.5 * s, 9.5 * s), (6 * s, 12 * s)], fill=(60, 170, 90))
 
 
+def note(d, s, x, y, size, colour):
+    """A quaver, with its head's middle at x, y."""
+    d.ellipse(((x - 1.6 * size) * s, (y - 1.2 * size) * s, (x + 1.6 * size) * s, (y + 1.2 * size) * s), fill=colour)
+    d.rectangle(((x + 1.6 * size - 0.9) * s, (y - 7 * size) * s, (x + 1.6 * size) * s, y * s), fill=colour)
+    d.polygon([((x + 1.6 * size) * s, (y - 7 * size) * s), ((x + 4 * size) * s, (y - 5 * size) * s),
+               ((x + 4 * size) * s, (y - 3.8 * size) * s), ((x + 1.6 * size) * s, (y - 5.5 * size) * s)], fill=colour)
+
+
+def audio(d, s):
+    page(d, s)
+    note(d, s, 7, 11.5, 1, (220, 90, 60))
+
+
+def player(d, s):
+    d.ellipse((1 * s, 1 * s, 15 * s, 15 * s), fill=(240, 120, 50))
+    note(d, s, 6.8, 10.5, 1, (255, 255, 255))
+
+
 def squares(d, s):
     for i, colour in enumerate(((230, 70, 80), (70, 190, 110), (70, 120, 230), (240, 190, 60))):
         x, y = 1.5 + (i % 2) * 7, 1.5 + (i // 2) * 7
@@ -240,8 +258,9 @@ wallpaper().save(SHARE + '/wallpapers/default.jpg', quality=90)
 for name, paint in (('aurora', aurora), ('sunset', sunset), ('ocean', ocean), ('hills', hills), ('dunes', dunes)):
     paint().save(f'{SHARE}/wallpapers/{name}.jpg', quality=90)
 for name, paint in (('folder', folder), ('file', page), ('text', lambda d, s: page(d, s, lines=True)),
-                    ('image', picture_icon), ('program', program)):
+                    ('image', picture_icon), ('program', program), ('audio', audio)):
     icon(paint).save(f'{SHARE}/icons/{name}.png', optimize=True)
 for name, paint in (('term', terminal), ('editor', editor), ('files', files), ('widgets', widgets),
-                    ('guidemo', demo), ('fbdemo', squares), ('viewer', picture_icon), ('settings', gear), ('run', run)):
+                    ('guidemo', demo), ('fbdemo', squares), ('viewer', picture_icon), ('settings', gear), ('run', run),
+                    ('player', player)):
     icon(paint).save(f'{SHARE}/icons/apps/{name}.png', optimize=True)

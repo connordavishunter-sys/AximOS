@@ -160,10 +160,10 @@ try:
     check('New folder', v.wait('files: made /tmp/docs', 5, at) and v.wait('files: in /tmp: docs/ copy.txt hello.txt', 5, at),
           v.text(at))
 
-    # A folder's menu: Open, Open in new tab, a line, Copy path, Rename and Delete,
-    # which asks first, with the keyboard on its Delete button.
+    # A folder's menu: Open, Open in new tab, a line, Cut, Copy, Copy path, Rename
+    # and Delete, which asks first, with the keyboard on its Delete button.
     at = v.mark()
-    menu(80 + x + 40, 84 + y + 2 + 11, 4, 1)
+    menu(80 + x + 40, 84 + y + 2 + 11, 6, 1)
     time.sleep(0.5)
     check('Delete asks first', 'files: deleted' not in v.text(at), v.text(at))
     v.key('ret')
@@ -252,7 +252,7 @@ try:
     # The start menu has each app's icon.
     v.key('meta_l'); time.sleep(0.5)
     w, h, px = v.screenshot()
-    menu_top = 772 - 11 * 24 - 9 - 8
+    menu_top = 772 - 12 * 24 - 9 - 8
     icon = [px(4 + 6 + 8, menu_top + 4 + i * 24 + 12) for i in range(3)]
     check('icons in the start menu', all(p not in (0x141821, 0x3D63DD) for p in icon), [hex(p) for p in icon])
     v.key('esc')

@@ -13,6 +13,7 @@
 #define MAX_TABS 8
 #define EDITOR "/system/bin/gui/editor"
 #define VIEWER "/system/bin/gui/viewer"
+#define PLAYER "/system/bin/gui/player"
 #define TERM "/system/bin/gui/term"
 #define LIST "##entries"
 #define ADDRESS "##folder"
@@ -207,7 +208,8 @@ static void open_with(const char *program) {
     start(program, path, NULL);
 }
 
-// Folders open here, pictures in the viewer and other files in the editor.
+// Folders open here, pictures in the viewer, sounds in the player and other files
+// in the editor.
 static void open_selected(void) {
     char path[PATH_MAX];
 
@@ -217,7 +219,9 @@ static void open_selected(void) {
     if (chosen()->folder)
         read_folder(path, NULL);
     else
-        open_with(icons[selected] == gui_icon("image") ? VIEWER : EDITOR);
+        open_with(icons[selected] == gui_icon("image")   ? VIEWER
+                  : icons[selected] == gui_icon("audio") ? PLAYER
+                                                         : EDITOR);
 }
 
 static void run_selected(void) {
