@@ -29,7 +29,9 @@ struct audio_stream {
     uint32_t head, fill; // where the oldest byte is, and how many are waiting
     uint32_t step, frac; // input samples an output apart, and between which two it is
     int16_t now[2], next[2];
-    bool primed; // now and next are the two it's between
+    bool primed;    // now and next are the two it's between
+    bool mixed;     // its last sample's been mixed, to end at until in the card's buffer
+    uint32_t until;
 };
 
 static struct audio_stream streams[AUDIO_STREAMS];
@@ -55,20 +57,21 @@ static bool take_frame(struct audio_stream *s, int16_t frame[2]) {
     return true;
 }
 
-// Adds one output sample of a stream, between two of its own when the rates differ.
-static void add_sample(struct audio_stream *s, int32_t sum[2]) {
+// Adds one output sample of a stream, between two of its own when the rates
+// differ, returning whether it had one.
+static bool add_sample(struct audio_stream *s, int32_t sum[2]) {
     int16_t frame[2];
 
     if (s->rate == card_rate) {
-        if (take_frame(s, frame)) {
-            sum[0] += frame[0];
-            sum[1] += frame[1];
-        }
-        return;
+        if (!take_frame(s, frame))
+            return false;
+        sum[0] += frame[0];
+        sum[1] += frame[1];
+        return true;
     }
     if (!s->primed) {
         if (s->fill < 2 * AUDIO_FRAME_BYTES)
-            return;
+            return false;
         take_frame(s, s->now);
         take_frame(s, s->next);
         s->frac = 0;
@@ -80,6 +83,7 @@ static void add_sample(struct audio_stream *s, int32_t sum[2]) {
         memcpy(s->now, s->next, sizeof(s->now));
         s->primed = take_frame(s, s->next);
     }
+    return true;
 }
 
 // Volume follows its square, which sounds more even, as a fraction of ONE.
@@ -95,8 +99,12 @@ static void mix(uint32_t frames) {
         int32_t sum[2] = {0, 0};
 
         for (int k = 0; k < AUDIO_STREAMS; k++) {
-            if (streams[k].used)
-                add_sample(&streams[k], sum);
+            struct audio_stream *s = &streams[k];
+
+            if (s->used && add_sample(s, sum)) {
+                s->mixed = true;
+                s->until = (write_at + (i + 1) * AUDIO_FRAME_BYTES) % HDA_BUFFER_BYTES;
+            }
         }
         for (int c = 0; c < 2; c++) {
             int32_t v = (int32_t)(((int64_t)sum[c] * g) >> 16);
@@ -136,6 +144,8 @@ static void set_step(struct audio_stream *s) {
 static void stop(void) {
     hda_stop();
     running = false;
+    for (int k = 0; k < AUDIO_STREAMS; k++)
+        streams[k].mixed = false;
     process_wakeup(streams);
 }
 
@@ -257,10 +267,14 @@ int audio_ioctl(struct audio_stream *s, uint64_t request, void *arg) {
             stop(); // so the next to play picks the card's rate
         return 0;
     }
-    case AUDIO_GET_DELAY:
-        // What's waiting, and what's been mixed but not heard, in this stream's samples.
-        *(int *)arg = (int)(s->fill + (uint64_t)ahead / AUDIO_FRAME_BYTES * s->rate / card_rate * AUDIO_FRAME_BYTES);
+    case AUDIO_GET_DELAY: {
+        // What's waiting, and what of it's been mixed but not heard, in its own samples.
+        uint32_t heard_in = s->mixed && running ? (s->until + HDA_BUFFER_BYTES - play_at) % HDA_BUFFER_BYTES : 0;
+
+        heard_in = heard_in <= ahead ? heard_in : 0; // or it's been played already
+        *(int *)arg = (int)(s->fill + (uint64_t)heard_in / AUDIO_FRAME_BYTES * s->rate / card_rate * AUDIO_FRAME_BYTES);
         return 0;
+    }
     case AUDIO_FLUSH:
         s->head = s->fill = 0;
         s->primed = false;

@@ -59,12 +59,14 @@ static int64_t delay(int fd, int rate, int out_rate) {
 }
 
 // Waits while paused, returning false if something else was asked for meanwhile.
-// Pausing forgets what's waiting to be heard, so it goes back to where it stopped.
+// Pausing forgets what's waiting to be mixed, and carries on after what was mixed
+// already, which is still heard.
 static bool wait_while_paused(unsigned ask, int fd, struct audio_file *f, int64_t *base, int64_t *written, int rate,
                               int out_rate) {
-    int64_t at = *base + *written - delay(fd, rate, out_rate);
+    int64_t waiting = delay(fd, rate, out_rate), at;
 
     ioctl(fd, AUDIO_FLUSH, NULL);
+    at = *base + *written - waiting + delay(fd, rate, out_rate);
     shared.position = at;
     while (shared.paused && shared.asked == ask)
         pthread_cond_wait(&changed, &lock);
