@@ -1,5 +1,6 @@
-"""Checks the settings app: the taskbar's clock, window shadows, the light theme,
-which every program follows at once, and the time zone, all kept for next time."""
+"""Checks the settings app: window shadows, the light theme, which every program
+follows at once, the wallpaper, the taskbar's clock, the time zone and the
+resolution, all kept for next time."""
 import re, time
 from vm import VM, check, finish
 
@@ -36,27 +37,21 @@ try:
     v.run('echo none > /system/etc/wallpaper; rm -f /system/etc/gui.conf')
     at = v.mark()
     v.type("wm widgets 'sleep 1; settings'\n") # in that order, so settings is second and on top
-    check('settings starts', v.wait('settings: at zones', 10, at), v.text(at))
+    check('settings starts', v.wait('settings: at shadows', 10, at), v.text(at))
     time.sleep(1)
     mouse = Pointer(v)
     where = lambda name: [tuple(map(int, m)) for m in
                           re.findall(rf'settings: at {name} (\d+) (\d+) (\d+) (\d+)', v.text())][-1]
     middle = lambda name, dx=40: (SETTINGS_X + where(name)[0] + dx, SETTINGS_Y + where(name)[1] + where(name)[3] // 2)
 
-    # A 24 hour clock, 01:23, ends 12 pixels from the right, starting 52 from it,
-    # and a 12 hour one, 1:23 AM, is wider.
-    mouse.to(1270, 700)
-    w, h, px = v.screenshot()
-    before = count(px, 1200, 778, 1226, 792, 0xFFFFFF)
-    at = v.mark()
-    mouse.click(*middle('clock')); v.key('down'); v.key('ret')
-    check('choosing a 12 hour clock', v.wait('settings: clock 12', 5, at), v.text(at))
-    mouse.to(1270, 700); time.sleep(0.5)
-    w, h, px = v.screenshot()
-    after = count(px, 1200, 778, 1226, 792, 0xFFFFFF)
-    check('changes the clock on the taskbar', before == 0 and after > 10, (before, after))
+    def tab(name):
+        at = v.mark()
+        v.key('ctrl-tab')
+        check(f'Ctrl+Tab goes to {name}', v.wait(f'settings: tab {name}', 5, at), v.text(at))
+        time.sleep(0.5)
 
     # Shadows: the desktop just under the settings window.
+    w, h, px = v.screenshot()
     under = (300, SETTINGS_Y + 540 + 4)
     check('a shadow to start with', px(*under) != DESKTOP, hex(px(*under)))
     at = v.mark()
@@ -78,6 +73,34 @@ try:
     check('and so does the taskbar', px(700, 790) == LIGHT_TASKBAR, hex(px(700, 790)))
     check('and the other program', px(85, 300) == LIGHT_BACKGROUND, hex(px(85, 300)))
 
+    # Wallpapers, with a thumbnail of each, the default first.
+    check('six wallpapers', all(f'settings: at wallpaper {n} ' in v.text()
+                                for n in ('Default', 'Aurora', 'Dunes', 'Hills', 'Ocean', 'Sunset')), v.text())
+    x, y, tw, th = where('wallpaper Ocean')
+    w, h, px = v.screenshot()
+    thumb = px(SETTINGS_X + x + tw // 2, SETTINGS_Y + y + 60)
+    check('with thumbnails', thumb not in (LIGHT_BACKGROUND, DARK_BACKGROUND), hex(thumb))
+    at = v.mark()
+    mouse.click(SETTINGS_X + x + tw // 2, SETTINGS_Y + y + 40)
+    check('choosing one', v.wait('settings: wallpaper /system/share/wallpapers/ocean.jpg', 5, at), v.text(at))
+    mouse.to(1270, 700); time.sleep(1.5)
+    w, h, px = v.screenshot()
+    check('puts it on the desktop', px(900, 100) != DESKTOP and px(900, 600) != DESKTOP, f'{px(900, 100):x} {px(900, 600):x}')
+
+    # A 24 hour clock, 01:23, ends 12 pixels from the right, starting 52 from it,
+    # and a 12 hour one, 1:23 AM, is wider. It's dark text, in the light theme.
+    tab('Display'); tab('Date & time')
+    mouse.to(1270, 700)
+    w, h, px = v.screenshot()
+    before = count(px, 1200, 778, 1226, 792, 0x1E2129)
+    at = v.mark()
+    mouse.click(*middle('clock')); v.key('down'); v.key('ret')
+    check('choosing a 12 hour clock', v.wait('settings: clock 12', 5, at), v.text(at))
+    mouse.to(1270, 700); time.sleep(0.5)
+    w, h, px = v.screenshot()
+    after = count(px, 1200, 778, 1226, 792, 0x1E2129)
+    check('changes the clock on the taskbar', before == 0 and after > 10, (before, after))
+
     # The time zone, found by searching.
     at = v.mark()
     mouse.click(*middle('search', 60))
@@ -85,15 +108,36 @@ try:
     mouse.double_click(SETTINGS_X + where('zones')[0] + 40, SETTINGS_Y + where('zones')[1] + 2 + 11)
     check('setting the time zone', v.wait('settings: zone Asia/Tokyo', 5, at), v.text(at))
 
+    # The resolution: picked from the list, 1280x800 fifth, then applied. Windows
+    # stay where they were, as they fit.
+    tab('Appearance'); tab('Display')
+    at = v.mark()
+    mouse.click(*middle('resolution')); time.sleep(0.3)
+    v.key('up'); v.key('up'); v.key('up'); v.key('ret'); time.sleep(0.5)
+    check('picking one changes nothing yet', 'settings: 1024x768' not in v.text(at), v.text(at))
+    mouse.click(*middle('apply', 10))
+    check('Apply changes the resolution', v.wait('wm: running at 1024x768', 5, at), v.text(at))
+    check('and settings hears of it', v.wait('settings: screen 1024x768', 5, at), v.text(at))
+    time.sleep(1)
+    w, h, px = v.screenshot()
+    check('the screen is that size', (w, h) == (1024, 768), (w, h))
+    check('with the taskbar at the bottom', px(700, 758) == LIGHT_TASKBAR, hex(px(700, 758)))
+    check('and settings where it was', px(SETTINGS_X + 5, SETTINGS_Y + 300) == LIGHT_BACKGROUND,
+          hex(px(SETTINGS_X + 5, SETTINGS_Y + 300)))
+
     v.key('meta_l-shift-q'); time.sleep(1)
-    o = v.run('cat /system/etc/gui.conf /system/etc/timezone; date +%Z')
-    check('the settings are saved', 'theme light' in o and 'shadows off' in o and 'clock 12' in o, o)
+    o = v.run('cat /system/etc/gui.conf /system/etc/timezone /system/etc/wallpaper; date +%Z')
+    check('the settings are saved', all(s in o for s in ('theme light', 'shadows off', 'clock 12', 'resolution 1024x768')),
+          o)
     check('and the time zone', 'Asia/Tokyo' in o and 'JST' in o, o)
+    check('and the wallpaper', '/system/share/wallpapers/ocean.jpg' in o, o)
 
     at = v.mark()
-    v.type('wm\n'); v.wait('wm: running', 10, at); time.sleep(1)
+    v.type('wm\n')
+    check('and used next time', v.wait('wm: running at 1024x768', 10, at), v.text(at))
+    time.sleep(1)
     w, h, px = v.screenshot()
-    check('and used next time', px(700, 790) == LIGHT_TASKBAR, hex(px(700, 790)))
+    check('with the light taskbar', px(700, 758) == LIGHT_TASKBAR, hex(px(700, 758)))
     v.key('meta_l-shift-q')
 finally:
     v.close()

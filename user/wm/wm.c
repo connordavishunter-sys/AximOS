@@ -56,8 +56,6 @@
 
 // The wallpaper is this, unless /system/etc/wallpaper names another, or "none"
 // for the plain colour.
-#define WALLPAPER_SETTING "/system/etc/wallpaper"
-#define DEFAULT_WALLPAPER "/system/share/wallpapers/default.jpg"
 #define MAX_APPS 32
 #define MENU_WIDTH 200
 #define ITEM_HEIGHT 24 // in the start menu and the Alt+Tab switcher
@@ -154,7 +152,8 @@ enum { EDGE_LEFT = 1, EDGE_RIGHT = 2, EDGE_TOP = 4, EDGE_BOTTOM = 8 };
 
 static struct gui_canvas screen; // composed here, then copied to the framebuffer
 static uint8_t *framebuffer;
-static int pitch;
+static int pitch, fb;
+static bool can_set_mode;
 
 static struct client *clients[MAX_CLIENTS];
 static struct window *windows[MAX_WINDOWS]; // bottom first
@@ -165,6 +164,8 @@ static struct window *focused;
 static uint8_t falloff[SHADOW + 1][SHADOW + 1];
 static struct gui_settings settings;
 static struct gui_canvas wallpaper; // the screen's part of the scaled image, if there is one
+static struct gui_image wallpaper_image; // scaled to cover the screen
+static char wallpaper_path[GUI_PATH_MAX];
 static struct {
     char name[GUI_TITLE_MAX];
     struct gui_image image; // no pixels if there's no such icon
@@ -768,12 +769,7 @@ static void raise_window(struct window *w) {
     add_damage(extent_of(w));
 }
 
-// Settings change the colours, shadows and clock, so everything is drawn again.
-static void load_settings(void) {
-    gui_settings_load(&settings);
-    theme = settings.light ? &light : &dark;
-    add_damage((struct rect){0, 0, screen.width, screen.height});
-}
+static void load_settings(void);
 
 // Opens shared memory a message names, removing the name. Returns its file, or -1.
 static int open_shared(const struct gui_message *m, int flags) {
@@ -893,6 +889,8 @@ static void create_window(struct client *client, const struct gui_message *m) {
     if (switch_choice >= 0)
         add_damage(switcher());
     queue_message(client, &reply);
+    queue_message(client, &(struct gui_message){
+                              .type = GUI_SCREEN, .width = screen.width, .height = screen.height, .x = can_set_mode});
     add_damage(extent_of(w));
     set_focus(w);
 }
@@ -1493,16 +1491,17 @@ static void handle_key(const struct key_event *e) {
 }
 
 // Scaled to cover the screen, keeping its shape, with what's left over either side
-// cut off equally.
+// cut off equally. It's only loaded again when it or the screen's size changes.
 static void load_wallpaper(void) {
-    char path[256] = DEFAULT_WALLPAPER;
-    FILE *setting = fopen(WALLPAPER_SETTING, "r");
-    struct gui_image image, scaled;
+    char path[GUI_PATH_MAX];
+    struct gui_image image;
 
-    if (setting && fgets(path, sizeof(path), setting))
-        path[strcspn(path, "\n")] = '\0';
-    if (setting)
-        fclose(setting);
+    gui_wallpaper_get(path);
+    if (!strcmp(path, wallpaper_path) && wallpaper.width == screen.width && wallpaper.height == screen.height)
+        return;
+    snprintf(wallpaper_path, sizeof(wallpaper_path), "%s", path);
+    gui_image_free(&wallpaper_image);
+    wallpaper = (struct gui_canvas){0};
     if (!strcmp(path, "none"))
         return;
     if (!gui_image_load(path, &image)) {
@@ -1513,7 +1512,7 @@ static void load_wallpaper(void) {
     bool wider = (long)screen.width * image.height >= (long)screen.height * image.width;
     int width = wider ? screen.width : (int)((long)image.width * screen.height / image.height);
     int height = wider ? (int)((long)image.height * screen.width / image.width) : screen.height;
-    bool ok = gui_image_scale(&image, width, height, &scaled);
+    bool ok = gui_image_scale(&image, width, height, &wallpaper_image);
 
     gui_image_free(&image);
     if (!ok) {
@@ -1521,9 +1520,67 @@ static void load_wallpaper(void) {
         return;
     }
     for (long i = 0; i < (long)width * height; i++)
-        scaled.pixels[i] &= 0xFFFFFF;
-    wallpaper = (struct gui_canvas){scaled.pixels + (long)(height - screen.height) / 2 * width + (width - screen.width) / 2,
-                                    screen.width, screen.height, width};
+        wallpaper_image.pixels[i] &= 0xFFFFFF;
+    wallpaper = (struct gui_canvas){
+        wallpaper_image.pixels + (long)(height - screen.height) / 2 * width + (width - screen.width) / 2,
+        screen.width, screen.height, width,
+    };
+}
+
+// Changes the screen's resolution. Tiled windows keep their share of the desktop,
+// and the others move to stay on it.
+static void change_resolution(int width, int height) {
+    struct fb_info info;
+    struct rect was = desktop(), now;
+    uint32_t *pixels = malloc((size_t)width * height * sizeof(uint32_t));
+
+    if (!pixels || fb_set_mode(fb, width, height) < 0 || fb_info(fb, &info) < 0) {
+        free(pixels);
+        printf("wm: can't change to %dx%d\n", width, height);
+        return;
+    }
+    munmap(framebuffer, (size_t)pitch * screen.height);
+    pitch = info.pitch;
+    framebuffer = mmap(NULL, (size_t)pitch * info.height, PROT_READ | PROT_WRITE, MAP_SHARED, fb, 0);
+    free(screen.pixels);
+    screen = (struct gui_canvas){pixels, info.width, info.height, info.width};
+    if (framebuffer == MAP_FAILED) {
+        quitting = true;
+        return;
+    }
+    now = desktop();
+    for (int i = 0; i < window_count; i++) {
+        struct window *w = windows[i];
+        struct rect f = frame_of(w);
+
+        if (w->tiled) {
+            place(w, (struct rect){f.x * now.width / was.width, f.y * now.height / was.height,
+                                   f.width * now.width / was.width, f.height * now.height / was.height});
+            continue;
+        }
+        f.x = f.x + f.width > now.width ? now.width - f.width : f.x;
+        f.y = f.y + f.height > now.height ? now.height - f.height : f.y;
+        move_window(w, (f.x > 0 ? f.x : 0) + BORDER, (f.y > 0 ? f.y : 0) + TITLE_HEIGHT + BORDER);
+    }
+    cursor_x = cursor_x < screen.width ? cursor_x : screen.width - 1;
+    cursor_y = cursor_y < screen.height ? cursor_y : screen.height - 1;
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        if (clients[i])
+            queue_message(clients[i], &(struct gui_message){
+                                          .type = GUI_SCREEN, .width = screen.width, .height = screen.height, .x = 1});
+    }
+    printf("wm: running at %dx%d\n", screen.width, screen.height);
+}
+
+// Settings change the colours, shadows, clock, resolution and wallpaper, so
+// everything is drawn again.
+static void load_settings(void) {
+    gui_settings_load(&settings);
+    theme = settings.light ? &light : &dark;
+    if (can_set_mode && settings.width && (settings.width != screen.width || settings.height != screen.height))
+        change_resolution(settings.width, settings.height);
+    load_wallpaper();
+    add_damage((struct rect){0, 0, screen.width, screen.height});
 }
 
 static int fail(const char *what) {
@@ -1537,7 +1594,7 @@ int main(int argc, char **argv) {
     signal(SIGPIPE, SIG_IGN);
 
     struct fb_info info;
-    int fb = open("/dev/fb0", O_RDWR | O_CLOEXEC);
+    fb = open("/dev/fb0", O_RDWR | O_CLOEXEC);
 
     if (fb < 0 || fb_info(fb, &info) < 0)
         return fail("/dev/fb0");
@@ -1556,6 +1613,7 @@ int main(int argc, char **argv) {
     fcntl(listener, F_SETFL, O_NONBLOCK);
 
     pitch = info.pitch;
+    can_set_mode = info.can_set_mode;
     framebuffer = mmap(NULL, (size_t)pitch * info.height, PROT_READ | PROT_WRITE, MAP_SHARED, fb, 0);
     screen = (struct gui_canvas){malloc((size_t)info.width * info.height * sizeof(uint32_t)), info.width,
                                  info.height, info.width};
@@ -1568,9 +1626,8 @@ int main(int argc, char **argv) {
     for (int i = 1; i < argc; i++)
         launch(argv[i]);
     make_falloff();
-    load_wallpaper();
     load_settings();
-    printf("wm: running at %dx%d\n", screen.width, screen.height);
+    printf("wm: running at %dx%d%s\n", screen.width, screen.height, can_set_mode ? "" : ", which can't change");
     fflush(stdout);
 
     while (!quitting) {

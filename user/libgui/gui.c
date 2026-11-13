@@ -303,12 +303,21 @@ void gui_post(const struct gui_message *event) {
         queue[(queue_head + queue_count++) % QUEUE_SIZE] = *event;
 }
 
+static struct gui_screen screen;
+
+const struct gui_screen *gui_screen(void) {
+    return &screen;
+}
+
 bool gui_next_event(struct gui_message *event) {
     if (queue_count > 0) {
         *event = queue[queue_head];
         queue_head = (queue_head + 1) % QUEUE_SIZE;
         queue_count--;
-        return true;
+    } else if (!gui_receive(connection, event)) {
+        return false;
     }
-    return gui_receive(connection, event);
+    if (event->type == GUI_SCREEN)
+        screen = (struct gui_screen){event->width, event->height, event->x == 1};
+    return true;
 }

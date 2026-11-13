@@ -1,6 +1,7 @@
 """Makes the desktop's wallpaper and icons, into rootfs/system/share. They're kept in
 the repository, so this only needs running again to change them."""
 import math, os, random
+import numpy as np
 from PIL import Image, ImageDraw, ImageFilter
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -35,6 +36,117 @@ def wallpaper(w=1920, h=1200):
     waves = waves.filter(ImageFilter.GaussianBlur(1.2))
     image = Image.composite(Image.new('RGB', (w, h), (190, 200, 255)), image, waves.point(lambda v: v // 3))
     return image
+
+
+def grid(w, h):
+    """Each pixel's x and y, from 0 to 1."""
+    return np.meshgrid(np.linspace(0, 1, w), np.linspace(0, 1, h))
+
+
+def blend(a, b, t):
+    """Colours a to b by t, an array of 0 to 1, as an image's array."""
+    t = np.clip(t, 0, 1)[..., None]
+    return np.array(a) * (1 - t) + np.array(b) * t
+
+
+def image(pixels, blur=0):
+    picture = Image.fromarray(np.clip(pixels, 0, 255).astype(np.uint8))
+    return picture.filter(ImageFilter.GaussianBlur(blur)) if blur else picture
+
+
+def ridge(x, base, height, waves, seed):
+    """A line of hills across, as a height at each x from 0 to 1."""
+    rng = np.random.default_rng(seed)
+    y = np.full_like(x, base)
+    for i in range(waves):
+        y += height / (i + 1) * np.sin(x * (i + 1) * rng.uniform(2, 5) + rng.uniform(0, 6.3))
+    return y
+
+
+def stars(pixels, count, seed, limit=1.0):
+    rng = np.random.default_rng(seed)
+    h, w = pixels.shape[:2]
+    for _ in range(count):
+        x, y, v = rng.integers(0, w), rng.integers(0, int(h * limit)), rng.uniform(80, 255)
+        pixels[y, x] = np.maximum(pixels[y, x], v)
+
+
+def aurora(w=1920, h=1200):
+    """Green and teal curtains over a night sky and dark hills."""
+    x, y = grid(w, h)
+    pixels = blend((6, 12, 28), (14, 32, 48), y)
+    stars(pixels, 900, 1, 0.8)
+    for colour, centre, phase, width in (((40, 220, 140), 0.32, 0.0, 0.10), ((60, 190, 210), 0.42, 2.0, 0.08),
+                                         ((120, 90, 220), 0.25, 4.0, 0.06)):
+        line = centre + 0.08 * np.sin(x * 5 + phase) + 0.03 * np.sin(x * 13 + phase * 2)
+        below = np.clip((y - line) / width, 0, None)
+        above = np.clip((line - y) / 0.012, 0, None)
+        rays = 0.5 + 0.5 * np.sin(x * 70 + phase + np.sin(x * 23) * 1.5) ** 2
+        glow = np.exp(-below * 2.2) * np.exp(-above ** 2) * rays
+        pixels += np.array(colour) * glow[..., None] * 0.8
+    for base, colour, seed in ((0.78, (10, 20, 30), 3), (0.86, (5, 10, 16), 4)):
+        pixels = np.where((y > ridge(x, base, 0.04, 3, seed))[..., None], colour, pixels)
+    return image(pixels, 1.2)
+
+
+def sunset(w=1920, h=1200):
+    """A low sun in an orange and pink sky, behind purple mountains."""
+    x, y = grid(w, h)
+    pixels = blend((60, 40, 110), (250, 130, 90), y / 0.62)
+    pixels = blend(pixels, (255, 200, 120), np.clip((y - 0.45) / 0.2, 0, 1) * 0.7)
+    d = np.hypot((x - 0.62) * w / h, y - 0.56)
+    pixels = blend(pixels, (255, 240, 200), np.exp(-d * 9) * 0.9)
+    pixels = np.where((d < 0.07)[..., None], (255, 236, 190), pixels)
+    for base, colour, seed in ((0.6, (150, 70, 120), 5), (0.7, (100, 45, 100), 6), (0.82, (55, 25, 70), 7),
+                               (0.92, (30, 15, 45), 8)):
+        pixels = np.where((y > ridge(x, base, 0.05, 4, seed))[..., None], colour, pixels)
+    return image(pixels, 1)
+
+
+def ocean(w=1920, h=1200):
+    """A calm sea under a pale sky, with the low sun's light on the water."""
+    x, y = grid(w, h)
+    horizon = 0.5
+    rng = np.random.default_rng(9)
+    sky = blend((110, 160, 215), (235, 225, 215), (y / horizon) ** 1.5)
+    sky = blend(sky, (255, 240, 210), np.exp(-np.hypot((x - 0.5) * 1.6, (y - horizon) * 4) * 5) * 0.8)
+    depth = np.clip((y - horizon) / (1 - horizon), 0, 1)
+    sea = blend((70, 120, 160), (8, 35, 70), depth ** 0.7)
+
+    # Ripples get bigger nearer, and catch the light in broken lines.
+    ripples = np.sin(40 / (depth + 0.04) + sum(np.sin(x * f + rng.uniform(0, 6.3)) * a
+                                              for f, a in ((7, 1.2), (19, 0.6), (43, 0.3))))
+    broken = sum(np.sin(x * f / (depth + 0.1) + rng.uniform(0, 6.3)) for f in (3, 7, 11, 17)) > 1.9
+    glitter = np.exp(-((x - 0.5) / (0.02 + depth * 0.12)) ** 2) * (broken + 0.6)
+    sea = blend(sea, (255, 245, 225), (ripples > 0.85) * (glitter * 0.6 + broken * 0.1))
+    pixels = np.where((y < horizon)[..., None], sky, sea)
+    return image(pixels, 0.8)
+
+
+def hills(w=1920, h=1200):
+    """Rolling green hills, fading into the distance, under a soft sky."""
+    x, y = grid(w, h)
+    pixels = blend((150, 200, 240), (230, 240, 230), y / 0.6)
+    for i, (base, colour) in enumerate(((0.5, (150, 190, 160)), (0.6, (110, 170, 110)), (0.72, (70, 140, 70)),
+                                        (0.85, (40, 110, 50)))):
+        top = ridge(x, base, 0.06, 3, 20 + i)
+        shade = np.clip((y - top) * 3, 0, 0.35)
+        pixels = np.where((y > top)[..., None], blend(colour, np.array(colour) * 0.6, shade), pixels)
+    return image(pixels, 1.5)
+
+
+def dunes(w=1920, h=1200):
+    """Smooth sand dunes in warm light, each lit on one side."""
+    x, y = grid(w, h)
+    pixels = blend((150, 190, 230), (250, 220, 180), y / 0.45)
+    for i, (base, light, dark) in enumerate(((0.45, (235, 190, 130), (200, 140, 90)),
+                                             (0.58, (230, 170, 110), (180, 110, 70)),
+                                             (0.74, (220, 150, 90), (160, 90, 55)))):
+        top = ridge(x, base, 0.07, 2, 30 + i)
+        slope = np.gradient(top, axis=1) * w
+        lit = blend(dark, light, 0.5 + np.tanh(slope * 0.6) * 0.5)
+        pixels = np.where((y > top)[..., None], blend(lit, np.array(dark) * 0.85, np.clip((y - top) * 2, 0, 1)), pixels)
+    return image(pixels, 1.5)
 
 
 def icon(paint):
@@ -125,6 +237,8 @@ def squares(d, s):
 os.makedirs(SHARE + '/wallpapers', exist_ok=True)
 os.makedirs(SHARE + '/icons/apps', exist_ok=True)
 wallpaper().save(SHARE + '/wallpapers/default.jpg', quality=90)
+for name, paint in (('aurora', aurora), ('sunset', sunset), ('ocean', ocean), ('hills', hills), ('dunes', dunes)):
+    paint().save(f'{SHARE}/wallpapers/{name}.jpg', quality=90)
 for name, paint in (('folder', folder), ('file', page), ('text', lambda d, s: page(d, s, lines=True)),
                     ('image', picture_icon), ('program', program)):
     icon(paint).save(f'{SHARE}/icons/{name}.png', optimize=True)

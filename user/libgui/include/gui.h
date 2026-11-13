@@ -10,6 +10,7 @@
 
 #define GUI_SOCKET "/tmp/wm.sock"
 #define GUI_TITLE_MAX 64
+#define GUI_PATH_MAX 1024
 
 // Everything sent either way is one of these.
 enum gui_message_type {
@@ -41,6 +42,8 @@ enum gui_message_type {
     GUI_CLOSE,        // the close button was clicked, or Super+Q pressed
     GUI_RESIZE,       // width and height wm would like the window to be
     GUI_CLIPBOARD,    // width and buffer, what's on the clipboard
+    GUI_SCREEN,       // width and height of the screen, with x 1 if its resolution can change.
+                      // After GUI_CREATED, and whenever it changes.
 
     // From libgui itself, through gui_post: draw the window again.
     GUI_REDRAW,
@@ -148,6 +151,7 @@ struct gui_settings {
     bool light;         // the light theme, rather than the dark one
     bool shadows;       // under windows
     bool clock_12_hour; // on the taskbar, rather than 24 hour
+    int width, height;  // the screen's resolution, or 0 to leave it as it started
 };
 
 void gui_settings_load(struct gui_settings *settings);
@@ -155,6 +159,20 @@ bool gui_settings_save(const struct gui_settings *settings);
 
 // Tells wm the settings have changed, and through it every program with a window.
 void gui_settings_changed(void);
+
+// The screen, as of the last GUI_SCREEN.
+struct gui_screen {
+    int width, height;
+    bool can_resize; // whether its resolution can change
+};
+
+const struct gui_screen *gui_screen(void);
+
+// The wallpaper, an image's path or "none", kept in /system/etc/wallpaper, and the
+// ones that come with the system.
+#define GUI_WALLPAPERS "/system/share/wallpapers"
+void gui_wallpaper_get(char path[GUI_PATH_MAX]);
+bool gui_wallpaper_set(const char *path);
 
 // Images, as pixels of 0xAARRGGBB, from PNG, JPEG and BMP files. Each returns
 // false if it couldn't, with gui_image_error saying why.
@@ -330,6 +348,9 @@ void gui_set_focus(struct gui_ui *ui, const char *label, const char *text);
 // These return true when they're pressed, or when what they hold changes.
 bool gui_button(struct gui_ui *ui, const char *label);
 bool gui_checkbox(struct gui_ui *ui, const char *label, bool *value);
+
+// A picture, with the label under it, framed in the accent colour when selected.
+bool gui_image_button(struct gui_ui *ui, const char *label, const struct gui_image *image, bool selected);
 bool gui_slider(struct gui_ui *ui, const char *label, int *value, int min, int max);
 bool gui_textbox(struct gui_ui *ui, const char *label, char *text, size_t size);
 
@@ -371,7 +392,7 @@ bool gui_context_menu(struct gui_ui *ui, const char *label, struct gui_rect area
 // active the one shown. Clicking a tab, or Ctrl+Tab and Ctrl+Shift+Tab, changes
 // active and returns GUI_TABS_CHANGED. A tab's x, or Ctrl+W for the active one,
 // returns GUI_TABS_CLOSE with closing set to it, and + or Ctrl+T GUI_TABS_NEW, for
-// the program to add or take away the tab.
+// the program to add or take away the tab. With closing NULL, there's no x or +.
 enum { GUI_TABS_CHANGED = 1, GUI_TABS_NEW, GUI_TABS_CLOSE };
 int gui_tabs(struct gui_ui *ui, const char *const *names, int count, int *active, int *closing);
 
@@ -386,7 +407,6 @@ void gui_scroll_end(struct gui_ui *ui);
 // usually there. It shows a folder's files, with folders first, to choose one to
 // open, or to choose a name to save as. Typing a folder's path in the name box
 // goes there.
-#define GUI_PATH_MAX 1024
 
 struct gui_file_picker {
     bool open, saving, focus_name;

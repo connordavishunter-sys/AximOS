@@ -176,6 +176,7 @@ bool gui_ui_event(struct gui_ui *ui, const struct gui_message *e) {
     case GUI_RESIZE:
         return gui_resize(ui->window, e->width, e->height);
     case GUI_REDRAW:
+    case GUI_SCREEN:
         return true;
     case GUI_SETTINGS:
         load_theme();
@@ -455,6 +456,26 @@ bool gui_button(struct gui_ui *ui, const char *label) {
     draw_label(ui, r.x + PADDING + 2, r.y + PADDING, label, pressed ? ON_ACCENT : TEXT);
     if (focused)
         draw_focus(ui, r);
+    return clicked;
+}
+
+bool gui_image_button(struct gui_ui *ui, const char *label, const struct gui_image *image, bool selected) {
+    uint32_t id = id_of(label);
+    int width = image ? image->width : 64, height = image ? image->height : 40;
+    struct gui_rect r = place(ui, width + 6, height + 6 + GUI_CHAR_HEIGHT + 4);
+    struct gui_rect picture = {r.x, r.y, width + 6, height + 6};
+    bool clicked = interact(ui, id, picture), focused = focusable(ui, id);
+    uint32_t edge = selected ? ACCENT : ui->hot == id ? FRAME_HOT : FRAME;
+
+    clicked |= focused && (key_pressed(ui, KEY_ENTER) || key_pressed(ui, KEY_SPACE));
+    fill(ui, picture.x, picture.y, picture.width, picture.height, edge);
+    fill(ui, picture.x + 2, picture.y + 2, width + 2, height + 2, BACKGROUND);
+    if (image)
+        draw_image(ui, picture.x + 3, picture.y + 3, image);
+    draw_fitted(ui, r.x + (r.width - shown_length(label) * GUI_CHAR_WIDTH) / 2, r.y + picture.height + 4, r.width, label,
+                shown_length(label), selected ? TEXT : DIM_TEXT);
+    if (focused)
+        draw_focus(ui, picture);
     return clicked;
 }
 
@@ -1300,8 +1321,8 @@ bool gui_context_menu(struct gui_ui *ui, const char *label, struct gui_rect area
 }
 
 int gui_tabs(struct gui_ui *ui, const char *const *names, int count, int *active, int *closing) {
-    int width = whole(ui).width, plus = FRAME_HEIGHT, result = 0;
-    int tab = count ? (width - 12 - plus) / count : TAB_WIDTH;
+    int width = whole(ui).width, plus = closing ? FRAME_HEIGHT : 0, result = 0;
+    int tab = count ? (width - 8 - (closing ? 4 + plus : 0)) / count : TAB_WIDTH;
     uint32_t id = id_of("##tabs");
 
     tab = tab < TAB_WIDTH ? tab : TAB_WIDTH;
@@ -1309,10 +1330,11 @@ int gui_tabs(struct gui_ui *ui, const char *const *names, int count, int *active
     fill(ui, 0, TAB_BAR, width, 1, SEPARATOR);
     for (int i = 0; i < count; i++) {
         struct gui_rect r = {4 + i * tab, 4, tab - 2, TAB_BAR - 4};
-        struct gui_rect x = {r.x + r.width - TAB_CLOSE - 4, r.y + (r.height - TAB_CLOSE) / 2, TAB_CLOSE, TAB_CLOSE};
-        bool on_close = over(ui, x), on_tab = over(ui, r) && !on_close;
+        struct gui_rect x = {r.x + r.width - TAB_CLOSE - 4, r.y + (r.height - TAB_CLOSE) / 2, closing ? TAB_CLOSE : 0,
+                             TAB_CLOSE};
+        bool on_close = closing && over(ui, x), on_tab = over(ui, r) && !on_close;
 
-        if (interact(ui, id + 2 * i + 1, x)) {
+        if (closing && interact(ui, id + 2 * i + 1, x)) {
             *closing = i;
             result = GUI_TABS_CLOSE;
         }
@@ -1327,20 +1349,22 @@ int gui_tabs(struct gui_ui *ui, const char *const *names, int count, int *active
             fill(ui, r.x, r.y, r.width, r.height, on_tab ? FRAME_HOT : FRAME);
             fill(ui, r.x + r.width + 1, r.y + 4, 1, r.height - 8, SEPARATOR);
         }
-        draw_fitted(ui, r.x + 8, r.y + (r.height - GUI_CHAR_HEIGHT) / 2 + 1, r.width - 16 - TAB_CLOSE, names[i], 255,
+        draw_fitted(ui, r.x + 8, r.y + (r.height - GUI_CHAR_HEIGHT) / 2 + 1, r.width - 16 - x.width, names[i], 255,
                     i == *active ? TEXT : DIM_TEXT);
         if (on_close)
             fill(ui, x.x, x.y, x.width, x.height, i == *active ? FRAME : SEPARATOR);
-        text(ui, x.x + (TAB_CLOSE - GUI_CHAR_WIDTH) / 2, x.y, "x", on_close ? TEXT : DIM_TEXT, 1);
+        if (closing)
+            text(ui, x.x + (TAB_CLOSE - GUI_CHAR_WIDTH) / 2, x.y, "x", on_close ? TEXT : DIM_TEXT, 1);
     }
 
-    struct gui_rect add = {4 + count * tab + 2, 4 + (TAB_BAR - 4 - plus + 4) / 2, plus, plus - 4};
+    struct gui_rect add = {4 + count * tab + 2, 4 + (TAB_BAR - plus) / 2, plus, plus - 4};
 
-    if (interact(ui, id, add))
+    if (closing && interact(ui, id, add))
         result = GUI_TABS_NEW;
-    if (ui->hot == id)
+    if (closing && ui->hot == id)
         fill(ui, add.x, add.y, add.width, add.height, FRAME_HOT);
-    text(ui, add.x + (plus - GUI_CHAR_WIDTH) / 2, add.y + (add.height - GUI_CHAR_HEIGHT) / 2, "+", TEXT, 1);
+    if (closing)
+        text(ui, add.x + (plus - GUI_CHAR_WIDTH) / 2, add.y + (add.height - GUI_CHAR_HEIGHT) / 2, "+", TEXT, 1);
 
     for (int i = 0; i < ui->key_count; i++) {
         const struct key_event *k = &ui->keys[i];
@@ -1350,9 +1374,9 @@ int gui_tabs(struct gui_ui *ui, const char *const *names, int count, int *active
             result = GUI_TABS_CHANGED;
         }
     }
-    if (gui_shortcut(ui, 't'))
+    if (closing && gui_shortcut(ui, 't'))
         result = GUI_TABS_NEW;
-    if (gui_shortcut(ui, 'w') && count) {
+    if (closing && gui_shortcut(ui, 'w') && count) {
         *closing = *active;
         result = GUI_TABS_CLOSE;
     }
