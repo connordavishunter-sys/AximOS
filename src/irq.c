@@ -3,6 +3,7 @@
 #include <ata.h>
 #include <cpu.h>
 #include <e1000.h>
+#include <hda.h>
 #include <io.h>
 #include <irq.h>
 #include <keyboard.h>
@@ -207,6 +208,7 @@ void irq_handle(const struct interrupt_frame *frame) {
         ticks++;
         process_wake_expired();
         net_tick();
+        hda_tick();
     }
 
     if (vector == VECTOR_TIMER && !this_cpu()->running)

@@ -72,8 +72,11 @@ install_stripped = strip -s -o $(BUILD)/stripped $(1) && mcopy -i $@ $(BUILD)/st
 
 # KVM runs it at the CPU's own speed, where the host has it, and otherwise QEMU
 # goes back to emulating every instruction, many times slower.
+# Sound goes to PipeWire: make run AUDIO=pa, or another of qemu-system-x86_64 -audiodev help.
+AUDIO ?= pipewire
 QEMU_BASE := qemu-system-x86_64 -accel kvm -accel tcg -cpu max -smp 4 -m 256M -serial stdio -boot d -cdrom $(ISO) \
-	-vga none -device VGA,vgamem_mb=64 -netdev user,id=net0 -device e1000,netdev=net0
+	-vga none -device VGA,vgamem_mb=64 -netdev user,id=net0 -device e1000,netdev=net0 \
+	-audiodev $(AUDIO),id=snd0 -device ich9-intel-hda -device hda-output,audiodev=snd0
 
 # pc has legacy IDE drives, named hda and so on. q35 has AHCI, named sda and so on.
 QEMU := $(QEMU_BASE) -M pc -drive file=$(DISK),format=raw,if=ide,index=0

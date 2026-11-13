@@ -88,6 +88,7 @@ class VM:
              '-M', 'q35,vmport=' + ('on' if vmmouse else 'off'), '-display', 'none', '-boot', 'd', '-cdrom', BUILD + '/aximos.iso',
              '-drive', drive + ',if=none,id=disk', '-device', 'ide-hd,drive=disk,bus=ide.1',
              '-netdev', 'user,id=net0' + net, '-device', 'e1000,netdev=net0',
+             '-audiodev', 'none,id=snd0', '-device', 'ich9-intel-hda', '-device', 'hda-output,audiodev=snd0',
              '-serial', 'file:' + self.log, '-monitor', f'unix:{sock},server=on,wait=off',
              '-qmp', f'unix:{qmp},server=on,wait=off', *extra],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -176,6 +177,10 @@ class VM:
         if buttons is not None:
             self.command(f'mouse_button {buttons}')
         time.sleep(0.2)
+
+    def record(self, path, rate=48000):
+        """Starts writing what the sound card plays to a WAV file, until close."""
+        self.command(f'wavcapture {path} snd0 {rate} 16 2')
 
     def screenshot(self):
         """Returns the screen as (width, height, pixel(x, y) giving 0xRRGGBB)."""

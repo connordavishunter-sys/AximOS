@@ -19,6 +19,7 @@
 #include <signal_numbers.h>
 #include <time_types.h>
 #include <tty_types.h>
+#include <audio_types.h>
 #include <vfs.h>
 
 #define NS_PER_TICK (NS_PER_SECOND / TIMER_HZ)
@@ -180,6 +181,7 @@ static size_t ioctl_arg_size(uint64_t request) {
     case TIOCSWINSZ:
         return sizeof(struct winsize);
     case TIOCSCTTY:
+    case AUDIO_FLUSH:
         return 0;
     }
     return sizeof(int);

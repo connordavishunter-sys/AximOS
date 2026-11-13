@@ -1,6 +1,7 @@
 #include <console.h>
 #include <errno_values.h>
 #include <fb.h>
+#include <hda.h>
 #include <file.h>
 #include <key_event.h>
 #include <keyboard.h>
@@ -28,6 +29,7 @@ enum file_kind {
     FILE_SHM,
     FILE_MOUSE,
     FILE_KEYBOARD,
+    FILE_AUDIO,
     FILE_FB,
     FILE_NULL,
     FILE_ZERO,
@@ -127,6 +129,18 @@ static int file_open_locked(const char *cwd, const char *path, int flags, struct
             return status;
         }
         file->kind = device == VFS_DEVICE_MOUSE ? FILE_MOUSE : FILE_KEYBOARD;
+        file->flags = flags;
+        file->refs = 1;
+        *out = file;
+        return 0;
+    }
+    if (device == VFS_DEVICE_AUDIO) {
+        status = access == O_RDONLY ? -EACCES : hda_open();
+        if (status < 0) {
+            kfree(file);
+            return status;
+        }
+        file->kind = FILE_AUDIO;
         file->flags = flags;
         file->refs = 1;
         *out = file;
@@ -344,6 +358,8 @@ int file_ioctl(struct file *file, uint64_t request, void *arg) {
         *(int *)arg = inet_available(file->inet);
         return 0;
     }
+    if (file->kind == FILE_AUDIO)
+        return hda_ioctl(request, arg);
     if (request == KEYBOARD_GET_MODIFIERS && (file->kind == FILE_CONSOLE || file->kind == FILE_KEYBOARD)) {
         *(int *)arg = keyboard_modifiers();
         return 0;
@@ -423,6 +439,9 @@ int file_poll(struct file *file, int events) {
     case FILE_KEYBOARD:
         ready = keyboard_events_readable() ? POLLIN : 0;
         break;
+    case FILE_AUDIO:
+        ready = hda_writable() ? POLLOUT : 0;
+        break;
     case FILE_SOCKET:
         ready = socket_poll(file->socket);
         break;
@@ -481,6 +500,8 @@ void file_close(struct file *file) {
         tty_close_master(file->tty);
     } else if (file->kind == FILE_KEYBOARD) {
         keyboard_close_events();
+    } else if (file->kind == FILE_AUDIO) {
+        hda_close();
     } else if (file->kind == FILE_SHM) {
         shm_unref(file->shm);
     } else if (file->kind == FILE_FB && (file->flags & O_ACCMODE) != O_RDONLY) {
@@ -506,6 +527,8 @@ int64_t file_read(struct file *file, void *buf, size_t len) {
         return mouse_read(buf, len, nonblocking);
     case FILE_KEYBOARD:
         return keyboard_read_events(buf, len, nonblocking);
+    case FILE_AUDIO:
+        return -EBADF;
     case FILE_SOCKET:
         return socket_read(file->socket, buf, len, nonblocking, false);
     case FILE_INET:
@@ -564,6 +587,8 @@ int64_t file_write(struct file *file, const void *buf, size_t len) {
         return socket_write(file->socket, buf, len, file->flags & O_NONBLOCK, true);
     case FILE_INET:
         return inet_send(file->inet, buf, len, NULL, file->flags & O_NONBLOCK, true);
+    case FILE_AUDIO:
+        return hda_write(buf, len, file->flags & O_NONBLOCK);
     case FILE_PIPE_READ:
     case FILE_MOUSE:
     case FILE_KEYBOARD:
