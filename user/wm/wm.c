@@ -1,3 +1,4 @@
+#include <audio_types.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -9,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/fb.h>
+#include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/reboot.h>
 #include <sys/socket.h>
@@ -534,13 +536,128 @@ static void fitted_text(struct gui_canvas *c, int x, int y, int width, const cha
     gui_text(c, x, y, shown, color, 1);
 }
 
+static void draw_panel(struct gui_canvas *c, struct rect r, int ox, int oy) {
+    gui_fill(c, r.x - ox, r.y - oy, r.width, r.height, TASKBAR_LINE);
+    gui_fill(c, r.x + 1 - ox, r.y + 1 - oy, r.width - 2, r.height - 2, TASKBAR_COLOR);
+}
+
+// 12 hour time goes without a leading zero, as people write it.
+static const char *clock_text(char out[16]) {
+    time_t now = time(NULL);
+
+    strftime(out, 16, settings.clock_12_hour ? "%I:%M %p" : "%H:%M", localtime(&now));
+    return out + (settings.clock_12_hour && out[0] == '0');
+}
+
+// The sound menu, from the speaker beside the clock, sets the volume of everything.
+#define VOLUME_FILE "/system/etc/volume"
+#define SOUND_WIDTH 220
+#define SOUND_HEIGHT 82
+#define VOLUME_STEP 5
+static int mixer = -1, volume = 100;
+static bool muted, sound_open, setting_volume;
+
+static struct rect tray(void) {
+    char clock[16];
+
+    return (struct rect){screen.width - gui_text_width(clock_text(clock), 1) - 12 - 8 - 24, taskbar().y + 4, 24,
+                         TASKBAR_HEIGHT - 8};
+}
+
+static struct rect sound_panel(void) {
+    struct rect t = tray();
+    int x = t.x + t.width - SOUND_WIDTH;
+
+    return (struct rect){x > 0 ? x : 0, taskbar().y - SOUND_HEIGHT, SOUND_WIDTH, SOUND_HEIGHT};
+}
+
+// Where the slider can be clicked, and the line it's drawn on through its middle.
+static struct rect volume_slider(void) {
+    struct rect p = sound_panel();
+
+    return (struct rect){p.x + 16, p.y + 30, p.width - 32, 20};
+}
+
+static struct rect mute_row(void) {
+    struct rect p = sound_panel();
+
+    return (struct rect){p.x + 12, p.y + 56, p.width - 24, 20};
+}
+
+static void set_volume(int to, bool mute) {
+    FILE *f;
+
+    to = to < 0 ? 0 : to > 100 ? 100 : to;
+    if (to == volume && mute == muted)
+        return;
+    volume = to;
+    muted = mute;
+    ioctl(mixer, MIXER_SET_VOLUME, &volume);
+    ioctl(mixer, MIXER_SET_MUTE, &(int){muted});
+    if ((f = fopen(VOLUME_FILE, "w"))) {
+        fprintf(f, "%d%s\n", volume, muted ? " muted" : "");
+        fclose(f);
+    }
+    printf("wm: volume %d%s\n", volume, muted ? ", muted" : "");
+    add_damage(tray());
+    if (sound_open)
+        add_damage(sound_panel());
+}
+
+// What was set last time, which the sound card starts without.
+static void load_volume(void) {
+    FILE *f = fopen(VOLUME_FILE, "r");
+    char word[16] = "";
+    int was = 100;
+
+    mixer = open("/dev/mixer", O_RDONLY | O_CLOEXEC);
+    if (f) {
+        if (fscanf(f, "%d %15s", &was, word) < 1)
+            was = 100;
+        fclose(f);
+    }
+    volume = -1; // so it's set whatever it is
+    if (mixer >= 0)
+        set_volume(was, !strcmp(word, "muted"));
+}
+
+static void close_sound(void) {
+    if (sound_open)
+        add_damage(sound_panel());
+    sound_open = setting_volume = false;
+}
+
+static void set_volume_at(int x) {
+    struct rect r = volume_slider();
+
+    set_volume(((x - r.x) * 100 + r.width / 2) / r.width, muted);
+}
+
+static void draw_sound(struct gui_canvas *c, int ox, int oy) {
+    struct rect p = sound_panel(), r = volume_slider(), m = mute_row();
+    int knob = r.x + r.width * volume / 100, line = r.y + r.height / 2;
+    char percent[8];
+
+    draw_panel(c, p, ox, oy);
+    snprintf(percent, sizeof(percent), "%d%%", volume);
+    gui_text(c, p.x + 12 - ox, p.y + 8 - oy, "Volume", TASKBAR_TEXT, 1);
+    gui_text(c, p.x + p.width - 12 - gui_text_width(percent, 1) - ox, p.y + 8 - oy, percent,
+             muted ? TASKBAR_DIM_TEXT : TASKBAR_TEXT, 1);
+    gui_fill(c, r.x - ox, line - 2 - oy, r.width, 4, TASKBAR_LINE);
+    gui_fill(c, r.x - ox, line - 2 - oy, knob - r.x, 4, muted ? TASKBAR_DIM_TEXT : TITLE_FOCUSED);
+    gui_fill(c, knob - 5 - ox, line - 8 - oy, 10, 16, muted ? TASKBAR_DIM_TEXT : TITLE_FOCUSED);
+    gui_fill(c, m.x + 4 - ox, m.y + 3 - oy, 14, 14, TASKBAR_TEXT);
+    gui_fill(c, m.x + 5 - ox, m.y + 4 - oy, 12, 12, muted ? TITLE_FOCUSED : TASKBAR_COLOR);
+    gui_text(c, m.x + 26 - ox, m.y + (m.height - GUI_CHAR_HEIGHT) / 2 - oy, "Mute", TASKBAR_TEXT, 1);
+}
+
 static void draw_taskbar(struct gui_canvas *c, int ox, int oy) {
     struct rect bar = taskbar(), l = launcher();
     struct window *list[MAX_WINDOWS];
     int count = windows_by_age(list);
     int text_y = bar.y + (TASKBAR_HEIGHT - GUI_CHAR_HEIGHT) / 2 - oy;
-    char clock[16], *shown;
-    time_t now = time(NULL);
+    char clock[16];
+    const char *shown = clock_text(clock);
 
     gui_fill(c, bar.x - ox, bar.y - oy, bar.width, bar.height, TASKBAR_COLOR);
     gui_fill(c, bar.x - ox, bar.y - oy, bar.width, 1, TASKBAR_LINE);
@@ -558,15 +675,16 @@ static void draw_taskbar(struct gui_canvas *c, int ox, int oy) {
                     w == focused ? TITLE_TEXT : w->minimized ? TASKBAR_DIM_TEXT : TASKBAR_TEXT);
     }
 
-    // 12 hour time goes without a leading zero, as people write it.
-    strftime(clock, sizeof(clock), settings.clock_12_hour ? "%I:%M %p" : "%H:%M", localtime(&now));
-    shown = clock + (settings.clock_12_hour && clock[0] == '0');
     gui_text(c, bar.width - gui_text_width(shown, 1) - 12 - ox, text_y, shown, TASKBAR_TEXT, 1);
-}
+    if (mixer >= 0) {
+        struct rect t = tray();
+        const struct gui_image *speaker = gui_icon(muted || !volume ? "muted" : "speaker");
 
-static void draw_panel(struct gui_canvas *c, struct rect r, int ox, int oy) {
-    gui_fill(c, r.x - ox, r.y - oy, r.width, r.height, TASKBAR_LINE);
-    gui_fill(c, r.x + 1 - ox, r.y + 1 - oy, r.width - 2, r.height - 2, TASKBAR_COLOR);
+        if (sound_open)
+            gui_fill(c, t.x - ox, t.y - oy, t.width, t.height, TASKBAR_BUTTON);
+        if (speaker)
+            gui_draw_image(c, t.x + (t.width - ICON_SIZE) / 2 - ox, t.y + (t.height - ICON_SIZE) / 2 - oy, speaker);
+    }
 }
 
 // A row in the menu or the switcher, with the icon of app, if it's not NULL.
@@ -653,6 +771,8 @@ static void compose(struct rect r) {
         draw_taskbar(&c, r.x, r.y);
     if (menu_open)
         draw_menu(&c, r.x, r.y);
+    if (sound_open)
+        draw_sound(&c, r.x, r.y);
     if (switch_choice >= 0)
         draw_switcher(&c, r.x, r.y);
     draw_cursor(&c, r.x, r.y);
@@ -1164,6 +1284,7 @@ static void open_menu(void) {
     if (dir)
         closedir(dir);
     qsort(apps, app_count, sizeof(*apps), compare_names);
+    close_sound();
     menu_open = true;
     menu_choice = 0;
     add_damage(menu());
@@ -1246,6 +1367,29 @@ static void press(uint32_t changed) {
     struct window *w = window_at(cursor_x, cursor_y, &part, &edges);
 
     super_alone = false;
+
+    // A click in the sound menu sets the volume or the mute, and anywhere else closes it.
+    if (sound_open) {
+        if (contains(sound_panel(), cursor_x, cursor_y)) {
+            if (contains(volume_slider(), cursor_x, cursor_y)) {
+                setting_volume = true;
+                set_volume_at(cursor_x);
+            } else if (contains(mute_row(), cursor_x, cursor_y)) {
+                set_volume(volume, !muted);
+            }
+            return;
+        }
+        close_sound();
+        if (contains(tray(), cursor_x, cursor_y))
+            return;
+    }
+    if (mixer >= 0 && contains(tray(), cursor_x, cursor_y) && (changed & MOUSE_BUTTON_LEFT)) {
+        close_menu();
+        sound_open = true;
+        add_damage(sound_panel());
+        add_damage(tray());
+        return;
+    }
 
     // A click anywhere closes the menu, and does what it would have done unless it
     // was in the menu or on the launcher.
@@ -1341,14 +1485,28 @@ static void handle_mouse(const struct mouse_event *e) {
         }
     }
 
+    int wheel = e->wheel;
+
+    // The volume follows the mouse while it's held on the slider, and the wheel
+    // changes it over the speaker or the sound menu.
+    if (setting_volume && moved)
+        set_volume_at(cursor_x);
+    if (released & MOUSE_BUTTON_LEFT)
+        setting_volume = false;
+    if (e->wheel && mixer >= 0
+        && (contains(tray(), cursor_x, cursor_y) || (sound_open && contains(sound_panel(), cursor_x, cursor_y)))) {
+        set_volume(volume - e->wheel * VOLUME_STEP, muted);
+        wheel = 0; // so no window gets it
+    }
+
     struct window *target = grabbed ? grabbed : dragging || resizing ? NULL : window_at(cursor_x, cursor_y, &part, &edges);
 
     if (target && !grabbed && part != PART_CONTENT)
         target = NULL;
     if (target && moved)
         send_mouse(target, GUI_MOUSE_MOVE, 0, 0);
-    if (target && e->wheel)
-        send_mouse(target, GUI_MOUSE_WHEEL, 0, e->wheel);
+    if (target && wheel)
+        send_mouse(target, GUI_MOUSE_WHEEL, 0, wheel);
 
     if (pressed)
         press(pressed);
@@ -1461,6 +1619,11 @@ static void handle_key(const struct key_event *e) {
     bool super = e->modifiers & KEY_MOD_SUPER;
 
     super_key(e);
+    if (sound_open && e->code == KEY_ESCAPE) {
+        if (e->pressed)
+            close_sound();
+        return;
+    }
     if (switch_key(e) || menu_key(e))
         return;
     if (super && e->code == KEY_Q) {
@@ -1632,6 +1795,7 @@ int main(int argc, char **argv) {
         launch(argv[i]);
     make_falloff();
     load_settings();
+    load_volume();
     printf("wm: running at %dx%d%s\n", screen.width, screen.height, can_set_mode ? "" : ", which can't change");
     fflush(stdout);
 

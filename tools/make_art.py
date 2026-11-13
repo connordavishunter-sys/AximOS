@@ -246,6 +246,20 @@ def player(d, s):
     note(d, s, 6.8, 10.5, 1, (255, 255, 255))
 
 
+def speaker(d, s, waves=True):
+    grey = (150, 160, 180)
+    d.rectangle((2 * s, 6 * s, 5 * s, 10 * s), fill=grey)
+    d.polygon([(5 * s, 6 * s), (9 * s, 2.5 * s), (9 * s, 13.5 * s), (5 * s, 10 * s)], fill=grey)
+    for r in (3, 5.5) if waves else ():
+        d.arc(((9 - r) * s, (8 - r) * s, (9 + r) * s, (8 + r) * s), -50, 50, fill=grey, width=int(1.3 * s))
+
+
+def muted(d, s):
+    speaker(d, s, waves=False)
+    for a, b in (((10.5, 5.5), (15, 10.5)), ((15, 5.5), (10.5, 10.5))):
+        d.line((a[0] * s, a[1] * s, b[0] * s, b[1] * s), fill=(230, 80, 80), width=int(1.6 * s))
+
+
 def squares(d, s):
     for i, colour in enumerate(((230, 70, 80), (70, 190, 110), (70, 120, 230), (240, 190, 60))):
         x, y = 1.5 + (i % 2) * 7, 1.5 + (i // 2) * 7
@@ -258,7 +272,8 @@ wallpaper().save(SHARE + '/wallpapers/default.jpg', quality=90)
 for name, paint in (('aurora', aurora), ('sunset', sunset), ('ocean', ocean), ('hills', hills), ('dunes', dunes)):
     paint().save(f'{SHARE}/wallpapers/{name}.jpg', quality=90)
 for name, paint in (('folder', folder), ('file', page), ('text', lambda d, s: page(d, s, lines=True)),
-                    ('image', picture_icon), ('program', program), ('audio', audio)):
+                    ('image', picture_icon), ('program', program), ('audio', audio),
+                    ('speaker', speaker), ('muted', muted)):
     icon(paint).save(f'{SHARE}/icons/{name}.png', optimize=True)
 for name, paint in (('term', terminal), ('editor', editor), ('files', files), ('widgets', widgets),
                     ('guidemo', demo), ('fbdemo', squares), ('viewer', picture_icon), ('settings', gear), ('run', run),
