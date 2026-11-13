@@ -1,5 +1,5 @@
-"""Checks files' tabs, its address bar, its keys and its right-click menus: for an
-item, and for the folder where there's none."""
+"""Checks files' tabs, its address bar, its keys, its right-click menus, for an
+item and for the folder where there's none, and copying, cutting and pasting."""
 import re, time
 from vm import VM, check, finish
 
@@ -9,7 +9,7 @@ DESKTOP = 0x1E2430
 v = VM(vmmouse=True)
 try:
     check('prompt at boot', v.wait('/$ ', 30), v.text())
-    v.run('echo none > /system/etc/wallpaper; rm -f /system/etc/gui.conf; mkdir /tmp/docs; echo hi > /tmp/a.txt')
+    v.run('echo none > /system/etc/wallpaper; rm -f /system/etc/gui.conf; mkdir /tmp/docs; echo in > /tmp/docs/inner; echo hi > /tmp/a.txt')
     at = v.mark()
     v.type("wm 'files /tmp'\n")
     check('files starts', v.wait('files: at list', 10, at), v.text(at))
@@ -56,13 +56,13 @@ try:
     v.key('ctrl-w')
     check('and Ctrl+W', v.wait('files: tab 1 of 1', 5, at), v.text(at))
 
-    # A folder's menu: Open, Open in new tab, then Copy path, Rename and Delete.
+    # A folder's menu: Open, Open in new tab, then Cut, Copy, Copy path, Rename and Delete.
     at = v.mark()
     menu(row(0), 1)
     check('Open in new tab', v.wait('files: tab 2 of 2', 5, at) and v.wait('files: in /tmp/docs:', 5, at), v.text(at))
     v.key('ctrl-w'); time.sleep(0.5)
 
-    # The folder's menu: New folder, New file, then Open terminal here and Refresh.
+    # The folder's menu: New folder, New file, Paste, then Open terminal here and Refresh.
     at = v.mark()
     menu(empty, 1)
     v.type('notes.txt\n')
@@ -75,7 +75,7 @@ try:
 
     # Copy path, pasted in the address bar, goes there.
     at = v.mark()
-    menu(row(0), 2, 1)
+    menu(row(0), 4, 1)
     click(X + 300, Y + 41 + 13)
     v.key('ctrl-a'); v.key('ctrl-v'); v.key('ret')
     check('Copy path, then pasting it in the address bar', v.wait('files: in /tmp/docs:', 5, at), v.text(at))
@@ -91,21 +91,46 @@ try:
     # A terminal in the folder, which writes where it is there.
     at = v.mark()
     v.wait('files: in /tmp:', 5, at)
-    menu(empty, 2, 1)
+    menu(empty, 3, 1)
     time.sleep(2)
     v.type('pwd > where\n'); time.sleep(0.5)
     v.key('meta_l-q'); time.sleep(0.5)
 
-    # A file's menu: Open, Open in Editor and Run, then Copy path, Rename and
-    # Delete. a.txt is second.
+    # A file's menu: Open, Open in Editor and Run, then Cut, Copy, Copy path,
+    # Rename and Delete. a.txt is second.
     at = v.mark()
-    menu(row(1), 5, 1)
+    menu(row(1), 7, 1)
     v.key('ret')
     check('Delete from the menu', v.wait('files: deleted /tmp/a.txt', 5, at), v.text(at))
     at = v.mark()
     menu(row(1), 1)
     check('Open in Editor', v.wait('editor: opened /tmp/notes.txt', 10, at), v.text(at))
     v.key('meta_l-q'); time.sleep(0.5)
+
+    # Ctrl+C and Ctrl+V copy a file beside itself. The folder has docs/,
+    # notes.txt and where.
+    at = v.mark()
+    click(*row(1)); v.key('ctrl-c'); v.key('ctrl-v')
+    check('Ctrl+C, Ctrl+V copies a file', v.wait('files: pasted /tmp/notes.txt to /tmp/notes (copy).txt', 5, at), v.text(at))
+
+    # Copy and Paste from the menus copy a folder and what's in it.
+    at = v.mark()
+    menu(row(0), 3, 1)
+    menu(empty, 2)
+    check('Copy and Paste copy a folder', v.wait('files: pasted /tmp/docs to /tmp/docs (copy)', 5, at), v.text(at))
+
+    # Cut moves it, and pasting again then copies it from where it went. It's now
+    # docs/, docs (copy)/, notes (copy).txt, notes.txt and where.
+    at = v.mark()
+    click(*row(3)); v.key('ctrl-x')
+    address('/tmp/docs')
+    check('cutting, then going elsewhere', v.wait('files: in /tmp/docs:', 5, at), v.text(at))
+    click(*empty); v.key('ctrl-v')
+    check('Ctrl+X, Ctrl+V moves it', v.wait('files: moved /tmp/notes.txt to /tmp/docs/notes.txt', 5, at), v.text(at))
+    at = v.mark()
+    v.key('ctrl-v')
+    check('pasting again copies it', v.wait('files: pasted /tmp/docs/notes.txt to /tmp/docs/notes (copy).txt', 5, at),
+          v.text(at))
 
     # Closing the last tab closes the window.
     v.key('ctrl-w'); time.sleep(1)
@@ -114,6 +139,9 @@ try:
     v.key('meta_l-shift-q'); time.sleep(1)
     o = v.run('cat /tmp/where')
     check('Open terminal here', '\n/tmp\n' in o, o)
+    o = v.run("ls /tmp /tmp/docs; cat '/tmp/docs (copy)/inner' '/tmp/notes (copy).txt'")
+    check('the copies and the move are there', all(s in o for s in ('docs (copy)', 'notes (copy).txt', 'inner'))
+          and o.count('notes.txt') == 1 and '\nin\n' in o, o)
 finally:
     v.close()
 finish()

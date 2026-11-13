@@ -17,6 +17,7 @@
 #define LIST "##entries"
 #define ADDRESS "##folder"
 #define ANSWER "##answer"
+#define CUT "/tmp/files-cut" // the path on the clipboard, when it was cut, to move it
 #define KEY_F2 (KEY_F1 + 1)
 #define KEY_F5 (KEY_F1 + 4)
 
@@ -241,6 +242,151 @@ static void copy_path(void) {
     snprintf(status, sizeof(status), "Copied %s", path);
 }
 
+// Puts the selected item on the clipboard, by its path, which pasting copies, or
+// moves when it was cut.
+static void copy_selected(bool cut) {
+    char path[PATH_MAX];
+    FILE *f;
+
+    path_of(path, chosen()->name);
+    if (!gui_clipboard_set(path, strlen(path)))
+        return;
+    unlink(CUT);
+    if (cut && (f = fopen(CUT, "w"))) {
+        fputs(path, f);
+        fclose(f);
+    }
+    snprintf(status, sizeof(status), "%s %s", cut ? "Cut" : "Copied", chosen()->name);
+    printf("files: %s %s\n", cut ? "cut" : "copied", path);
+}
+
+static bool copy_file(const char *from, const char *to, mode_t mode) {
+    char buffer[16384];
+    int in = open(from, O_RDONLY), out = in < 0 ? -1 : open(to, O_WRONLY | O_CREAT | O_EXCL, mode & 0777);
+    ssize_t n = 0;
+
+    while (out >= 0 && (n = read(in, buffer, sizeof(buffer))) > 0 && write(out, buffer, n) == n)
+        ;
+    if (in >= 0)
+        close(in);
+    return out >= 0 && close(out) == 0 && n == 0;
+}
+
+// Copies a file, or a folder and all in it.
+static bool copy_tree(const char *from, const char *to) {
+    struct stat st;
+    struct dirent *d;
+    DIR *dir;
+    bool ok = true;
+
+    if (stat(from, &st) < 0)
+        return false;
+    if (!S_ISDIR(st.st_mode))
+        return copy_file(from, to, st.st_mode);
+    if (mkdir(to, st.st_mode & 0777) < 0 || !(dir = opendir(from)))
+        return false;
+    while (ok && (d = readdir(dir))) {
+        char a[PATH_MAX], b[PATH_MAX];
+
+        if (!strcmp(d->d_name, ".") || !strcmp(d->d_name, ".."))
+            continue;
+        snprintf(a, sizeof(a), "%s/%s", from, d->d_name);
+        snprintf(b, sizeof(b), "%s/%s", to, d->d_name);
+        ok = copy_tree(a, b);
+    }
+    closedir(dir);
+    return ok;
+}
+
+static bool delete_tree(const char *path) {
+    struct stat st;
+    struct dirent *d;
+    DIR *dir;
+    bool ok = true;
+
+    if (lstat(path, &st) < 0)
+        return false;
+    if (!S_ISDIR(st.st_mode))
+        return unlink(path) == 0;
+    if (!(dir = opendir(path)))
+        return false;
+    while (ok && (d = readdir(dir))) {
+        char inside[PATH_MAX];
+
+        if (!strcmp(d->d_name, ".") || !strcmp(d->d_name, ".."))
+            continue;
+        snprintf(inside, sizeof(inside), "%s/%s", path, d->d_name);
+        ok = delete_tree(inside);
+    }
+    closedir(dir);
+    return ok && rmdir(path) == 0;
+}
+
+// A name in the folder that isn't taken: the same, or with (copy), (copy 2) and so on.
+static void free_name(const char *name, char out[NAME_MAX + 1]) {
+    char path[PATH_MAX];
+    const char *dot = strrchr(name, '.');
+    int stem = dot && dot != name ? (int)(dot - name) : (int)strlen(name);
+
+    snprintf(out, NAME_MAX + 1, "%s", name);
+    for (int i = 1; path_of(path, out), access(path, F_OK) == 0; i++) {
+        if (i == 1)
+            snprintf(out, NAME_MAX + 1, "%.*s (copy)%s", stem, name, name + stem);
+        else
+            snprintf(out, NAME_MAX + 1, "%.*s (copy %d)%s", stem, name, i, name + stem);
+    }
+}
+
+// Copies what's on the clipboard here, or moves it if it was cut.
+static void paste(void) {
+    char *from = gui_clipboard_get(NULL), cut[PATH_MAX] = "", name[NAME_MAX + 1], to[PATH_MAX];
+    const char *base;
+    struct stat st;
+    FILE *f = fopen(CUT, "r");
+    size_t length = from ? strlen(from) : 0;
+    bool moving, ok;
+
+    if (f) {
+        if (!fgets(cut, sizeof(cut), f))
+            cut[0] = '\0';
+        fclose(f);
+    }
+    if (!from || from[0] != '/' || stat(from, &st) < 0) {
+        snprintf(status, sizeof(status), "There's nothing to paste");
+        free(from);
+        return;
+    }
+    moving = !strcmp(cut, from);
+    base = strrchr(from, '/') + 1;
+    path_of(to, base);
+    if (moving && !strcmp(to, from)) { // already here
+        free(from);
+        return;
+    }
+    if (!strncmp(folder, from, length) && (folder[length] == '/' || !folder[length])) {
+        snprintf(status, sizeof(status), "Can't put %s inside itself", base);
+        free(from);
+        return;
+    }
+    free_name(base, name);
+    path_of(to, name);
+    if (moving)
+        ok = rename(from, to) == 0 || (errno == EXDEV && copy_tree(from, to) && delete_tree(from));
+    else
+        ok = copy_tree(from, to);
+    if (ok) {
+        printf("files: %s %s to %s\n", moving ? "moved" : "pasted", from, to);
+        if (moving) {
+            unlink(CUT);
+            gui_clipboard_set(to, strlen(to)); // where it is now, to paste copies of
+        }
+        read_folder(folder, name);
+    } else {
+        snprintf(status, sizeof(status), "Can't paste %s: %s", base, strerror(errno));
+    }
+    free(from);
+}
+
 static void delete_selected(void) {
     char path[PATH_MAX];
 
@@ -359,6 +505,10 @@ static void context_menu(struct gui_ui *ui, struct gui_rect list) {
         if (!e->folder && gui_menu_item(ui, "Run"))
             run_selected();
         gui_menu_separator(ui);
+        if (gui_menu_item(ui, "Cut"))
+            copy_selected(true);
+        if (gui_menu_item(ui, "Copy"))
+            copy_selected(false);
         if (gui_menu_item(ui, "Copy path"))
             copy_path();
         if (gui_menu_item(ui, "Rename"))
@@ -370,6 +520,8 @@ static void context_menu(struct gui_ui *ui, struct gui_rect list) {
             ask(NEW_FOLDER);
         if (gui_menu_item(ui, "New file"))
             ask(NEW_FILE);
+        if (gui_menu_item(ui, "Paste"))
+            paste();
         gui_menu_separator(ui);
         if (gui_menu_item(ui, "Open terminal here"))
             start(TERM, NULL, folder);
@@ -391,6 +543,10 @@ static void list_keys(struct gui_ui *ui) {
         ask(RENAMING);
     else if (chosen() && gui_key(ui, KEY_DELETE))
         ask(DELETING);
+    else if (chosen() && (gui_shortcut(ui, 'c') || gui_shortcut(ui, 'x')))
+        copy_selected(gui_shortcut(ui, 'x'));
+    else if (gui_shortcut(ui, 'v'))
+        paste();
 }
 
 static void frame(struct gui_ui *ui) {
