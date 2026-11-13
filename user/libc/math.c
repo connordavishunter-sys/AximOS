@@ -238,6 +238,9 @@ double rint(double x) {
 double nearbyint(double x) { return rint(x); }
 long lround(double x) { return (long)round(x); }
 long lrint(double x) { return (long)rint(x); }
+long lrintf(float x) { return lrint(x); }
+float rintf(float x) { return rint(x); }
+long lroundf(float x) { return lround(x); }
 
 double hypot(double x, double y) {
     x = fabs(x);
@@ -586,3 +589,39 @@ float modff(float x, float *whole) {
     *whole = w;
     return fraction;
 }
+
+// What the compiler makes of sin and cos of the same thing.
+void sincos(double x, double *s, double *c) {
+    *s = sin(x);
+    *c = cos(x);
+}
+
+void sincosf(float x, float *s, float *c) {
+    *s = sinf(x);
+    *c = cosf(x);
+}
+
+// The float ones that only go through double.
+float asinf(float x) { return asin(x); }
+float acosf(float x) { return acos(x); }
+float atanf(float x) { return atan(x); }
+float sinhf(float x) { return sinh(x); }
+float coshf(float x) { return cosh(x); }
+float tanhf(float x) { return tanh(x); }
+float exp2f(float x) { return exp2(x); }
+float expm1f(float x) { return expm1(x); }
+float log1pf(float x) { return log1p(x); }
+float cbrtf(float x) { return cbrt(x); }
+float asinhf(float x) { return asinh(x); }
+float acoshf(float x) { return acosh(x); }
+float atanhf(float x) { return atanh(x); }
+float erff(float x) { return erf(x); }
+float erfcf(float x) { return erfc(x); }
+float tgammaf(float x) { return tgamma(x); }
+float lgammaf(float x) { return lgamma(x); }
+float nearbyintf(float x) { return nearbyint(x); }
+float logbf(float x) { return logb(x); }
+float copysignf(float x, float y) { return copysign(x, y); }
+float scalbnf(float x, int n) { return scalbn(x, n); }
+float fdimf(float x, float y) { return fdim(x, y); }
+float remainderf(float x, float y) { return remainder(x, y); }
