@@ -1544,6 +1544,7 @@ static void change_resolution(int width, int height) {
     framebuffer = mmap(NULL, (size_t)pitch * info.height, PROT_READ | PROT_WRITE, MAP_SHARED, fb, 0);
     free(screen.pixels);
     screen = (struct gui_canvas){pixels, info.width, info.height, info.width};
+    damage_count = 0; // clipped to the old size, so they could run off this one
     if (framebuffer == MAP_FAILED) {
         quitting = true;
         return;

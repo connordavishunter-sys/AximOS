@@ -138,6 +138,15 @@ try:
     time.sleep(1)
     w, h, px = v.screenshot()
     check('with the light taskbar', px(700, 758) == LIGHT_TASKBAR, hex(px(700, 758)))
+    v.key('meta_l-shift-q'); time.sleep(1)
+
+    # Starting at another size than the screen's draws only what fits it.
+    v.run('echo resolution 800x600 > /system/etc/gui.conf')
+    at = v.mark()
+    v.type('wm\n')
+    check('starting at a saved size', v.wait('wm: running at 800x600', 10, at), v.text(at))
+    time.sleep(1)
+    check("doesn't crash", 'Segmentation fault' not in v.text(at), v.text(at))
     v.key('meta_l-shift-q')
 finally:
     v.close()
