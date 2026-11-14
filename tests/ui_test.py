@@ -102,6 +102,30 @@ try:
     v.key('left'); v.key('shift-home'); v.type('Z')
     check('typing over a selection', v.wait('widgets: name Z!\n', 5, at), v.text(at))
 
+    # The cursor blinks: of screenshots a quarter of a second apart, some have it
+    # and some don't, and only it, a line a pixel wide, differs.
+    x, y, w_, h_ = where('textbox')
+    box = [(LEFT + i, TOP + j) for i in range(x, x + w_) for j in range(y, y + h_)]
+    shots = []
+    for _ in range(4):
+        w, h, px = v.screenshot()
+        shots.append({p: px(*p) for p in box})
+        time.sleep(0.25)
+    changed = {p for a in shots for b in shots for p in box if a[p] != b[p]}
+    columns = {p[0] for p in changed}
+    check('the text cursor blinks', changed and max(columns) - min(columns) < 2, sorted(columns)[:10])
+    if changed:
+        # Typing shows it at once, whichever way it was.
+        line = sorted(changed)
+        for _ in range(3):
+            v.key('right'); v.key('left')
+            w, h, px = v.screenshot()
+            if not all(px(*p) == max(s[p] for s in shots) for p in line):
+                break
+        else:
+            line = None
+        check('and typing shows it at once', line is None, 'hidden after a key')
+
     # The keyboard alone: Tab from the text box goes past the dropdowns, list and
     # notes round to Count, then on, scrolling the page to show where it is.
     at = v.mark()

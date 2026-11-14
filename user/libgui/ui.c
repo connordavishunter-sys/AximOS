@@ -18,6 +18,7 @@
 #define MENU_WIDTH 180
 #define DROPDOWN_ROWS 8 // at most, with more scrolling
 #define DOUBLE_CLICK_MS 400
+#define BLINK_MS 530 // the text cursor shows, then hides, this long each
 #define TAB_BAR (FRAME_HEIGHT + 4)
 #define TAB_WIDTH 170 // at most, with narrower ones when there are many
 #define TAB_CLOSE 16
@@ -138,6 +139,15 @@ void gui_ui_init(struct gui_ui *ui, struct gui_window *window) {
     load_theme();
 }
 
+// Typing or clicking shows the text cursor at once, and it blinks again from then.
+static void show_cursor(struct gui_ui *ui) {
+    ui->cursor_hidden = false;
+    if (ui->blink_timer) {
+        gui_timer_stop(ui->blink_timer);
+        ui->blink_timer = gui_timer_start(BLINK_MS, true);
+    }
+}
+
 bool gui_ui_event(struct gui_ui *ui, const struct gui_message *e) {
     switch (e->type) {
     case GUI_MOUSE_MOVE:
@@ -161,12 +171,16 @@ bool gui_ui_event(struct gui_ui *ui, const struct gui_message *e) {
         }
         if (e->type == GUI_MOUSE_BUTTON && (e->changed & 2) && (e->buttons & 2))
             ui->right_pressed = true;
+        if (e->type == GUI_MOUSE_BUTTON && e->buttons)
+            show_cursor(ui);
         if (e->type == GUI_MOUSE_WHEEL)
             ui->wheel += e->wheel;
         return true;
     case GUI_KEY:
         if (e->key.pressed && ui->key_count < GUI_UI_MAX_KEYS)
             ui->keys[ui->key_count++] = e->key;
+        if (e->key.pressed)
+            show_cursor(ui);
         return e->key.pressed;
     case GUI_FOCUS:
         ui->window_focused = e->focused;
@@ -175,9 +189,12 @@ bool gui_ui_event(struct gui_ui *ui, const struct gui_message *e) {
         return true;
     case GUI_RESIZE:
         return gui_resize(ui->window, e->width, e->height);
+    case GUI_TIMER:
+        if (e->x == ui->blink_timer)
+            ui->cursor_hidden = !ui->cursor_hidden;
+        return true;
     case GUI_REDRAW:
     case GUI_SCREEN:
-    case GUI_TIMER:
         return true;
     case GUI_SETTINGS:
         load_theme();
@@ -278,6 +295,18 @@ void gui_ui_end(struct gui_ui *ui) {
     ui->wheel = 0;
     ui->key_count = 0;
     gui_show(ui->window);
+
+    // The cursor only blinks while there's one to see.
+    bool blinking = ui->text_drawn && ui->window_focused;
+
+    if (blinking && !ui->blink_timer)
+        ui->blink_timer = gui_timer_start(BLINK_MS, true);
+    if (!blinking && ui->blink_timer) {
+        gui_timer_stop(ui->blink_timer);
+        ui->blink_timer = 0;
+        ui->cursor_hidden = false;
+    }
+    ui->text_drawn = false;
     if (ui->cursor != ui->shown_cursor)
         gui_set_cursor(ui->window, ui->cursor);
     ui->shown_cursor = ui->cursor;
@@ -796,7 +825,9 @@ bool gui_textbox(struct gui_ui *ui, const char *label, char *s, size_t size) {
     if (focused) {
         int caret = frame.x + PADDING + (int)(ui->text_cursor - first) * GUI_CHAR_WIDTH;
 
-        fill(ui, caret, frame.y + PADDING - 2, 1, GUI_CHAR_HEIGHT + 4, TEXT);
+        ui->text_drawn = true;
+        if (!ui->cursor_hidden)
+            fill(ui, caret, frame.y + PADDING - 2, 1, GUI_CHAR_HEIGHT + 4, TEXT);
         draw_focus(ui, frame);
     } else if (!*s) {
         text(ui, frame.x + PADDING, frame.y + PADDING, "...", DIM_TEXT, 1);
@@ -967,7 +998,9 @@ bool gui_textarea(struct gui_ui *ui, const char *label, char *s, size_t size, in
         int x = inner.x + PADDING + ((int)column - first) * GUI_CHAR_WIDTH;
         int y = inner.y + PADDING + cursor_line * GUI_CHAR_HEIGHT - scroll->offset;
 
-        fill(ui, x, y - 1, 1, GUI_CHAR_HEIGHT + 2, TEXT);
+        ui->text_drawn = true;
+        if (!ui->cursor_hidden)
+            fill(ui, x, y - 1, 1, GUI_CHAR_HEIGHT + 2, TEXT);
     } else if (!*s) {
         text(ui, inner.x + PADDING, inner.y + PADDING, "...", DIM_TEXT, 1);
     }

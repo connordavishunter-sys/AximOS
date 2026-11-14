@@ -273,6 +273,8 @@ struct gui_ui {
     enum gui_cursor cursor, shown_cursor; // what the widget under the mouse wants, and what wm shows
     size_t text_cursor, text_anchor; // in the text box that last had the keyboard, and
     uint32_t text_owner;             // where what's selected starts
+    int blink_timer;                 // while a text box has the keyboard, the cursor blinks
+    bool cursor_hidden, text_drawn;
     int drag_offset; // from the top of a scroll bar's thumb to the mouse
 
     // The widgets that can have the keyboard, in order, as of the last frame and
