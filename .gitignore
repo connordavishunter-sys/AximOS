@@ -1,3 +1,7 @@
 build/
 ports/dist/
 __pycache__/
+
+# Songs for testing the player that can't be shared, apart from these, which are free to.
+rootfs/system/share/example_music/*
+!rootfs/system/share/example_music/[1-4].wav
