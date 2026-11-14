@@ -154,7 +154,7 @@ enum { EDGE_LEFT = 1, EDGE_RIGHT = 2, EDGE_TOP = 4, EDGE_BOTTOM = 8 };
 
 static struct gui_canvas screen; // composed here, then copied to the framebuffer
 static uint8_t *framebuffer;
-static int pitch, fb;
+static int pitch, fb, keyboard;
 static bool can_set_mode;
 
 static struct client *clients[MAX_CLIENTS];
@@ -1745,6 +1745,8 @@ static void change_resolution(int width, int height) {
 static void load_settings(void) {
     gui_settings_load(&settings);
     theme = settings.light ? &light : &dark;
+    ioctl(keyboard, KEYBOARD_SET_REPEAT_DELAY, &settings.repeat_delay);
+    ioctl(keyboard, KEYBOARD_SET_REPEAT_RATE, &settings.repeat_rate);
     if (can_set_mode && settings.width && (settings.width != screen.width || settings.height != screen.height))
         change_resolution(settings.width, settings.height);
     load_wallpaper();
@@ -1768,7 +1770,7 @@ int main(int argc, char **argv) {
         return fail("/dev/fb0");
 
     int mouse = open("/dev/mouse", O_RDONLY | O_NONBLOCK | O_CLOEXEC);
-    int keyboard = open("/dev/keyboard", O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    keyboard = open("/dev/keyboard", O_RDONLY | O_NONBLOCK | O_CLOEXEC);
     struct sockaddr_un address = {.sun_family = AF_UNIX, .sun_path = GUI_SOCKET};
     int listener = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0); // none of these for the programs it starts
 

@@ -23,6 +23,10 @@ void keyboard_handle_irq(void);
 // Called on every tick, to repeat the key held down.
 void keyboard_tick(void);
 
+// How long, in milliseconds, before a held key repeats, and how many times a
+// second then. A negative one is left as it is.
+void keyboard_set_repeat(int delay_ms, int per_second);
+
 // Takes a byte the controller says came from the keyboard.
 void keyboard_handle_byte(uint8_t byte);
 

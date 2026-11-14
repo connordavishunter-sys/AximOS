@@ -8,6 +8,7 @@
 //     shadows on
 //     clock 24
 //     resolution 1280x800
+//     repeat 500 30
 //
 // Anything missing or not understood is left as it is by default.
 
@@ -20,7 +21,8 @@ void gui_settings_load(struct gui_settings *s) {
     char line[64], value[32];
     int width, height;
 
-    *s = (struct gui_settings){.light = false, .shadows = true, .clock_12_hour = false};
+    *s = (struct gui_settings){.shadows = true, .repeat_delay = KEYBOARD_REPEAT_DELAY_DEFAULT,
+                               .repeat_rate = KEYBOARD_REPEAT_RATE_DEFAULT};
     while (f && fgets(line, sizeof(line), f)) {
         if (sscanf(line, "theme %31s", value) == 1)
             s->light = !strcmp(value, "light");
@@ -30,6 +32,8 @@ void gui_settings_load(struct gui_settings *s) {
             s->clock_12_hour = !strcmp(value, "12");
         else if (sscanf(line, "resolution %dx%d", &width, &height) == 2 && width > 0 && height > 0)
             s->width = width, s->height = height;
+        else if (sscanf(line, "repeat %d %d", &width, &height) == 2 && width >= 0 && height >= 0)
+            s->repeat_delay = width, s->repeat_rate = height;
     }
     if (f)
         fclose(f);
@@ -44,6 +48,7 @@ bool gui_settings_save(const struct gui_settings *s) {
             s->clock_12_hour ? "12" : "24");
     if (s->width)
         fprintf(f, "resolution %dx%d\n", s->width, s->height);
+    fprintf(f, "repeat %d %d\n", s->repeat_delay, s->repeat_rate);
     return fclose(f) == 0;
 }
 

@@ -160,6 +160,8 @@ struct gui_settings {
     bool shadows;       // under windows
     bool clock_12_hour; // on the taskbar, rather than 24 hour
     int width, height;  // the screen's resolution, or 0 to leave it as it started
+    int repeat_delay;   // milliseconds a key's held before it repeats
+    int repeat_rate;    // times a second it repeats then, or 0 for never
 };
 
 void gui_settings_load(struct gui_settings *settings);

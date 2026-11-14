@@ -42,8 +42,14 @@
 #define KEY_MOD_SUPER 0x08
 #define KEY_MOD_CAPS_LOCK 0x10
 
-// ioctl on the console or /dev/keyboard: the KEY_MOD_ held now, as an int.
+// ioctls on the console or /dev/keyboard, each with an int: the KEY_MOD_ held now,
+// how long a key's held before it repeats, in milliseconds, and how many times a
+// second it repeats then, up to 100, or 0 for not at all.
 #define KEYBOARD_GET_MODIFIERS 0x4B01
+#define KEYBOARD_SET_REPEAT_DELAY 0x4B02
+#define KEYBOARD_SET_REPEAT_RATE 0x4B03
+#define KEYBOARD_REPEAT_DELAY_DEFAULT 500
+#define KEYBOARD_REPEAT_RATE_DEFAULT 30
 
 struct key_event {
     uint16_t code;

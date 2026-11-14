@@ -72,11 +72,10 @@ static bool events_open;
 static uint8_t modifiers;
 static bool extended;
 
-// The key held down, which repeats: every REPEAT_TICKS once it's been held DELAY_TICKS.
-#define DELAY_TICKS 50
-#define REPEAT_TICKS 3
+// The key held down, which repeats rate times a second once it's been held delay ticks.
 static uint16_t held;
-static uint64_t held_since;
+static uint64_t held_since, repeats;
+static int delay = KEYBOARD_REPEAT_DELAY_DEFAULT * TIMER_HZ / 1000, rate = KEYBOARD_REPEAT_RATE_DEFAULT;
 
 static void wait_input_empty(void) {
     for (int i = 0; i < TIMEOUT && (inb(PS2_STATUS) & STATUS_INPUT_FULL); i++)
@@ -282,11 +281,25 @@ static bool is_modifier(uint16_t code) {
     return false;
 }
 
+// How many repeats there should have been is worked out afresh each tick, so rates
+// that aren't a whole number of ticks apart come out right on average.
 void keyboard_tick(void) {
     uint64_t held_for = irq_ticks() - held_since;
 
-    if (held && held_for >= DELAY_TICKS && (held_for - DELAY_TICKS) % REPEAT_TICKS == 0)
+    if (!held || !rate || held_for < (uint64_t)delay)
+        return;
+
+    uint64_t due = (held_for - delay) * rate / TIMER_HZ + 1;
+
+    for (; repeats < due; repeats++)
         deliver(held, true);
+}
+
+void keyboard_set_repeat(int delay_ms, int per_second) {
+    if (delay_ms >= 0)
+        delay = delay_ms * TIMER_HZ / 1000;
+    if (per_second >= 0)
+        rate = per_second > TIMER_HZ ? TIMER_HZ : per_second;
 }
 
 void keyboard_handle_byte(uint8_t byte) {
@@ -311,6 +324,7 @@ void keyboard_handle_byte(uint8_t byte) {
         if (pressed) {
             held = code;
             held_since = irq_ticks();
+            repeats = 0;
         } else if (code == held) {
             held = 0;
         }

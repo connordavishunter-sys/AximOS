@@ -364,9 +364,22 @@ int file_ioctl(struct file *file, uint64_t request, void *arg) {
         return audio_ioctl(file->audio, request, arg);
     if (file->kind == FILE_MIXER)
         return audio_mixer_ioctl(request, arg);
-    if (request == KEYBOARD_GET_MODIFIERS && (file->kind == FILE_CONSOLE || file->kind == FILE_KEYBOARD)) {
-        *(int *)arg = keyboard_modifiers();
-        return 0;
+    if (file->kind == FILE_CONSOLE || file->kind == FILE_KEYBOARD) {
+        switch (request) {
+        case KEYBOARD_GET_MODIFIERS:
+            *(int *)arg = keyboard_modifiers();
+            return 0;
+        case KEYBOARD_SET_REPEAT_DELAY:
+            if (*(int *)arg < 0 || *(int *)arg > 5000)
+                return -EINVAL;
+            keyboard_set_repeat(*(int *)arg, -1);
+            return 0;
+        case KEYBOARD_SET_REPEAT_RATE:
+            if (*(int *)arg < 0)
+                return -EINVAL;
+            keyboard_set_repeat(-1, *(int *)arg);
+            return 0;
+        }
     }
     // The master speaks for its terminal as a whole.
     if (file->kind == FILE_PTY_MASTER) {

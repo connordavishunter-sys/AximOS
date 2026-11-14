@@ -94,7 +94,12 @@ try:
 
     # A 24 hour clock, 01:23, ends 12 pixels from the right, starting 52 from it,
     # and a 12 hour one, 1:23 AM, is wider. It's dark text, in the light theme.
-    tab('Display'); tab('Date & time')
+    # Key repeat: a rate of 0, at the slider's left end, stops it.
+    tab('Display'); tab('Keyboard')
+    at = v.mark()
+    mouse.click(*middle('rate', 3))
+    check('turning key repeat off', v.wait('settings: repeat rate 0', 5, at), v.text(at))
+    tab('Date & time')
     mouse.to(1270, 700)
     w, h, px = v.screenshot()
     before = count(px, 1200, 778, 1226, 792, 0x1E2129)
@@ -148,10 +153,13 @@ try:
 
     v.key('meta_l-shift-q'); time.sleep(1)
     o = v.run('cat /system/etc/gui.conf /system/etc/timezone /system/etc/wallpaper; date +%Z')
-    check('the settings are saved', all(s in o for s in ('theme light', 'shadows off', 'clock 12', 'resolution 1024x768')),
+    check('the settings are saved', all(s in o for s in ('theme light', 'shadows off', 'clock 12', 'resolution 1024x768',
+                                                         'repeat 500 0')),
           o)
     check('and the time zone', 'Asia/Tokyo' in o and 'JST' in o, o)
     check('and the wallpaper', '/system/share/wallpapers/ocean.jpg' in o, o)
+    v.type('echo ['); v.command('sendkey a 1000'); time.sleep(1.5); v.type(']\n'); time.sleep(0.5)
+    check('a held key types once, with repeat off', '\n[a]\n' in v.text(), v.text()[-300:])
 
     at = v.mark()
     v.type('wm\n')

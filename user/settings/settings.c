@@ -22,8 +22,9 @@
 #define THUMBS_ACROSS 3
 #define MAX_RESOLUTIONS 16
 
-enum { APPEARANCE, DISPLAY, TIME, TABS };
-static const char *const tabs[] = {"Appearance", "Display", "Date & time"};
+enum { APPEARANCE, DISPLAY, KEYBOARD, TIME, TABS };
+static const char *const tabs[] = {"Appearance", "Display", "Keyboard", "Date & time"};
+static char try_typing[128];
 static const char *const themes[] = {"Dark", "Light"}, *const clocks[] = {"24 hour", "12 hour"};
 
 // What the screen can be, as far as QEMU's graphics card goes. Their widths are
@@ -249,7 +250,7 @@ static void screen_changed(void) {
 
 // Says where a widget is when that changes, for the tests to find it.
 static void report(struct gui_ui *ui, int index, const char *what) {
-    static struct gui_rect places[10 + MAX_WALLPAPERS];
+    static struct gui_rect places[16 + MAX_WALLPAPERS];
     struct gui_rect r = gui_last_rect(ui);
 
     if (memcmp(&places[index], &r, sizeof(r)))
@@ -284,7 +285,7 @@ static void appearance(struct gui_ui *ui) {
             gui_settings_changed();
         }
         snprintf(label, sizeof(label), "wallpaper %s", wallpapers[i].name);
-        report(ui, 10 + i, label);
+        report(ui, 16 + i, label);
     }
 }
 
@@ -346,6 +347,27 @@ static void date_and_time(struct gui_ui *ui) {
     report(ui, 6, "zones");
 }
 
+static void keyboard(struct gui_ui *ui) {
+    char what[32];
+
+    gui_label(ui, "How long a key's held before it repeats, in milliseconds:");
+    if (gui_slider(ui, "##delay", &settings.repeat_delay, 150, 1000)) {
+        snprintf(what, sizeof(what), "repeat delay %d", settings.repeat_delay);
+        save(what);
+    }
+    report(ui, 12, "delay");
+    gui_label(ui, "How many times a second it repeats then, or 0 for never:");
+    if (gui_slider(ui, "##rate", &settings.repeat_rate, 0, 60)) {
+        snprintf(what, sizeof(what), "repeat rate %d", settings.repeat_rate);
+        save(what);
+    }
+    report(ui, 13, "rate");
+    gui_separator(ui);
+    gui_label(ui, "Try it here:");
+    gui_textbox(ui, "##try", try_typing, sizeof(try_typing));
+    report(ui, 14, "try");
+}
+
 // Asks whether to keep the new resolution, above whichever tab is showing.
 static void keep_strip(struct gui_ui *ui) {
     gui_label(ui, "Keep this resolution? Going back in %d second%s.", keep_left, keep_left == 1 ? "" : "s");
@@ -379,16 +401,20 @@ static void frame(struct gui_ui *ui) {
         appearance(ui);
     else if (tab == DISPLAY)
         display(ui);
+    else if (tab == KEYBOARD)
+        keyboard(ui);
     else
         date_and_time(ui);
     gui_ui_end(ui);
     fflush(stdout);
 }
 
-// Settings for the desktop: its theme, shadows, wallpaper, resolution, clock and time zone.
+// Settings for the desktop: its theme, shadows, wallpaper, resolution, key repeat, clock
+// and time zone.
 int main(int argc, char **argv) {
     help_option(argc, argv, "usage: settings\n"
-                            "Opens a window to change the theme, shadows, wallpaper, resolution, clock and time zone.\n");
+                            "Opens a window to change the theme, shadows, wallpaper, resolution, key repeat, clock and\n"
+                            "time zone.\n");
     if (!gui_connect()) {
         dprintf(STDERR_FILENO, "settings: wm isn't running\n");
         return 1;
