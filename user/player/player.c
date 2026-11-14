@@ -418,6 +418,7 @@ static void next_if_finished(void) {
     printf("player: finished %s\n", names[current]);
     if (current + 1 < track_count) {
         choose(current + 1);
+        gui_notify(window, "Now playing", names[current]);
     } else {
         pthread_mutex_lock(&lock);
         shared.path[0] = '\0';

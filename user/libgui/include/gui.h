@@ -31,6 +31,8 @@ enum gui_message_type {
     // in buffer, width bytes long, which whoever gets it maps and then removes.
     GUI_CLIPBOARD_SET, // width and buffer, or width 0 to empty it
     GUI_CLIPBOARD_GET, // answered with GUI_CLIPBOARD
+    GUI_NOTIFY,        // a notification: its title in text and what it says in buffer, from
+                       // the window it's about, if it's for one, whose icon it has
 
     // From wm. Mouse positions are inside the window.
     GUI_CREATED,
@@ -114,6 +116,10 @@ void gui_set_title(struct gui_window *window, const char *title);
 // after the program, as it was run.
 void gui_set_icon(struct gui_window *window, const char *name);
 void gui_set_cursor(struct gui_window *window, enum gui_cursor cursor);
+
+// Shows a notification in the corner of the screen for a few seconds, with the
+// window's icon, if it's given. What doesn't fit in GUI_TITLE_MAX is cut short.
+bool gui_notify(struct gui_window *window, const char *title, const char *text);
 
 // Puts text on the clipboard, returning false if memory ran out.
 bool gui_clipboard_set(const char *text, size_t length);

@@ -651,6 +651,95 @@ static void draw_sound(struct gui_canvas *c, int ox, int oy) {
     gui_text(c, m.x + 26 - ox, m.y + (m.height - GUI_CHAR_HEIGHT) / 2 - oy, "Mute", TASKBAR_TEXT, 1);
 }
 
+// Notifications stack up from the bottom right corner, the newest lowest, until
+// they've been up NOTICE_MS or they're clicked.
+#define MAX_NOTICES 4
+#define NOTICE_MS 5000
+#define NOTICE_WIDTH 300
+#define NOTICE_HEIGHT 52
+struct notice {
+    char title[GUI_TITLE_MAX], text[GUI_TITLE_MAX], app[GUI_TITLE_MAX];
+    int64_t until;
+};
+static struct notice notices[MAX_NOTICES];
+static int notice_count;
+
+static int64_t now_ms(void) {
+    struct timespec t;
+
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (int64_t)t.tv_sec * 1000 + t.tv_nsec / 1000000;
+}
+
+static struct rect notice_rect(int index) {
+    int from_bottom = notice_count - index;
+
+    return (struct rect){screen.width - NOTICE_WIDTH - 12,
+                         taskbar().y - 12 - from_bottom * (NOTICE_HEIGHT + 8) + 8, NOTICE_WIDTH, NOTICE_HEIGHT};
+}
+
+static void damage_notices(void) {
+    for (int i = 0; i < notice_count; i++)
+        add_damage(notice_rect(i));
+}
+
+static void add_notice(const char *title, const char *text, const char *app) {
+    damage_notices();
+    if (notice_count == MAX_NOTICES) // the oldest makes way
+        memmove(notices, notices + 1, --notice_count * sizeof(*notices));
+
+    struct notice *n = &notices[notice_count++];
+
+    snprintf(n->title, sizeof(n->title), "%.*s", GUI_TITLE_MAX - 1, title);
+    snprintf(n->text, sizeof(n->text), "%.*s", GUI_TITLE_MAX - 1, text);
+    snprintf(n->app, sizeof(n->app), "%s", app ? app : "");
+    n->until = now_ms() + NOTICE_MS;
+    damage_notices();
+    printf("wm: notice %s: %s\n", n->title, n->text);
+}
+
+static void remove_notice(int index) {
+    damage_notices();
+    memmove(notices + index, notices + index + 1, (notice_count - index - 1) * sizeof(*notices));
+    notice_count--;
+}
+
+// Takes away those whose time is up, returning how long until the next one's is.
+static int expire_notices(void) {
+    int64_t now = now_ms(), next = -1;
+
+    for (int i = notice_count - 1; i >= 0; i--) {
+        if (notices[i].until <= now)
+            remove_notice(i);
+    }
+    for (int i = 0; i < notice_count; i++)
+        next = next < 0 || notices[i].until - now < next ? notices[i].until - now : next;
+    return (int)next;
+}
+
+static int notice_at(int x, int y) {
+    for (int i = 0; i < notice_count; i++) {
+        if (contains(notice_rect(i), x, y))
+            return i;
+    }
+    return -1;
+}
+
+static void draw_notices(struct gui_canvas *c, int ox, int oy) {
+    for (int i = 0; i < notice_count; i++) {
+        struct rect r = notice_rect(i);
+        const struct notice *n = &notices[i];
+        int text_x = r.x + 12 + (n->app[0] ? ICON_SIZE + 10 : 0), width = r.x + r.width - 12 - text_x;
+
+        draw_panel(c, r, ox, oy);
+        gui_fill(c, r.x - ox, r.y - oy, 3, r.height, TITLE_FOCUSED);
+        if (n->app[0])
+            draw_icon(c, n->app, r.x + 12, r.y + 10, ox, oy);
+        fitted_text(c, text_x - ox, r.y + 8 - oy, width, n->title, TASKBAR_TEXT);
+        fitted_text(c, text_x - ox, r.y + 8 + GUI_CHAR_HEIGHT + 4 - oy, width, n->text, TASKBAR_DIM_TEXT);
+    }
+}
+
 static void draw_taskbar(struct gui_canvas *c, int ox, int oy) {
     struct rect bar = taskbar(), l = launcher();
     struct window *list[MAX_WINDOWS];
@@ -769,6 +858,7 @@ static void compose(struct rect r) {
     }
     if (r.y + r.height > bar.y)
         draw_taskbar(&c, r.x, r.y);
+    draw_notices(&c, r.x, r.y);
     if (menu_open)
         draw_menu(&c, r.x, r.y);
     if (sound_open)
@@ -823,13 +913,6 @@ static bool flush_client(struct client *client) {
 static void send_to(struct window *w, struct gui_message m) {
     m.window = w->id;
     queue_message(w->client, &m);
-}
-
-static long now_ms(void) {
-    struct timespec now;
-
-    clock_gettime(CLOCK_MONOTONIC, &now);
-    return now.tv_sec * 1000 + now.tv_nsec / 1000000;
 }
 
 static void fade(struct window *w, int to) {
@@ -1129,6 +1212,9 @@ static void handle_message(struct client *client, const struct gui_message *m) {
     case GUI_CLIPBOARD_GET:
         send_clipboard(client);
         break;
+    case GUI_NOTIFY: // the %.*s in add_notice stops at the end of an unterminated title
+        add_notice(m->text, m->buffer, w ? w->app : NULL);
+        break;
     case GUI_SETTINGS:
         load_settings();
         for (int i = 0; i < MAX_CLIENTS; i++) {
@@ -1367,6 +1453,14 @@ static void press(uint32_t changed) {
     struct window *w = window_at(cursor_x, cursor_y, &part, &edges);
 
     super_alone = false;
+
+    // Clicking a notification puts it away.
+    int notice = menu_open || sound_open ? -1 : notice_at(cursor_x, cursor_y);
+
+    if (notice >= 0) {
+        remove_notice(notice);
+        return;
+    }
 
     // A click in the sound menu sets the volume or the mute, and anywhere else closes it.
     if (sound_open) {
@@ -1811,6 +1905,7 @@ int main(int argc, char **argv) {
             fds[3 + i].events = clients[i] ? POLLIN | (clients[i]->out_used ? POLLOUT : 0) : 0;
         }
         bool fading = fade_shadows();
+        int notice = expire_notices(); // before drawing, so those that went are gone
 
         redraw();
 
@@ -1819,6 +1914,8 @@ int main(int argc, char **argv) {
         clock_gettime(CLOCK_REALTIME, &now);
         int until_minute = (60 - now.tv_sec % 60) * 1000 - now.tv_nsec / 1000000;
         int timeout = fading ? FRAME_MS : until_minute > 0 ? until_minute : 1;
+
+        timeout = notice >= 0 && notice < timeout ? (notice > 0 ? notice : 1) : timeout;
 
         int ready = poll(fds, 3 + MAX_CLIENTS, timeout);
 

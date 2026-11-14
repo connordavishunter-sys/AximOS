@@ -262,6 +262,14 @@ bool gui_clipboard_set(const char *text, size_t length) {
     return gui_send(connection, &message);
 }
 
+bool gui_notify(struct gui_window *window, const char *title, const char *text) {
+    struct gui_message message = {.type = GUI_NOTIFY, .window = window ? window->id : 0};
+
+    snprintf(message.text, sizeof(message.text), "%s", title);
+    snprintf(message.buffer, sizeof(message.buffer), "%s", text ? text : "");
+    return gui_send(connection, &message);
+}
+
 // Waits for the answer, keeping events that come first for gui_next_event.
 char *gui_clipboard_get(size_t *length) {
     struct gui_message message = {.type = GUI_CLIPBOARD_GET};

@@ -45,6 +45,7 @@ try:
     v.key('spc')
     check('and again plays it', v.wait('player: playing again', 5, at), v.text(at))
     check('the first finishes, and the next plays', v.wait('player: playing /music/2 two.ogg', 10, at), v.text(at))
+    check('saying so in a notification', v.wait('wm: notice Now playing: 2 two.ogg', 5, at), v.text(at))
     time.sleep(1)
     nx, ny, nw, nh = map(int, re.search(r'player: at next (\d+) (\d+) (\d+) (\d+)', v.text(at)).groups())
     v.mouse(X + nx + nw // 2 - 640, Y + ny + nh // 2 - 400, 1); v.mouse(buttons=0)

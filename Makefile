@@ -191,7 +191,7 @@ $(BUILD)/user/$(1).elf: $(CRT0) $(patsubst user/%.c,$(BUILD)/user/%.o,$(wildcard
 	$$(LD) $$(USER_LDFLAGS) $$(DYNAMIC_LDFLAGS) $$+ -o $$@
 endef
 $(foreach p,$(filter-out init,$(PROGRAMS)),$(eval $(call PROGRAM,$(p))))
-$(addprefix $(BUILD)/user/,$(addsuffix .elf,wm run $(GUI_APPS))): $(LIBGUI_SO)
+$(addprefix $(BUILD)/user/,$(addsuffix .elf,wm run notify $(GUI_APPS))): $(LIBGUI_SO)
 $(addprefix $(BUILD)/user/,$(addsuffix .elf,$(AUDIO_APPS))): $(LIBAUDIO_SO)
 $(foreach a,$(AUDIO_APPS),$(BUILD)/user/$(a)/%.o): USER_CFLAGS += -Iuser/libaudio/include
 
