@@ -104,6 +104,7 @@ static const struct theme *theme = &dark;
 #define RUN_COMMAND "run" // Super+R, and Run... in the menu
 #define KEY_Q 0x10
 #define KEY_R 0x13
+#define KEY_L 0x26
 #define HINT "Super: apps   Super+R: run   Super+Enter: terminal   Alt+Tab: switch   Super+Q: close   Super+arrows: tile   " \
              "Super+Shift+Q: quit"
 
@@ -147,6 +148,7 @@ struct window {
     enum gui_cursor cursor; // what the program wants over its contents
     int shadow, fade_from, fade_to;
     long fade_start;
+    bool bare; // the log-in screen's, with no frame, in the middle of the screen
 };
 
 enum part { PART_NONE, PART_CONTENT, PART_TITLE, PART_CLOSE, PART_MAXIMIZE, PART_MINIMIZE, PART_RESIZE };
@@ -188,6 +190,16 @@ static struct window *resizing;
 static int resize_x, resize_y, resize_width, resize_height;
 static int resize_room; // above the frame, which it can't grow into
 static bool quitting;
+
+// With --login, the desktop is locked until the log-in screen, which wm starts
+// with a connection of its own, says someone's logged in. While it's locked only
+// that screen's window is shown, and it gets all the input.
+#define LOGIN_PATH "/system/bin/login"
+static bool login_mode, locked, logged_in;
+static struct client *session; // the log-in screen's connection
+static int64_t login_due = -1, login_started; // when to start it again, if it stops
+static char **commands; // to start once someone first logs in
+static int command_count;
 
 // The start menu, and what's highlighted in it.
 static bool menu_open;
@@ -241,6 +253,8 @@ static const struct cursor_shape shapes[] = {
 static enum gui_cursor cursor_shown = GUI_CURSOR_ARROW;
 
 static struct rect frame_of(const struct window *w) {
+    if (w->bare)
+        return (struct rect){w->x, w->y, w->canvas.width, w->canvas.height};
     return (struct rect){w->x - BORDER, w->y - TITLE_HEIGHT - BORDER, w->canvas.width + 2 * BORDER,
                          w->canvas.height + TITLE_HEIGHT + 2 * BORDER};
 }
@@ -276,17 +290,29 @@ static struct rect launcher(void) {
 }
 
 // The menu's items are the apps, then these, with RUN_COMMAND's icon for Run.
-enum { ITEM_RUN, ITEM_REBOOT, ITEM_SHUT_DOWN, EXTRA_ITEMS };
-static const char *const extra_items[] = {"Run...", "Reboot", "Shut down"};
+// Locking and logging out are only for a desktop someone logged in to.
+enum { ITEM_RUN, ITEM_LOCK, ITEM_LOG_OUT, ITEM_REBOOT, ITEM_SHUT_DOWN, EXTRA_ITEMS };
+static const char *const extra_items[] = {"Run...", "Lock", "Log out", "Reboot", "Shut down"};
+
+static int extra_count(void) {
+    return login_mode ? EXTRA_ITEMS : EXTRA_ITEMS - 2;
+}
+
+// Which of the extra items the menu's index-th is.
+static int extra_item(int index) {
+    int i = index - app_count;
+
+    return login_mode || i == ITEM_RUN ? i : i + 2;
+}
 
 static int menu_items(void) {
-    return app_count + EXTRA_ITEMS;
+    return app_count + extra_count();
 }
 
 // Just above the launcher, as tall as its apps, with a line for "no apps" if there
 // are none.
 static struct rect menu(void) {
-    int height = ((app_count ? app_count : 1) + EXTRA_ITEMS) * ITEM_HEIGHT + MENU_GAP + 8;
+    int height = ((app_count ? app_count : 1) + extra_count()) * ITEM_HEIGHT + MENU_GAP + 8;
 
     return (struct rect){launcher().x, taskbar().y - height, MENU_WIDTH, height};
 }
@@ -322,11 +348,16 @@ static int menu_item_at(int x, int y) {
     return -1;
 }
 
+// While it's locked, only the log-in screen's windows are shown.
+static bool visible(const struct window *w) {
+    return !w->minimized && (!locked || w->client == session);
+}
+
 // Whether a window's frame hides all of a rectangle.
 static bool covers(const struct window *w, struct rect r) {
     struct rect f = frame_of(w);
 
-    return !w->minimized && r.x >= f.x && r.y >= f.y && r.x + r.width <= f.x + f.width
+    return visible(w) && r.x >= f.x && r.y >= f.y && r.x + r.width <= f.x + f.width
         && r.y + r.height <= f.y + f.height;
 }
 
@@ -478,6 +509,11 @@ static void draw_icon(struct gui_canvas *c, const char *app, int x, int y, int o
 }
 
 static void draw_window(struct gui_canvas *c, const struct window *w, int ox, int oy) {
+    if (w->bare) {
+        gui_copy(c, w->x - ox, w->y - oy, &w->canvas, 0, 0, w->canvas.width, w->canvas.height);
+        return;
+    }
+
     struct rect frame = frame_of(w), close = button_of(w, 0), maximize = button_of(w, 1), minimize = button_of(w, 2);
     uint32_t title_color = w == focused ? TITLE_FOCUSED : TITLE_UNFOCUSED;
     int text_y = w->y - TITLE_HEIGHT + (TITLE_HEIGHT - GUI_CHAR_HEIGHT) / 2 - oy;
@@ -796,8 +832,8 @@ static void draw_menu(struct gui_canvas *c, int ox, int oy) {
     if (!app_count)
         draw_item(c, menu_item(0), "No apps in " APPS_DIR, NULL, false, TASKBAR_DIM_TEXT, ox, oy);
     for (int i = 0; i < menu_items(); i++)
-        draw_item(c, menu_item(i), i < app_count ? apps[i] : extra_items[i - app_count],
-                  i < app_count ? apps[i] : i == app_count + ITEM_RUN ? RUN_COMMAND : NULL,
+        draw_item(c, menu_item(i), i < app_count ? apps[i] : extra_items[extra_item(i)],
+                  i < app_count ? apps[i] : extra_item(i) == ITEM_RUN ? RUN_COMMAND : NULL,
                   i == menu_choice, TASKBAR_TEXT, ox, oy);
     gui_fill(c, m.x + 8 - ox, first_extra.y - MENU_GAP / 2 - 1 - oy, m.width - 16, 1, TASKBAR_LINE);
 }
@@ -846,15 +882,20 @@ static void compose(struct rect r) {
             gui_copy(&c, 0, 0, &wallpaper, r.x, r.y, r.width, r.height);
         else
             gui_fill(&c, 0, 0, r.width, r.height, DESKTOP_COLOR);
-        gui_text(&c, GUI_CHAR_WIDTH - r.x, hint_y - r.y, HINT, HINT_COLOR, 1);
+        if (!locked)
+            gui_text(&c, GUI_CHAR_WIDTH - r.x, hint_y - r.y, HINT, HINT_COLOR, 1);
         first = 0;
     }
     for (int i = first; i < window_count; i++) {
-        if (!windows[i]->minimized && overlaps(extent_of(windows[i]), r)) {
+        if (visible(windows[i]) && overlaps(extent_of(windows[i]), r)) {
             if (settings.shadows)
                 draw_shadow(&c, windows[i], r.x, r.y);
             draw_window(&c, windows[i], r.x, r.y);
         }
+    }
+    if (locked) {
+        draw_cursor(&c, r.x, r.y);
+        return;
     }
     if (r.y + r.height > bar.y)
         draw_taskbar(&c, r.x, r.y);
@@ -1014,7 +1055,7 @@ static void unmap_buffer(struct gui_canvas *c) {
 // The top window that isn't minimized gets the focus.
 static void focus_top(void) {
     for (int i = window_count - 1; i >= 0; i--) {
-        if (!windows[i]->minimized) {
+        if (visible(windows[i])) {
             set_focus(windows[i]);
             return;
         }
@@ -1070,6 +1111,11 @@ static struct window *find_window(const struct client *client, uint32_t id) {
     return NULL;
 }
 
+static void center(struct window *w) {
+    w->x = (screen.width - w->canvas.width) / 2;
+    w->y = (screen.height - w->canvas.height) / 2;
+}
+
 static void create_window(struct client *client, const struct gui_message *m) {
     struct gui_message reply = {.type = GUI_CREATED};
     struct window *w = window_count < MAX_WINDOWS ? calloc(1, sizeof(*w)) : NULL;
@@ -1089,6 +1135,9 @@ static void create_window(struct client *client, const struct gui_message *m) {
     w->y = 60 + TITLE_HEIGHT + step * CASCADE;
     w->want_width = w->canvas.width;
     w->want_height = w->canvas.height;
+    w->bare = client == session;
+    if (w->bare)
+        center(w);
     memcpy(w->title, m->text, sizeof(w->title));
     w->title[sizeof(w->title) - 1] = '\0';
     windows[window_count++] = w;
@@ -1099,7 +1148,8 @@ static void create_window(struct client *client, const struct gui_message *m) {
     queue_message(client, &(struct gui_message){
                               .type = GUI_SCREEN, .width = screen.width, .height = screen.height, .x = can_set_mode});
     add_damage(extent_of(w));
-    set_focus(w);
+    if (visible(w)) // so nothing can take what's typed on the log-in screen
+        set_focus(w);
 }
 
 // Asks for a new size, unless an answer is still awaited, in which case this is
@@ -1129,6 +1179,11 @@ static void take_buffer(struct window *w, const struct gui_message *m) {
         w->y += w->canvas.height - c.height;
     unmap_buffer(&w->canvas);
     w->canvas = c;
+    if (w->bare) { // which sizes itself, rather than being asked to
+        center(w);
+        w->want_width = w->asked_width = c.width;
+        w->want_height = w->asked_height = c.height;
+    }
     add_damage(extent_of(w));
     w->asking = false;
     if (w->want_width != w->asked_width || w->want_height != w->asked_height)
@@ -1178,6 +1233,7 @@ static void send_clipboard(struct client *client) {
 }
 
 static void update_cursor(void);
+static void unlock(void);
 
 static void handle_message(struct client *client, const struct gui_message *m) {
     struct window *w = find_window(client, m->window);
@@ -1212,6 +1268,10 @@ static void handle_message(struct client *client, const struct gui_message *m) {
     case GUI_CLIPBOARD_GET:
         send_clipboard(client);
         break;
+    case GUI_UNLOCK:
+        if (client == session && locked)
+            unlock();
+        break;
     case GUI_NOTIFY: // the %.*s in add_notice stops at the end of an unterminated title
         add_notice(m->text, m->buffer, w ? w->app : NULL);
         break;
@@ -1239,10 +1299,17 @@ static void handle_message(struct client *client, const struct gui_message *m) {
     }
 }
 
+// The log-in screen stopping without anyone logging in is started again, after a
+// second if it only just started, so one that can't run doesn't keep wm busy.
 static void disconnect(int i) {
     for (int j = window_count - 1; j >= 0; j--) {
         if (windows[j]->client == clients[i])
             remove_window(windows[j]);
+    }
+    if (clients[i] == session) {
+        session = NULL;
+        if (locked)
+            login_due = login_started + 1000;
     }
     close(clients[i]->fd);
     free(clients[i]);
@@ -1273,20 +1340,100 @@ static void read_client(int i) {
     client->in_used -= used;
 }
 
-static void accept_client(int listener) {
-    int fd = accept4(listener, NULL, NULL, SOCK_CLOEXEC);
+static struct client *add_client(int fd) {
     int i = 0;
 
-    if (fd < 0)
-        return;
     while (i < MAX_CLIENTS && clients[i])
         i++;
     if (i == MAX_CLIENTS || !(clients[i] = calloc(1, sizeof(struct client)))) {
         close(fd);
-        return;
+        return NULL;
     }
     fcntl(fd, F_SETFL, O_NONBLOCK);
     clients[i]->fd = fd;
+    return clients[i];
+}
+
+static void accept_client(int listener) {
+    int fd = accept4(listener, NULL, NULL, SOCK_CLOEXEC);
+
+    if (fd >= 0)
+        add_client(fd);
+}
+
+// Starts the log-in screen, or the lock screen, with the one end of a pair of
+// sockets, so wm knows its connection from any other.
+static void start_login(void) {
+    int pair[2];
+
+    login_due = -1;
+    login_started = now_ms();
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, pair) < 0) {
+        printf("wm: can't start the log-in screen: %s\n", strerror(errno));
+        login_due = login_started + 1000;
+        return;
+    }
+    fcntl(pair[0], F_SETFD, FD_CLOEXEC);
+    if (fork() == 0) {
+        char fd[16];
+
+        snprintf(fd, sizeof(fd), "%d", pair[1]);
+        setenv("GUI_FD", fd, 1);
+        execl(LOGIN_PATH, "login", logged_in ? "--lock" : (char *)NULL, (char *)NULL);
+        _exit(127);
+    }
+    close(pair[1]);
+    if (!(session = add_client(pair[0])))
+        login_due = login_started + 1000;
+}
+
+static void close_menu(void);
+static void close_sound(void);
+static void launch(const char *command);
+
+// Hides the desktop behind the lock screen, or the log-in screen once logged out.
+static void lock(void) {
+    close_menu();
+    close_sound();
+    switch_choice = -1;
+    super_down = super_alone = false; // let go while locked
+    dragging = grabbed = resizing = NULL;
+    set_focus(NULL);
+    locked = true;
+    add_damage((struct rect){0, 0, screen.width, screen.height});
+    printf("wm: locked\n");
+    if (!session)
+        start_login();
+}
+
+// Logging out closes every program's connection, and so the programs, and
+// forgets what they left: the clipboard and notifications.
+static void log_out(void) {
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        if (clients[i] && clients[i] != session)
+            disconnect(i);
+    }
+    free(clipboard);
+    clipboard = NULL;
+    clipboard_length = 0;
+    notice_count = 0;
+    logged_in = false;
+    printf("wm: logged out\n");
+    lock();
+}
+
+static void unlock(void) {
+    locked = false;
+    add_damage((struct rect){0, 0, screen.width, screen.height});
+    focus_top();
+    if (login_mode)
+        printf("wm: unlocked\n");
+    if (!logged_in) {
+        logged_in = true;
+        for (int i = 0; i < command_count; i++)
+            launch(commands[i]);
+        command_count = 0; // only the first time
+    }
 }
 
 // Which edges of a frame a resize from a point would move: those it's on, or near
@@ -1311,12 +1458,12 @@ static struct window *window_at(int x, int y, enum part *part, int *edges) {
     for (int i = window_count - 1; i >= 0; i--) {
         struct window *w = windows[i];
         struct rect f = frame_of(w);
-        struct rect grab = {f.x - RESIZE_MARGIN, f.y - RESIZE_MARGIN, f.width + 2 * RESIZE_MARGIN,
-                            f.height + 2 * RESIZE_MARGIN};
+        int margin = w->bare ? 0 : RESIZE_MARGIN;
+        struct rect grab = {f.x - margin, f.y - margin, f.width + 2 * margin, f.height + 2 * margin};
 
-        if (w->minimized || !contains(grab, x, y))
+        if (!visible(w) || !contains(grab, x, y))
             continue;
-        *edges = edges_at(f, x, y);
+        *edges = w->bare ? 0 : edges_at(f, x, y);
         *part = *edges ? PART_RESIZE
               : contains(button_of(w, 0), x, y) ? PART_CLOSE
               : contains(button_of(w, 1), x, y) ? PART_MAXIMIZE
@@ -1383,13 +1530,19 @@ static void close_menu(void) {
 }
 
 static void choose(int index) {
+    int item = index >= app_count && index < menu_items() ? extra_item(index) : -1;
+
+    close_menu();
     if (index >= 0 && index < app_count)
         launch_app(apps[index]);
-    else if (index == app_count + ITEM_RUN)
+    else if (item == ITEM_RUN)
         launch(RUN_COMMAND);
-    else if (index >= app_count && index < menu_items())
-        reboot(index == app_count + ITEM_REBOOT ? RB_AUTOBOOT : RB_POWER_OFF);
-    close_menu();
+    else if (item == ITEM_LOCK)
+        lock();
+    else if (item == ITEM_LOG_OUT)
+        log_out();
+    else if (item >= 0)
+        reboot(item == ITEM_REBOOT ? RB_AUTOBOOT : RB_POWER_OFF);
 }
 
 static void move_window(struct window *w, int x, int y) {
@@ -1453,6 +1606,16 @@ static void press(uint32_t changed) {
     struct window *w = window_at(cursor_x, cursor_y, &part, &edges);
 
     super_alone = false;
+
+    // While it's locked, a press only goes to the log-in screen.
+    if (locked) {
+        if (w) {
+            set_focus(w);
+            grabbed = w;
+            send_mouse(w, GUI_MOUSE_BUTTON, changed, 0);
+        }
+        return;
+    }
 
     // Clicking a notification puts it away.
     int notice = menu_open || sound_open ? -1 : notice_at(cursor_x, cursor_y);
@@ -1587,7 +1750,7 @@ static void handle_mouse(const struct mouse_event *e) {
         set_volume_at(cursor_x);
     if (released & MOUSE_BUTTON_LEFT)
         setting_volume = false;
-    if (e->wheel && mixer >= 0
+    if (e->wheel && mixer >= 0 && !locked
         && (contains(tray(), cursor_x, cursor_y) || (sound_open && contains(sound_panel(), cursor_x, cursor_y)))) {
         set_volume(volume - e->wheel * VOLUME_STEP, muted);
         wheel = 0; // so no window gets it
@@ -1712,6 +1875,11 @@ static void update_cursor(void) {
 static void handle_key(const struct key_event *e) {
     bool super = e->modifiers & KEY_MOD_SUPER;
 
+    if (locked) {
+        if (focused && focused->client == session)
+            send_to(focused, (struct gui_message){.type = GUI_KEY, .key = *e});
+        return;
+    }
     super_key(e);
     if (sound_open && e->code == KEY_ESCAPE) {
         if (e->pressed)
@@ -1725,6 +1893,11 @@ static void handle_key(const struct key_event *e) {
             quitting = true;
         else if (e->pressed && focused)
             send_to(focused, (struct gui_message){.type = GUI_CLOSE});
+        return;
+    }
+    if (super && e->code == KEY_L && login_mode) {
+        if (e->pressed)
+            lock();
         return;
     }
     if (super && (e->code == KEY_ENTER || e->code == KEY_R)) {
@@ -1815,6 +1988,10 @@ static void change_resolution(int width, int height) {
         struct window *w = windows[i];
         struct rect f = frame_of(w);
 
+        if (w->bare) {
+            center(w);
+            continue;
+        }
         if (w->tiled) {
             place(w, (struct rect){f.x * now.width / was.width, f.y * now.height / was.height,
                                    f.width * now.width / was.width, f.height * now.height / was.height});
@@ -1853,8 +2030,13 @@ static int fail(const char *what) {
 }
 
 int main(int argc, char **argv) {
-    help_option(argc, argv, "usage: wm [command]...\n"
-                            "Runs the window system, starting each command in it. Super+Shift+Q quits.\n");
+    help_option(argc, argv, "usage: wm [--login] [command]...\n"
+                            "Runs the window system, starting each command in it. Super+Shift+Q quits.\n"
+                            "With --login, it starts locked, behind the log-in screen, and the commands\n"
+                            "start once someone's logged in. Super+L locks it again.\n");
+    login_mode = argc > 1 && !strcmp(argv[1], "--login");
+    commands = argv + 1 + login_mode;
+    command_count = argc - 1 - login_mode;
     signal(SIGPIPE, SIG_IGN);
 
     struct fb_info info;
@@ -1887,11 +2069,13 @@ int main(int argc, char **argv) {
     cursor_x = screen.width / 2;
     cursor_y = screen.height / 2;
     add_damage((struct rect){0, 0, screen.width, screen.height});
-    for (int i = 1; i < argc; i++)
-        launch(argv[i]);
     make_falloff();
     load_settings();
     load_volume();
+    if (login_mode)
+        lock();
+    else
+        unlock();
     printf("wm: running at %dx%d%s\n", screen.width, screen.height, can_set_mode ? "" : ", which can't change");
     fflush(stdout);
 
@@ -1916,6 +2100,14 @@ int main(int argc, char **argv) {
         int timeout = fading ? FRAME_MS : until_minute > 0 ? until_minute : 1;
 
         timeout = notice >= 0 && notice < timeout ? (notice > 0 ? notice : 1) : timeout;
+        if (login_due >= 0) {
+            int64_t wait = login_due - now_ms();
+
+            if (wait <= 0)
+                start_login();
+            else if (wait < timeout)
+                timeout = (int)wait;
+        }
 
         int ready = poll(fds, 3 + MAX_CLIENTS, timeout);
 

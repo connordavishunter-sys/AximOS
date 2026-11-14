@@ -42,6 +42,14 @@ bool gui_send(int fd, const struct gui_message *message) {
 
 bool gui_connect(void) {
     struct sockaddr_un address = {.sun_family = AF_UNIX, .sun_path = GUI_SOCKET};
+    const char *given = getenv("GUI_FD");
+
+    if (given) {
+        connection = atoi(given);
+        unsetenv("GUI_FD");
+        fcntl(connection, F_SETFD, FD_CLOEXEC);
+        return true;
+    }
 
     connection = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0); // not for programs started from here
     if (connection >= 0 && connect(connection, (struct sockaddr *)&address, sizeof(address)) == 0)

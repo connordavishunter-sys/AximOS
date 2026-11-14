@@ -191,7 +191,7 @@ $(BUILD)/user/$(1).elf: $(CRT0) $(patsubst user/%.c,$(BUILD)/user/%.o,$(wildcard
 	$$(LD) $$(USER_LDFLAGS) $$(DYNAMIC_LDFLAGS) $$+ -o $$@
 endef
 $(foreach p,$(filter-out init,$(PROGRAMS)),$(eval $(call PROGRAM,$(p))))
-$(addprefix $(BUILD)/user/,$(addsuffix .elf,wm run notify $(GUI_APPS))): $(LIBGUI_SO)
+$(addprefix $(BUILD)/user/,$(addsuffix .elf,wm run notify login $(GUI_APPS))): $(LIBGUI_SO)
 $(addprefix $(BUILD)/user/,$(addsuffix .elf,$(AUDIO_APPS))): $(LIBAUDIO_SO)
 $(foreach a,$(AUDIO_APPS),$(BUILD)/user/$(a)/%.o): USER_CFLAGS += -Iuser/libaudio/include
 
@@ -206,6 +206,11 @@ $(BUILD)/user/libgui_pic/%.o $(BUILD)/user/wm/%.o $(BUILD)/user/term/%.o: USER_C
 $(BUILD)/user/fetch/fetch.o: USER_CFLAGS += -I$(MBEDTLS)/include -DMBEDTLS_CONFIG_FILE='"$(CURDIR)/ports/mbedtls_config.h"'
 $(BUILD)/user/fetch/fetch.o: | $(MBEDTLS_LIBS)
 $(BUILD)/user/fetch.elf: $(MBEDTLS_LIBS) $(shell $(CC) -print-libgcc-file-name)
+
+# login hashes passwords with mbedtls's SHA-256.
+$(BUILD)/user/login/login.o: USER_CFLAGS += -I$(MBEDTLS)/include -DMBEDTLS_CONFIG_FILE='"$(CURDIR)/ports/mbedtls_config.h"'
+$(BUILD)/user/login/login.o: | $(MBEDTLS_LIBS)
+$(BUILD)/user/login.elf: $(MBEDTLS)/library/libmbedcrypto.a
 
 $(MBEDTLS_LIBS) &: $(LIBC) $(CRT0) ports/build.sh ports/aximos-cc ports/mbedtls_config.h
 	ports/build.sh mbedtls

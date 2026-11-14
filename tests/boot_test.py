@@ -1,17 +1,15 @@
-"""Checks the desktop starts at boot, and that holding Shift starts the shell instead,
-whether the kernel sees it or only the BIOS did."""
+"""Checks the desktop starts at boot, behind its log-in screen, and that holding
+Shift starts the shell instead, whether the kernel sees it or only the BIOS did."""
 import time
 from vm import VM, check, finish
 
 v = VM(desktop=True)
 try:
     check('the desktop starts by itself', v.wait('wm: running at', 30), v.text())
-    time.sleep(1)
-    w, h, px = v.screenshot()
-    check('with its taskbar', px(700, h - 10) != 0, hex(px(700, h - 10)))
+    check('locked, behind the log-in screen', v.wait('login: welcome', 10), v.text())
     at = v.mark()
-    v.key('meta_l-shift-q')
-    check('quitting it leaves the shell', v.wait('/$ ', 10, at), v.text(at))
+    v.key('meta_l-shift-q'); time.sleep(1)
+    check("which can't be got past by quitting", '/$ ' not in v.text(at), v.text(at))
 finally:
     v.close()
 

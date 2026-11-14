@@ -13,13 +13,13 @@ static char *const env[] = {"PATH=/system/bin:/system/bin/gui", "HOME=/", "SHELL
 
 // Runs a program in its own group, with the terminal to go with it, which it waits
 // for otherwise, and collects any orphans until it's done.
-static int run(const char *path) {
+static int run(const char *path, char *arg) {
     pid_t child = fork();
 
     if (child == 0) {
         setpgid(0, 0);
         tcsetpgrp(STDIN_FILENO, getpid());
-        execve(path, (char *const[]){(char *)path, NULL}, env);
+        execve(path, (char *const[]){(char *)path, arg, NULL}, env);
         printf("init: failed to run %s\n", path);
         exit(EXEC_FAILED);
     }
@@ -34,7 +34,7 @@ static int run(const char *path) {
     return status;
 }
 
-// Starts the desktop, unless Shift is held, and keeps a shell running after it.
+// Starts the desktop, behind its log-in screen, unless Shift is held, and keeps a shell running after it.
 int main(void) {
     int modifiers = 0;
 
@@ -42,8 +42,8 @@ int main(void) {
     if (modifiers & KEY_MOD_SHIFT)
         printf("init: Shift is held, so starting the shell\n");
     else
-        run(WM_PATH);
-    while (run(SHELL_PATH) != EXEC_FAILED)
+        run(WM_PATH, "--login");
+    while (run(SHELL_PATH, NULL) != EXEC_FAILED)
         ;
     return 1;
 }

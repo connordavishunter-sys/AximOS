@@ -610,7 +610,7 @@ static size_t column_in(size_t column, size_t length) {
 struct editing {
     char *s;
     size_t size, *at, *anchor;
-    bool multiline;
+    bool multiline, secret; // a secret can't be copied
 };
 
 static void selected_range(const struct editing *e, size_t *low, size_t *high) {
@@ -655,8 +655,9 @@ static void copy_selection(const struct editing *e) {
 }
 
 // Selects the word at, or the run of other characters there.
+// All of a secret, which shouldn't show where its words are.
 static void select_word(struct editing *e, size_t at) {
-    size_t start = at, end = at;
+    size_t start = e->secret ? 0 : at, end = e->secret ? strlen(e->s) : at;
     bool word = is_word(e->s[at]);
 
     while (start > 0 && is_word(e->s[start - 1]) == word && e->s[start - 1] != '\n')
@@ -713,7 +714,7 @@ static bool edit(const struct key_event *k, struct editing *e) {
         *e->at = len;
         return false;
     }
-    if (ctrl_key(k, 'c') || ctrl_key(k, 'x')) {
+    if ((ctrl_key(k, 'c') || ctrl_key(k, 'x')) && !e->secret) {
         copy_selection(e);
         return ctrl_key(k, 'x') && delete_selection(e);
     }
@@ -792,10 +793,11 @@ static void draw_selection(struct gui_ui *ui, const struct editing *e, int x, in
              SELECTION);
 }
 
-bool gui_textbox(struct gui_ui *ui, const char *label, char *s, size_t size) {
+static bool text_box(struct gui_ui *ui, const char *label, char *s, size_t size, bool secret) {
     uint32_t id = id_of(label);
     struct gui_rect frame;
-    struct editing e = {s, size, &ui->text_cursor, &ui->text_anchor, false};
+    struct editing e = {s, size, &ui->text_cursor, &ui->text_anchor, false, secret};
+    char stars[256];
     bool changed = false;
 
     framed(ui, label, FRAME_HEIGHT, &frame);
@@ -821,7 +823,14 @@ bool gui_textbox(struct gui_ui *ui, const char *label, char *s, size_t size) {
     fill(ui, frame.x, frame.y, frame.width, frame.height, ui->hot == id || focused ? FRAME_HOT : FRAME);
     if (focused)
         draw_selection(ui, &e, frame.x + PADDING, frame.y + PADDING, first, fits);
-    draw_fitted(ui, frame.x + PADDING, frame.y + PADDING, frame.width - 2 * PADDING, s + first, 255, TEXT);
+    if (secret) {
+        size_t n = strlen(s + first) < sizeof(stars) - 1 ? strlen(s + first) : sizeof(stars) - 1;
+
+        memset(stars, '*', n);
+        stars[n] = '\0';
+    }
+    draw_fitted(ui, frame.x + PADDING, frame.y + PADDING, frame.width - 2 * PADDING, secret ? stars : s + first, 255,
+                TEXT);
     if (focused) {
         int caret = frame.x + PADDING + (int)(ui->text_cursor - first) * GUI_CHAR_WIDTH;
 
@@ -833,6 +842,14 @@ bool gui_textbox(struct gui_ui *ui, const char *label, char *s, size_t size) {
         text(ui, frame.x + PADDING, frame.y + PADDING, "...", DIM_TEXT, 1);
     }
     return changed;
+}
+
+bool gui_textbox(struct gui_ui *ui, const char *label, char *s, size_t size) {
+    return text_box(ui, label, s, size, false);
+}
+
+bool gui_password(struct gui_ui *ui, const char *label, char *s, size_t size) {
+    return text_box(ui, label, s, size, true);
 }
 
 static struct gui_scroll *scroll_of(struct gui_ui *ui, uint32_t id) {
@@ -919,7 +936,7 @@ bool gui_textarea(struct gui_ui *ui, const char *label, char *s, size_t size, in
     uint32_t id = id_of(label);
     struct gui_scroll *scroll = scroll_of(ui, id);
     struct gui_rect frame, was;
-    struct editing e = {s, size, &ui->text_cursor, &ui->text_anchor, true};
+    struct editing e = {s, size, &ui->text_cursor, &ui->text_anchor, true, false};
     bool changed = false, moved = false;
     int line_count = 1;
 

@@ -33,6 +33,7 @@ enum gui_message_type {
     GUI_CLIPBOARD_GET, // answered with GUI_CLIPBOARD
     GUI_NOTIFY,        // a notification: its title in text and what it says in buffer, from
                        // the window it's about, if it's for one, whose icon it has
+    GUI_UNLOCK,        // from the log-in screen wm started, once someone's logged in
 
     // From wm. Mouse positions are inside the window.
     GUI_CREATED,
@@ -95,7 +96,8 @@ struct gui_window {
 };
 
 // Connects to wm, returning false if it isn't running. The connection is closed
-// when the program exits.
+// when the program exits. A program wm starts itself is given its connection, by
+// number, in GUI_FD.
 bool gui_connect(void);
 
 // The connection, for poll.
@@ -371,6 +373,9 @@ bool gui_checkbox(struct gui_ui *ui, const char *label, bool *value);
 bool gui_image_button(struct gui_ui *ui, const char *label, const struct gui_image *image, bool selected);
 bool gui_slider(struct gui_ui *ui, const char *label, int *value, int min, int max);
 bool gui_textbox(struct gui_ui *ui, const char *label, char *text, size_t size);
+
+// A text box that shows a star for each character, and can't be copied from.
+bool gui_password(struct gui_ui *ui, const char *label, char *text, size_t size);
 
 // Text of several lines, lines tall, or down to the bottom of the window if lines
 // is 0, scrolling to keep the cursor in sight. Enter starts a new line.
