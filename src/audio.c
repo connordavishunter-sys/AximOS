@@ -5,6 +5,7 @@
 #include <irq.h>
 #include <mm.h>
 #include <process.h>
+#include <serial.h>
 #include <string.h>
 
 // Each stream is what one open file has written, waiting to be mixed. On every
@@ -169,6 +170,8 @@ void audio_tick(void) {
 
     play_at = at;
     if (played >= ahead) { // fallen behind, so it carries on just after where it's playing
+        if (anything_waiting())
+            kprintf("audio: fell %u ms behind\n", (played - ahead) / AUDIO_FRAME_BYTES * 1000 / card_rate);
         ahead = 0;
         write_at = (at + GUARD) % HDA_BUFFER_BYTES;
     } else {
