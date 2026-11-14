@@ -293,6 +293,7 @@ static struct rect launcher(void) {
 // Locking and logging out are only for a desktop someone logged in to.
 enum { ITEM_RUN, ITEM_LOCK, ITEM_LOG_OUT, ITEM_REBOOT, ITEM_SHUT_DOWN, EXTRA_ITEMS };
 static const char *const extra_items[] = {"Run...", "Lock", "Log out", "Reboot", "Shut down"};
+static const char *const extra_icons[] = {NULL, "lock", "logout", "reboot", "shutdown"}; // Run's is an app's
 
 static int extra_count(void) {
     return login_mode ? EXTRA_ITEMS : EXTRA_ITEMS - 2;
@@ -812,15 +813,15 @@ static void draw_taskbar(struct gui_canvas *c, int ox, int oy) {
     }
 }
 
-// A row in the menu or the switcher, with the icon of app, if it's not NULL.
-static void draw_item(struct gui_canvas *c, struct rect r, const char *text, const char *app, bool chosen,
+// A row in the menu or the switcher, with an icon, if it's not NULL.
+static void draw_item(struct gui_canvas *c, struct rect r, const char *text, const struct gui_image *icon, bool chosen,
                       uint32_t color, int ox, int oy) {
     int text_x = 12 + ICON_SIZE;
 
     if (chosen)
         gui_fill(c, r.x - ox, r.y - oy, r.width, r.height, TITLE_FOCUSED);
-    if (app)
-        draw_icon(c, app, r.x + 6, r.y + (r.height - ICON_SIZE) / 2, ox, oy);
+    if (icon)
+        gui_draw_image(c, r.x + 6 - ox, r.y + (r.height - ICON_SIZE) / 2 - oy, icon);
     fitted_text(c, r.x + text_x - ox, r.y + (r.height - GUI_CHAR_HEIGHT) / 2 - oy, r.width - text_x - 8, text,
                 chosen ? TITLE_TEXT : color);
 }
@@ -831,10 +832,15 @@ static void draw_menu(struct gui_canvas *c, int ox, int oy) {
     draw_panel(c, m, ox, oy);
     if (!app_count)
         draw_item(c, menu_item(0), "No apps in " APPS_DIR, NULL, false, TASKBAR_DIM_TEXT, ox, oy);
-    for (int i = 0; i < menu_items(); i++)
-        draw_item(c, menu_item(i), i < app_count ? apps[i] : extra_items[extra_item(i)],
-                  i < app_count ? apps[i] : extra_item(i) == ITEM_RUN ? RUN_COMMAND : NULL,
-                  i == menu_choice, TASKBAR_TEXT, ox, oy);
+    for (int i = 0; i < menu_items(); i++) {
+        int extra = i < app_count ? -1 : extra_item(i);
+        const struct gui_image *icon = extra < 0           ? app_icon(apps[i])
+                                     : extra == ITEM_RUN ? app_icon(RUN_COMMAND)
+                                                         : gui_icon(extra_icons[extra]);
+
+        draw_item(c, menu_item(i), extra < 0 ? apps[i] : extra_items[extra], icon, i == menu_choice, TASKBAR_TEXT,
+                  ox, oy);
+    }
     gui_fill(c, m.x + 8 - ox, first_extra.y - MENU_GAP / 2 - 1 - oy, m.width - 16, 1, TASKBAR_LINE);
 }
 
@@ -845,7 +851,7 @@ static void draw_switcher(struct gui_canvas *c, int ox, int oy) {
     for (int i = 0; i < window_count; i++) {
         struct window *w = switcher_window(i);
 
-        draw_item(c, (struct rect){s.x + 4, s.y + 4 + i * ITEM_HEIGHT, s.width - 8, ITEM_HEIGHT}, w->title, w->app,
+        draw_item(c, (struct rect){s.x + 4, s.y + 4 + i * ITEM_HEIGHT, s.width - 8, ITEM_HEIGHT}, w->title, app_icon(w->app),
                   i == switch_choice, w->minimized ? TASKBAR_DIM_TEXT : TASKBAR_TEXT, ox, oy);
     }
 }

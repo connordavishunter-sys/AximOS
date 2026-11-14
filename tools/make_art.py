@@ -260,6 +260,36 @@ def muted(d, s):
         d.line((a[0] * s, a[1] * s, b[0] * s, b[1] * s), fill=(230, 80, 80), width=int(1.6 * s))
 
 
+def padlock(d, s):
+    d.arc((4.5 * s, 1.5 * s, 11.5 * s, 10 * s), 180, 360, fill=(150, 160, 180), width=int(1.6 * s))
+    d.line((4.5 * s + 0.8 * s, 5.5 * s, 4.5 * s + 0.8 * s, 8 * s), fill=(150, 160, 180), width=int(1.6 * s))
+    d.line((11.5 * s - 0.8 * s, 5.5 * s, 11.5 * s - 0.8 * s, 8 * s), fill=(150, 160, 180), width=int(1.6 * s))
+    d.rounded_rectangle((2.5 * s, 7 * s, 13.5 * s, 15 * s), 1.5 * s, fill=(240, 190, 60))
+    d.ellipse((7 * s, 9.5 * s, 9 * s, 11.5 * s), fill=(150, 105, 20))
+    d.rectangle((7.6 * s, 11 * s, 8.4 * s, 13 * s), fill=(150, 105, 20))
+
+
+def restart(d, s):
+    green = (70, 190, 110)
+    d.arc((2 * s, 2 * s, 14 * s, 14 * s), 300, 240, fill=green, width=int(1.8 * s))
+    # The arrowhead at the arc's end, at the top, pointing round to the right.
+    d.polygon([(4 * s, 0.8 * s), (8.5 * s, 2.6 * s), (4.5 * s, 6 * s)], fill=green)
+
+
+def power(d, s):
+    red = (230, 80, 80)
+    d.arc((2 * s, 2.5 * s, 14 * s, 14.5 * s), 300, 240, fill=red, width=int(1.8 * s))
+    d.line((8 * s, 1 * s, 8 * s, 8 * s), fill=red, width=int(1.8 * s))
+
+
+def log_out(d, s):
+    grey, blue = (150, 160, 180), (90, 150, 240)
+    d.line([(9 * s, 4 * s), (9 * s, 2 * s), (2 * s, 2 * s), (2 * s, 14 * s), (9 * s, 14 * s), (9 * s, 12 * s)],
+           fill=grey, width=int(1.5 * s), joint='curve')
+    d.line((6 * s, 8 * s, 12 * s, 8 * s), fill=blue, width=int(1.8 * s))
+    d.polygon([(11 * s, 4.5 * s), (15 * s, 8 * s), (11 * s, 11.5 * s)], fill=blue)
+
+
 def squares(d, s):
     for i, colour in enumerate(((230, 70, 80), (70, 190, 110), (70, 120, 230), (240, 190, 60))):
         x, y = 1.5 + (i % 2) * 7, 1.5 + (i // 2) * 7
@@ -273,7 +303,8 @@ for name, paint in (('aurora', aurora), ('sunset', sunset), ('ocean', ocean), ('
     paint().save(f'{SHARE}/wallpapers/{name}.jpg', quality=90)
 for name, paint in (('folder', folder), ('file', page), ('text', lambda d, s: page(d, s, lines=True)),
                     ('image', picture_icon), ('program', program), ('audio', audio),
-                    ('speaker', speaker), ('muted', muted)):
+                    ('speaker', speaker), ('muted', muted), ('lock', padlock), ('reboot', restart),
+                    ('shutdown', power), ('logout', log_out)):
     icon(paint).save(f'{SHARE}/icons/{name}.png', optimize=True)
 for name, paint in (('term', terminal), ('editor', editor), ('files', files), ('widgets', widgets),
                     ('guidemo', demo), ('fbdemo', squares), ('viewer', picture_icon), ('settings', gear), ('run', run),
