@@ -9,7 +9,7 @@ KERNEL := $(BUILD)/kernel.elf
 ISO := $(BUILD)/aximos.iso
 ISO_ROOT := $(BUILD)/iso_root
 DISK := $(BUILD)/disk.img
-DISK_SIZE_MB := 128
+DISK_SIZE_MB := 512
 
 OBJS := $(patsubst src/%,$(BUILD)/%.o,$(basename $(wildcard src/*.c src/*.S)))
 

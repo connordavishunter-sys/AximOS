@@ -31,9 +31,10 @@ def quiet(*args):
 
 
 def disk_copy(name):
-    """A writable copy of the built disk, for tests that read back what the OS wrote."""
+    """A writable copy of the built disk, for tests that read back what the OS wrote.
+    Only what's been written is copied, as most of the disk is empty."""
     path = f'{WORK}/{name}.img'
-    shutil.copy(BUILD + '/disk.img', path)
+    quiet('cp', '--sparse=always', BUILD + '/disk.img', path)
     return path
 
 
