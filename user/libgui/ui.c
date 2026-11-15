@@ -28,17 +28,20 @@
 struct theme {
     uint32_t background, panel, popup, text, dim_text, frame, frame_hot, accent, accent_hot, on_accent;
     uint32_t focus_ring, separator, selection, thumb;
+    uint32_t syntax[GUI_SYNTAX_KINDS]; // code's colours, by enum gui_syntax
 };
 
 static const struct theme dark = {
     .background = 0x1E2129, .panel = 0x181B21, .popup = 0x2B303B, .text = 0xE6E8EE, .dim_text = 0x8A93A6,
     .frame = 0x2B303B, .frame_hot = 0x363D4B, .accent = 0x3D63DD, .accent_hot = 0x5578E8, .on_accent = 0xFFFFFF,
     .focus_ring = 0x8FA8F5, .separator = 0x3A4150, .selection = 0x34519E, .thumb = 0x4A5263,
+    .syntax = {0xE6E8EE, 0xC792EA, 0x82AAFF, 0xC3E88D, 0xF78C6C, 0x6F7A8F, 0x89DDFF},
 };
 static const struct theme light = {
     .background = 0xF3F4F7, .panel = 0xFFFFFF, .popup = 0xFFFFFF, .text = 0x1E2129, .dim_text = 0x6B7280,
     .frame = 0xE2E5EB, .frame_hot = 0xD3D8E1, .accent = 0x3D63DD, .accent_hot = 0x5578E8, .on_accent = 0xFFFFFF,
     .focus_ring = 0x5578E8, .separator = 0xC9CED8, .selection = 0xB9CAF7, .thumb = 0xB4BBC8,
+    .syntax = {0x1E2129, 0x8A3FC7, 0x2C5CC5, 0x2E7D32, 0xB85C00, 0x8A93A6, 0x0A7F8F},
 };
 static const struct theme *theme = &dark;
 
@@ -951,12 +954,36 @@ static size_t index_at(const char *s, int line, int column) {
     return at + (column < 0 ? 0 : (size_t)column < end - at ? (size_t)column : end - at);
 }
 
+// Part of a line of code, in runs of a colour each.
+static void draw_code(struct gui_ui *ui, int x, int y, const char *s, const uint8_t *kinds, int length) {
+    char run[256];
+
+    for (int i = 0, n; i < length; i += n) {
+        for (n = 0; i + n < length && kinds[i + n] == kinds[i] && n < (int)sizeof(run) - 1; n++)
+            run[n] = s[i + n];
+        run[n] = '\0';
+        text(ui, x + i * GUI_CHAR_WIDTH, y, run, theme->syntax[kinds[i] < GUI_SYNTAX_KINDS ? kinds[i] : 0], 1);
+    }
+}
+
+void gui_select_text(struct gui_ui *ui, const char *label, size_t from, size_t to) {
+    ui->focus = ui->reveal = ui->text_owner = id_of(label);
+    ui->text_anchor = from;
+    ui->text_cursor = to;
+}
+
 bool gui_textarea(struct gui_ui *ui, const char *label, char *s, size_t size, int lines) {
+    return gui_code_area(ui, label, s, size, lines, NULL);
+}
+
+bool gui_code_area(struct gui_ui *ui, const char *label, char *s, size_t size, int lines, gui_highlighter *highlight) {
+    static uint8_t *kinds;
+    static size_t kinds_size;
     uint32_t id = id_of(label);
     struct gui_scroll *scroll = scroll_of(ui, id);
     struct gui_rect frame, was;
     struct editing e = {s, size, &ui->text_cursor, &ui->text_anchor, true, false};
-    bool changed = false, moved = false;
+    bool changed = false, moved = ui->reveal == id; // selected by gui_select_text
     int line_count = 1;
 
     framed(ui, label, lines > 0 ? lines * GUI_CHAR_HEIGHT + 2 * PADDING : height_left(ui, FRAME_HEIGHT), &frame);
@@ -1014,6 +1041,16 @@ bool gui_textarea(struct gui_ui *ui, const char *label, char *s, size_t size, in
         first = (int)column >= fits ? (int)column - fits + 1 : 0;
     }
 
+    if (highlight && strlen(s) + 1 > kinds_size) {
+        uint8_t *bigger = realloc(kinds, size);
+
+        kinds = bigger ? bigger : kinds;
+        kinds_size = bigger ? size : kinds_size;
+    }
+    highlight = strlen(s) + 1 <= kinds_size ? highlight : NULL;
+    if (highlight)
+        highlight(s, kinds);
+
     push_clip(ui, inner, &was);
     size_t at = 0;
 
@@ -1026,8 +1063,12 @@ bool gui_textarea(struct gui_ui *ui, const char *label, char *s, size_t size, in
         // A selected line break shows as a space at the end of its line.
         if (seen && focused && (int)(end - at) + 1 > first)
             draw_selection(ui, &e, inner.x + PADDING, y, at + first, end - at + 1 - first);
-        if (seen && (int)(end - at) > first)
-            draw_fitted(ui, inner.x + PADDING, y, fits * GUI_CHAR_WIDTH, s + at + first, (int)(end - at) - first, TEXT);
+        int length = (int)(end - at) - first < fits ? (int)(end - at) - first : fits;
+
+        if (seen && length > 0 && highlight)
+            draw_code(ui, inner.x + PADDING, y, s + at + first, kinds + at + first, length);
+        else if (seen && length > 0)
+            draw_fitted(ui, inner.x + PADDING, y, fits * GUI_CHAR_WIDTH, s + at + first, length, TEXT);
         at = end + 1;
     }
     if (focused) {

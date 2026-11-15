@@ -257,17 +257,61 @@ void gui_set_cursor(struct gui_window *window, enum gui_cursor cursor) {
     gui_send(connection, &(struct gui_message){.type = GUI_CURSOR, .window = window->id, .x = cursor});
 }
 
-bool gui_clipboard_set(const char *text, size_t length) {
-    struct gui_message message = {.type = GUI_CLIPBOARD_SET, .width = (int32_t)length};
+// Sends a message of type with data in new shared memory, which wm maps and removes.
+static bool send_shared(uint32_t type, const char *data, size_t length) {
+    struct gui_message message = {.type = type, .width = (int32_t)length};
     char *shared = length ? new_shared(length, message.buffer) : NULL;
 
     if (length && !shared)
         return false;
     if (shared) {
-        memcpy(shared, text, length);
+        memcpy(shared, data, length);
         munmap(shared, length);
     }
     return gui_send(connection, &message);
+}
+
+// A copy, ending in a zero byte, of the shared memory a message from wm names, which
+// is then removed, or NULL if there's none or it's over max bytes.
+static char *take_shared(const struct gui_message *message, size_t max) {
+    char name[GUI_TITLE_MAX];
+    size_t size = message->width > 0 && (size_t)message->width <= max ? (size_t)message->width : 0;
+
+    snprintf(name, sizeof(name), "%.*s", GUI_TITLE_MAX - 1, message->buffer);
+    if (!size)
+        return NULL;
+
+    int fd = shm_open(name, O_RDONLY, 0);
+    void *shared = fd < 0 ? MAP_FAILED : mmap(NULL, size, PROT_READ, MAP_SHARED, fd, 0);
+    char *copy = shared == MAP_FAILED ? NULL : malloc(size + 1);
+
+    if (fd >= 0)
+        close(fd);
+    shm_unlink(name);
+    if (copy) {
+        memcpy(copy, shared, size);
+        copy[size] = '\0';
+    }
+    if (shared != MAP_FAILED)
+        munmap(shared, size);
+    return copy;
+}
+
+bool gui_clipboard_set(const char *text, size_t length) {
+    return send_shared(GUI_CLIPBOARD_SET, text, length);
+}
+
+bool gui_drag_file(const char *path) {
+    return send_shared(GUI_DRAG, path, strlen(path));
+}
+
+bool gui_dropped_file(const struct gui_message *drop, char path[GUI_PATH_MAX]) {
+    char *copy = drop->type == GUI_DROP ? take_shared(drop, GUI_PATH_MAX - 1) : NULL;
+
+    if (copy)
+        strcpy(path, copy);
+    free(copy);
+    return copy;
 }
 
 bool gui_notify(struct gui_window *window, const char *title, const char *text) {
@@ -281,7 +325,7 @@ bool gui_notify(struct gui_window *window, const char *title, const char *text) 
 // Waits for the answer, keeping events that come first for gui_next_event.
 char *gui_clipboard_get(size_t *length) {
     struct gui_message message = {.type = GUI_CLIPBOARD_GET};
-    char *text = NULL;
+    char *text;
 
     if (length)
         *length = 0;
@@ -289,26 +333,9 @@ char *gui_clipboard_get(size_t *length) {
         return NULL;
     while (gui_receive(connection, &message) && message.type != GUI_CLIPBOARD)
         gui_post(&message);
-    if (message.type != GUI_CLIPBOARD || message.width <= 0)
-        return NULL;
-
-    size_t size = (size_t)message.width;
-    int fd = shm_open(message.buffer, O_RDONLY, 0);
-    void *shared = fd < 0 ? MAP_FAILED : mmap(NULL, size, PROT_READ, MAP_SHARED, fd, 0);
-
-    if (fd >= 0)
-        close(fd);
-    shm_unlink(message.buffer);
-    if (shared == MAP_FAILED)
-        return NULL;
-    text = malloc(size + 1);
-    if (text) {
-        memcpy(text, shared, size);
-        text[size] = '\0';
-        if (length)
-            *length = size;
-    }
-    munmap(shared, size);
+    text = message.type == GUI_CLIPBOARD ? take_shared(&message, INT32_MAX) : NULL;
+    if (text && length)
+        *length = (size_t)message.width;
     return text;
 }
 

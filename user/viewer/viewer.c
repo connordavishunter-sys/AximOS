@@ -13,6 +13,7 @@
 static struct gui_window *window;
 static uint32_t background, text_colour; // from the theme
 static struct gui_image image, fitted; // as it is, and as it's shown
+static char title[GUI_TITLE_MAX] = "Viewer";
 
 // The image fitted into the window, never made bigger than it is, in the middle,
 // with checks under it.
@@ -54,6 +55,24 @@ static void draw(void) {
     gui_show(window);
 }
 
+// Shows a file in place of what was shown, with its name and size in the title.
+static void show_file(const char *path) {
+    const char *name = strrchr(path, '/');
+    struct gui_image loaded;
+
+    if (!gui_image_load(path, &loaded)) {
+        printf("viewer: %s: %s\n", path, gui_image_error());
+        return;
+    }
+    gui_image_free(&image);
+    gui_image_free(&fitted);
+    image = loaded;
+    snprintf(title, sizeof(title), "%s (%dx%d) - Viewer", name ? name + 1 : path, image.width, image.height);
+    printf("viewer: showing %s %dx%d\n", path, image.width, image.height);
+    if (window)
+        gui_set_title(window, title);
+}
+
 static void use_theme(void) {
     struct gui_settings settings;
 
@@ -71,15 +90,8 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    char title[GUI_TITLE_MAX] = "Viewer";
-    const char *name = argc > 1 ? strrchr(argv[1], '/') : NULL;
-
-    if (argc > 1 && gui_image_load(argv[1], &image)) {
-        snprintf(title, sizeof(title), "%s (%dx%d) - Viewer", name ? name + 1 : argv[1], image.width, image.height);
-        printf("viewer: showing %s %dx%d\n", argv[1], image.width, image.height);
-    } else if (argc > 1) {
-        printf("viewer: %s: %s\n", argv[1], gui_image_error());
-    }
+    if (argc > 1)
+        show_file(argv[1]);
     fflush(stdout);
 
     int w = image.width < MIN_SIZE ? MIN_SIZE : image.width > MAX_WIDTH ? MAX_WIDTH : image.width;
@@ -94,6 +106,13 @@ int main(int argc, char **argv) {
     use_theme();
     draw();
     while (gui_next_event(&e) && e.type != GUI_CLOSE) {
+        char path[GUI_PATH_MAX];
+
+        if (gui_dropped_file(&e, path)) {
+            show_file(path);
+            draw();
+            fflush(stdout);
+        }
         if (e.type == GUI_SETTINGS) {
             use_theme();
             draw();

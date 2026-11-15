@@ -164,15 +164,15 @@ try:
     check('shown again', px(1000, 400) == PAPER, hex(px(1000, 400)))
 
     # The menu lists /system/bin/gui above the launcher, 24 pixels an app: calculator,
-    # editor, fbdemo, files, guidemo, player, settings, tasks, term, viewer, widgets.
-    # Then a line, Run..., Reboot and Shut down.
-    menu_top = bar - 14 * 24 - 9 - 8
+    # editor, fbdemo, files, guidemo, paint, player, settings, snake, tasks, term,
+    # viewer, widgets. Then a line, Run..., Reboot and Shut down.
+    menu_top = bar - 16 * 24 - 9 - 8
     mouse.click(36, bar + 14)
     time.sleep(0.5)
     w, h, px = v.screenshot()
     check('the launcher opens the menu', px(150, menu_top + 10) == FOCUSED, hex(px(150, menu_top + 10)))
     at = v.mark()
-    mouse.click(100, menu_top + 4 + 8 * 24 + 12)
+    mouse.click(100, menu_top + 4 + 10 * 24 + 12)
     check('clicking term in the menu opens a terminal', v.wait('guidemo: focus 0', 10, at), v.text(at))
     time.sleep(1)
     w, h, px = v.screenshot()

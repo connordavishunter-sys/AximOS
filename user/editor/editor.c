@@ -1,11 +1,17 @@
+#include "syntax.h"
 #include <errno.h>
 #include <fcntl.h>
-#include <gui.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
 #define TEXT_MAX (256 * 1024)
+#define TEXT "##text"
+#define FIND "##find"
+#define REPLACE "##replace"
+#define LINE "##line"
+#define KEY_F3 (KEY_F1 + 2)
 
 // What waits for a second go because it would lose changes that aren't saved.
 enum action { NOTHING, NEW, OPEN, CLOSE };
@@ -15,6 +21,13 @@ static struct gui_file_picker picker;
 static char text[TEXT_MAX], path[GUI_PATH_MAX], status[GUI_PATH_MAX + 64];
 static bool modified, quitting;
 static enum action asked;
+
+// The bar under the buttons, for finding, replacing or going to a line, and what's
+// selected in the text, as of when it last had the keyboard.
+static enum { NO_BAR, FINDING, REPLACING, GOING } bar;
+static bool bar_focus;
+static char wanted[256], replacement[256], line_number[16];
+static size_t selected_from, selected_to;
 
 static const char *file_name(void) {
     const char *slash = strrchr(path, '/');
@@ -51,6 +64,7 @@ static void open_file(const char *chosen) {
         return;
     }
     text[n] = '\0';
+    selected_from = selected_to = 0;
     snprintf(path, sizeof(path), "%s", chosen);
     snprintf(status, sizeof(status), "Opened %s, %zd bytes", path, n);
     printf("editor: opened %s %zd bytes\n", path, n);
@@ -114,6 +128,7 @@ static void new_file(void) {
     if (!may_lose_changes(NEW))
         return;
     text[0] = path[0] = '\0';
+    selected_from = selected_to = 0;
     snprintf(status, sizeof(status), "New file");
     modified = true;
     set_modified(false);
@@ -126,6 +141,115 @@ static void open_picked(void) {
 
 static void close_window(void) {
     quitting = may_lose_changes(CLOSE);
+}
+
+// The text gets the keyboard, but not this frame's keys, which were for the bar.
+static void select_text(struct gui_ui *ui, size_t from, size_t to) {
+    gui_select_text(ui, TEXT, from, to);
+    ui->key_count = 0;
+    selected_from = from;
+    selected_to = to;
+    printf("editor: selected %zu %zu\n", from, to);
+}
+
+// Finds what's wanted after what's selected, going round to the start, and selects it.
+static bool find_next(struct gui_ui *ui) {
+    size_t length = strlen(wanted), after = selected_from > selected_to ? selected_from : selected_to;
+    const char *found = length ? strstr(text + after, wanted) : NULL;
+
+    found = found || !length ? found : strstr(text, wanted);
+    if (!found) {
+        snprintf(status, sizeof(status), length ? "Can't find %s" : "Nothing to find", wanted);
+        return false;
+    }
+    select_text(ui, found - text, found - text + length);
+    snprintf(status, sizeof(status), "Found %s", wanted);
+    return true;
+}
+
+// Puts the replacement in place of count characters at, if it fits.
+static bool replace_at(size_t at, size_t count) {
+    size_t length = strlen(text), with = strlen(replacement);
+
+    if (length - count + with >= sizeof(text))
+        return false;
+    memmove(text + at + with, text + at + count, length - at - count + 1);
+    memcpy(text + at, replacement, with);
+    set_modified(true);
+    return true;
+}
+
+// Replaces what's selected, if it's what's wanted, then finds the next.
+static void replace_one(struct gui_ui *ui) {
+    size_t low = selected_from < selected_to ? selected_from : selected_to;
+    size_t high = selected_from < selected_to ? selected_to : selected_from, length = strlen(wanted);
+
+    if (length && high - low == length && !strncmp(text + low, wanted, length) && replace_at(low, length))
+        selected_from = selected_to = low + strlen(replacement);
+    find_next(ui);
+}
+
+static void replace_all(struct gui_ui *ui) {
+    size_t length = strlen(wanted), at = 0;
+    int count = 0;
+
+    for (char *found; length && (found = strstr(text + at, wanted)); count++) {
+        at = found - text;
+        if (!replace_at(at, length))
+            break;
+        at += strlen(replacement);
+    }
+    snprintf(status, sizeof(status), "Replaced %d", count);
+    printf("editor: replaced %d\n", count);
+    select_text(ui, at, at);
+}
+
+static void go_to_line(struct gui_ui *ui) {
+    long line = strtol(line_number, NULL, 10), at_line = 1;
+    size_t at = 0;
+
+    for (; at_line < line && text[at]; at++)
+        at_line += text[at] == '\n';
+    snprintf(status, sizeof(status), "Line %ld", at_line);
+    select_text(ui, at, at);
+    bar = NO_BAR;
+}
+
+static void open_bar(int which) {
+    bar = which;
+    bar_focus = true;
+}
+
+// A text box in the bar, which Enter does what it's for in.
+static bool bar_box(struct gui_ui *ui, const char *prompt, const char *label, char *s, size_t size) {
+    gui_label(ui, "%s", prompt);
+    gui_same_line(ui);
+    if (bar_focus)
+        gui_set_focus(ui, label, s);
+    bar_focus = false;
+    gui_textbox(ui, label, s, size);
+    gui_same_line(ui);
+    return gui_focused(ui, label) && gui_key(ui, KEY_ENTER);
+}
+
+static void bar_strip(struct gui_ui *ui) {
+    if (bar == GOING) {
+        if (bar_box(ui, "Go to line", LINE, line_number, sizeof(line_number)) | gui_button(ui, "Go"))
+            go_to_line(ui);
+    } else {
+        if (bar_box(ui, "Find", FIND, wanted, sizeof(wanted)) | gui_button(ui, "Next"))
+            find_next(ui);
+    }
+    gui_same_line(ui);
+    if (gui_button(ui, "Close") || gui_key(ui, KEY_ESCAPE))
+        bar = NO_BAR;
+    if (bar == REPLACING) {
+        if (bar_box(ui, "With", REPLACE, replacement, sizeof(replacement)) | gui_button(ui, "Replace"))
+            replace_one(ui);
+        gui_same_line(ui);
+        if (gui_button(ui, "All"))
+            replace_all(ui);
+    }
 }
 
 static void editing(struct gui_ui *ui) {
@@ -143,6 +267,25 @@ static void editing(struct gui_ui *ui) {
             close_window();
         gui_menu_end(ui);
     }
+    if (gui_menu(ui, "Edit")) {
+        if (gui_menu_item(ui, "Find..."))
+            open_bar(FINDING);
+        if (gui_menu_item(ui, "Find next"))
+            find_next(ui);
+        if (gui_menu_item(ui, "Replace..."))
+            open_bar(REPLACING);
+        if (gui_menu_item(ui, "Go to line..."))
+            open_bar(GOING);
+        gui_menu_end(ui);
+    }
+    if (gui_shortcut(ui, 'f'))
+        open_bar(FINDING);
+    if (gui_shortcut(ui, 'h'))
+        open_bar(REPLACING);
+    if (gui_shortcut(ui, 'g'))
+        open_bar(GOING);
+    if (gui_key(ui, KEY_F3))
+        find_next(ui);
     if (gui_shortcut(ui, 'n'))
         new_file();
     if (gui_shortcut(ui, 'o'))
@@ -159,8 +302,21 @@ static void editing(struct gui_ui *ui) {
         save();
     gui_same_line(ui);
     gui_label(ui, "%s", status);
-    if (gui_textarea(ui, "##text", text, sizeof(text), 0))
+    if (bar)
+        bar_strip(ui);
+
+    gui_highlighter *highlight = syntax_for(path, text);
+    static gui_highlighter *was = (gui_highlighter *)1;
+
+    if (highlight != was)
+        printf("editor: colouring %s\n", syntax_name(highlight));
+    was = highlight;
+    if (gui_code_area(ui, TEXT, text, sizeof(text), 0, highlight))
         set_modified(true);
+    if (gui_focused(ui, TEXT)) {
+        selected_from = ui->text_anchor;
+        selected_to = ui->text_cursor;
+    }
 }
 
 static void frame(struct gui_ui *ui) {
@@ -215,9 +371,14 @@ int main(int argc, char **argv) {
         show_title();
     frame(&ui);
     while (!quitting && gui_next_event(&e)) {
+        char dropped[GUI_PATH_MAX];
+        bool opening = gui_dropped_file(&e, dropped);
+
         if (e.type == GUI_CLOSE)
             close_window();
-        if (gui_ui_event(&ui, &e) || e.type == GUI_CLOSE)
+        if (opening && may_lose_changes(OPEN))
+            open_file(dropped);
+        if (gui_ui_event(&ui, &e) || e.type == GUI_CLOSE || opening)
             frame(&ui);
     }
     printf("editor: closed\n");

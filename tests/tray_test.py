@@ -1,5 +1,6 @@
-"""Checks the sound menu from the speaker beside the clock: its slider and mute set
-the mixer, the wheel over the speaker changes it, and it's kept for next time."""
+"""Checks the tray beside the clock. The sound menu from the speaker: its slider and
+mute set the mixer, the wheel over the speaker changes it, and it's kept for next
+time. The network's panel, and the bell's, which keeps notifications until cleared."""
 import time
 from vm import VM, check, finish
 
@@ -13,6 +14,11 @@ PANEL = (TRAY[0] + 24 - 220, H - 28 - 82, 220, 82)
 SLIDER = (PANEL[0] + 16, PANEL[1] + 30, 220 - 32, 20)
 MUTE = (PANEL[0] + 12 + 30, PANEL[1] + 56 + 10)
 DESKTOP = 0x1E2430
+# Left of the speaker, the bell and the network, 24 wide each. The bell's panel is
+# 300 wide, 40 tall and 44 more a notification, with Clear 56 by 22 at its top
+# right, 8 in and 6 down. The network's is 260 by 156.
+BELL, NETWORK = (TRAY[0] - 24, TRAY[1]), (TRAY[0] - 48, TRAY[1])
+NET_PANEL = (NETWORK[0] + 24 - 260, H - 28 - 156)
 
 v = VM(vmmouse=True)
 try:
@@ -59,6 +65,31 @@ try:
     at = v.mark()
     v.type('wm\n')
     check('and set again next time', v.wait('wm: volume 55, muted', 10, at), v.text(at))
+    v.key('meta_l-shift-q'); time.sleep(1)
+
+    at = v.mark()
+    v.type("wm 'sleep 1; notify Hello there'\n")
+    check('the network is found', v.wait('wm: network connected', 10, at), v.text(at))
+    check('a notification comes', v.wait('wm: notice Hello: there', 10, at), v.text(at))
+    time.sleep(0.5)
+    w, h, px = v.screenshot()
+    check('the bell has a dot for it', px(BELL[0] + 24 - 5, BELL[1] + 4) == 0xE5484D, hex(px(BELL[0] + 24 - 5, BELL[1] + 4)))
+    net_inside = (NET_PANEL[0] + 130, NET_PANEL[1] + 40)
+    click(NETWORK[0] + 12, NETWORK[1] + 10); time.sleep(0.5)
+    w, h, px = v.screenshot()
+    check('the network icon opens its panel', px(*net_inside) != DESKTOP, hex(px(*net_inside)))
+    click(BELL[0] + 12, BELL[1] + 10); time.sleep(0.5)
+    w, h, px = v.screenshot()
+    check('the bell opens its panel, closing the other', px(*net_inside) == DESKTOP, hex(px(*net_inside)))
+    check('without the dot now', px(BELL[0] + 24 - 5, BELL[1] + 4) != 0xE5484D, hex(px(BELL[0] + 24 - 5, BELL[1] + 4)))
+    panel_top = H - 28 - 84
+    check('the notification is listed', px(TRAY[0] - 100, panel_top + 50) != DESKTOP, hex(px(TRAY[0] - 100, panel_top + 50)))
+    at = v.mark()
+    click(BELL[0] + 24 - 8 - 28, panel_top + 6 + 11)
+    check('Clear clears them', v.wait('wm: notifications cleared', 5, at), v.text(at))
+    v.key('esc'); time.sleep(0.5)
+    w, h, px = v.screenshot()
+    check('Escape closes the panel', px(TRAY[0] - 100, panel_top + 50) == DESKTOP, hex(px(TRAY[0] - 100, panel_top + 50)))
     v.key('meta_l-shift-q')
 finally:
     v.close()

@@ -21,6 +21,7 @@
 #define CUT "/tmp/files-cut" // the path on the clipboard, when it was cut, to move it
 #define KEY_F2 (KEY_F1 + 1)
 #define KEY_F5 (KEY_F1 + 4)
+#define DRAG_DISTANCE 6 // the mouse goes, held on an item, before it's dragged
 
 struct entry {
     char name[NAME_MAX + 1];
@@ -553,6 +554,28 @@ static void list_keys(struct gui_ui *ui) {
         paste();
 }
 
+// Dragging an item takes it to another window, through wm, to open it there.
+static void drag(struct gui_ui *ui, struct gui_rect list) {
+    static bool may_drag;
+    static int from_x, from_y;
+    char path[PATH_MAX];
+
+    if (ui->mouse_pressed && ui->clicked_item >= 0 && ui->mouse_x >= list.x && ui->mouse_y >= list.y
+        && ui->mouse_x < list.x + list.width && ui->mouse_y < list.y + list.height) {
+        may_drag = true;
+        from_x = ui->mouse_x;
+        from_y = ui->mouse_y;
+    }
+    if (!ui->mouse_down)
+        may_drag = false;
+    if (!may_drag || !chosen() || abs(ui->mouse_x - from_x) + abs(ui->mouse_y - from_y) < DRAG_DISTANCE)
+        return;
+    may_drag = false;
+    path_of(path, chosen()->name);
+    if (gui_drag_file(path))
+        printf("files: dragging %s\n", path);
+}
+
 static void frame(struct gui_ui *ui) {
     int active = current, closing = 0, result;
 
@@ -577,6 +600,7 @@ static void frame(struct gui_ui *ui) {
     struct gui_rect list = gui_last_rect(ui);
 
     report(ui, 2, "list");
+    drag(ui, list);
     if (result == GUI_LIST_ACTIVATED)
         open_selected();
     else if (result == GUI_LIST_CHANGED && (asking == RENAMING || asking == DELETING))

@@ -312,6 +312,43 @@ def squares(d, s):
         d.rounded_rectangle((x * s, y * s, (x + 6) * s, (y + 6) * s), 1.2 * s, fill=colour)
 
 
+def bars(d, s, colour=(150, 160, 180)):
+    """The network, as bars rising to the right."""
+    for i, h in enumerate((4, 7, 10, 13)):
+        x = 1.5 + i * 3.5
+        d.rounded_rectangle((x * s, (14.5 - h) * s, (x + 2.4) * s, 14.5 * s), 0.6 * s, fill=colour)
+
+
+def offline(d, s):
+    bars(d, s, (90, 98, 115))
+    for a, b in (((9, 1.5), (15, 7.5)), ((15, 1.5), (9, 7.5))):
+        d.line((a[0] * s, a[1] * s, b[0] * s, b[1] * s), fill=(230, 80, 80), width=int(1.6 * s))
+
+
+def bell(d, s):
+    grey = (150, 160, 180)
+    d.pieslice((3 * s, 2 * s, 13 * s, 14 * s), 180, 360, fill=grey)
+    d.rectangle((3 * s, 8 * s, 13 * s, 11.5 * s), fill=grey)
+    d.polygon([(1.5 * s, 12.5 * s), (3 * s, 11 * s), (13 * s, 11 * s), (14.5 * s, 12.5 * s)], fill=grey)
+    d.ellipse((6.5 * s, 12.5 * s, 9.5 * s, 15.5 * s), fill=grey)
+    d.ellipse((7 * s, 0.5 * s, 9 * s, 2.5 * s), fill=grey)
+
+
+def palette_icon(d, s):
+    d.ellipse((1 * s, 2 * s, 15 * s, 14 * s), fill=(235, 215, 180))
+    d.ellipse((9.5 * s, 8.5 * s, 12.5 * s, 11.5 * s), fill=(0, 0, 0, 0))
+    for (x, y), colour in zip(((4.5, 6), (7.5, 4.5), (10.8, 5.5), (4.5, 10)),
+                              ((230, 70, 80), (240, 190, 60), (70, 120, 230), (70, 190, 110))):
+        d.ellipse(((x - 1.3) * s, (y - 1.3) * s, (x + 1.3) * s, (y + 1.3) * s), fill=colour)
+
+
+def snake(d, s):
+    d.rounded_rectangle((1 * s, 1 * s, 15 * s, 15 * s), 2 * s, fill=(22, 26, 34))
+    d.line([(3.5 * s, 12 * s), (3.5 * s, 8 * s), (8 * s, 8 * s), (8 * s, 4 * s), (12 * s, 4 * s)], fill=(39, 174, 96),
+           width=int(2.4 * s), joint='curve')
+    d.rectangle((11 * s, 10.5 * s, 13 * s, 12.5 * s), fill=(229, 72, 77))
+
+
 os.makedirs(SHARE + '/wallpapers', exist_ok=True)
 os.makedirs(SHARE + '/icons/apps', exist_ok=True)
 wallpaper().save(SHARE + '/wallpapers/default.jpg', quality=90)
@@ -320,9 +357,11 @@ for name, paint in (('aurora', aurora), ('sunset', sunset), ('ocean', ocean), ('
 for name, paint in (('folder', folder), ('file', page), ('text', lambda d, s: page(d, s, lines=True)),
                     ('image', picture_icon), ('program', program), ('audio', audio),
                     ('speaker', speaker), ('muted', muted), ('lock', padlock), ('reboot', restart),
-                    ('shutdown', power), ('logout', log_out)):
+                    ('shutdown', power), ('logout', log_out), ('network', bars), ('offline', offline),
+                    ('bell', bell)):
     icon(paint).save(f'{SHARE}/icons/{name}.png', optimize=True)
 for name, paint in (('term', terminal), ('editor', editor), ('files', files), ('widgets', widgets),
                     ('guidemo', demo), ('fbdemo', squares), ('viewer', picture_icon), ('settings', gear), ('run', run),
-                    ('player', player), ('calculator', calculator), ('tasks', graph)):
+                    ('player', player), ('calculator', calculator), ('tasks', graph), ('paint', palette_icon),
+                    ('snake', snake)):
     icon(paint).save(f'{SHARE}/icons/apps/{name}.png', optimize=True)

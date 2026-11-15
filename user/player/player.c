@@ -465,6 +465,16 @@ int main(int argc, char **argv) {
     while (gui_next_event(&e) && e.type != GUI_CLOSE) {
         if (e.type == GUI_TIMER)
             next_if_finished();
+
+        char path[GUI_PATH_MAX];
+        int at = gui_dropped_file(&e, path) && audio_known(path) ? open_file(path) : -1;
+
+        if (at >= 0) {
+            printf("player: dropped %s\n", path);
+            choose(at);
+            frame(&ui);
+            fflush(stdout);
+        }
         if (gui_ui_event(&ui, &e))
             frame(&ui);
     }

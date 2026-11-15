@@ -34,6 +34,8 @@ enum gui_message_type {
     GUI_NOTIFY,        // a notification: its title in text and what it says in buffer, from
                        // the window it's about, if it's for one, whose icon it has
     GUI_UNLOCK,        // from the log-in screen wm started, once someone's logged in
+    GUI_DRAG,          // while the mouse is held in a window, a file's path dragged from it, width
+                       // bytes in shared memory named in buffer, like the clipboard's text
 
     // From wm. Mouse positions are inside the window.
     GUI_CREATED,
@@ -47,6 +49,7 @@ enum gui_message_type {
     GUI_CLIPBOARD,    // width and buffer, what's on the clipboard
     GUI_SCREEN,       // width and height of the screen, with x 1 if its resolution can change.
                       // After GUI_CREATED, and whenever it changes.
+    GUI_DROP,         // x, y, and a file's path dropped on the window, as GUI_DRAG gives it
 
     // From libgui itself, through gui_post: draw the window again.
     GUI_REDRAW,
@@ -129,6 +132,13 @@ bool gui_clipboard_set(const char *text, size_t length);
 // What's on the clipboard, ending in a zero byte, to be freed, or NULL if it's
 // empty. length, if not NULL, gets its length.
 char *gui_clipboard_get(size_t *length);
+
+// Drags a file from the window the mouse is held in, which wm shows by the cursor
+// and gives to the window it's let go over, as a GUI_DROP.
+bool gui_drag_file(const char *path);
+
+// The path a GUI_DROP gives, or false if it couldn't be had.
+bool gui_dropped_file(const struct gui_message *drop, char path[GUI_PATH_MAX]);
 
 // Shows what was drawn on part of a window's canvas, or all of it with gui_show.
 void gui_update(struct gui_window *window, int x, int y, int width, int height);
@@ -390,6 +400,17 @@ bool gui_password(struct gui_ui *ui, const char *label, char *text, size_t size)
 // Text of several lines, lines tall, or down to the bottom of the window if lines
 // is 0, scrolling to keep the cursor in sight. Enter starts a new line.
 bool gui_textarea(struct gui_ui *ui, const char *label, char *text, size_t size, int lines);
+
+// The same, with its text coloured as code: highlight gives each character of text
+// its kind, in kinds, which is as long.
+enum gui_syntax { GUI_SYNTAX_PLAIN, GUI_SYNTAX_KEYWORD, GUI_SYNTAX_TYPE, GUI_SYNTAX_STRING, GUI_SYNTAX_NUMBER,
+                  GUI_SYNTAX_COMMENT, GUI_SYNTAX_DIRECTIVE, GUI_SYNTAX_KINDS };
+typedef void gui_highlighter(const char *text, uint8_t *kinds);
+bool gui_code_area(struct gui_ui *ui, const char *label, char *text, size_t size, int lines, gui_highlighter *highlight);
+
+// Gives the text widget with label the keyboard, selecting from one place in its
+// text to another, where the cursor goes, and scrolls to show it.
+void gui_select_text(struct gui_ui *ui, const char *label, size_t from, size_t to);
 
 // Picks one of count items, shown when clicked in a list under it, which scrolls
 // when there are too many. Up and Down change it, open or not.

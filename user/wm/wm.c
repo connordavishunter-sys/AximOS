@@ -1,9 +1,11 @@
+#include <arpa/inet.h>
 #include <audio_types.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <gui.h>
 #include <mouse_event.h>
+#include <netdb.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdio.h>
@@ -201,6 +203,8 @@ static uint32_t buttons;
 static struct window *dragging; // by its title bar
 static int drag_x, drag_y;
 static struct window *grabbed; // pressed in its contents, so it gets the mouse until release
+static char drag_file[GUI_PATH_MAX]; // dragged from grabbed, to drop on another window
+static const struct gui_image *drag_icon;
 static struct window *resizing;
 static int resize_x, resize_y, resize_width, resize_height;
 static int resize_room; // above the frame, which it can't grow into
@@ -472,10 +476,17 @@ static struct rect cursor_rect(void) {
 
 // A pixel more all round, as a virtual machine's window that smooths the screen
 // while scaling it blends each pixel into the next, and only redraws what changed.
+// A dragged file's icon, by the cursor.
+static struct rect drag_rect(void) {
+    return (struct rect){cursor_x + 10, cursor_y + 14, ICON_SIZE, ICON_SIZE};
+}
+
 static void damage_cursor(void) {
     struct rect r = cursor_rect();
 
     add_damage((struct rect){r.x - 1, r.y - 1, r.width + 2, r.height + 2});
+    if (drag_file[0])
+        add_damage(drag_rect());
 }
 
 // How dark a shadow is by how far left or right, and up or down, a point is from
@@ -598,8 +609,10 @@ static int windows_by_age(struct window *out[MAX_WINDOWS]) {
     return count;
 }
 
+static struct rect tray(void);
+
 static struct rect taskbar_button(int index, int count) {
-    int start = workspace_box(WORKSPACES).x + 8, room = screen.width - start - 64;
+    int start = workspace_box(WORKSPACES).x + 8, room = tray().x - 8 - start;
     int width = count && room / count < TASKBAR_BUTTON_WIDTH ? room / count : TASKBAR_BUTTON_WIDTH;
 
     return (struct rect){start + index * width, taskbar().y + 4, width - 4, TASKBAR_HEIGHT - 8};
@@ -627,121 +640,22 @@ static const char *clock_text(char out[16]) {
     return out + (settings.clock_12_hour && out[0] == '0');
 }
 
-// The sound menu, from the speaker beside the clock, sets the volume of everything.
-#define VOLUME_FILE "/system/etc/volume"
-#define SOUND_WIDTH 220
-#define SOUND_HEIGHT 82
-#define VOLUME_STEP 5
-static int mixer = -1, volume = 100;
-static bool muted, sound_open, setting_volume;
-
-static struct rect tray(void) {
-    char clock[16];
-
-    return (struct rect){screen.width - gui_text_width(clock_text(clock), 1) - 12 - 8 - 24, taskbar().y + 4, 24,
-                         TASKBAR_HEIGHT - 8};
-}
-
-static struct rect sound_panel(void) {
-    struct rect t = tray();
-    int x = t.x + t.width - SOUND_WIDTH;
-
-    return (struct rect){x > 0 ? x : 0, taskbar().y - SOUND_HEIGHT, SOUND_WIDTH, SOUND_HEIGHT};
-}
-
-// Where the slider can be clicked, and the line it's drawn on through its middle.
-static struct rect volume_slider(void) {
-    struct rect p = sound_panel();
-
-    return (struct rect){p.x + 16, p.y + 30, p.width - 32, 20};
-}
-
-static struct rect mute_row(void) {
-    struct rect p = sound_panel();
-
-    return (struct rect){p.x + 12, p.y + 56, p.width - 24, 20};
-}
-
-static void set_volume(int to, bool mute) {
-    FILE *f;
-
-    to = to < 0 ? 0 : to > 100 ? 100 : to;
-    if (to == volume && mute == muted)
-        return;
-    volume = to;
-    muted = mute;
-    ioctl(mixer, MIXER_SET_VOLUME, &volume);
-    ioctl(mixer, MIXER_SET_MUTE, &(int){muted});
-    if ((f = fopen(VOLUME_FILE, "w"))) {
-        fprintf(f, "%d%s\n", volume, muted ? " muted" : "");
-        fclose(f);
-    }
-    printf("wm: volume %d%s\n", volume, muted ? ", muted" : "");
-    add_damage(tray());
-    if (sound_open)
-        add_damage(sound_panel());
-}
-
-// What was set last time, which the sound card starts without.
-static void load_volume(void) {
-    FILE *f = fopen(VOLUME_FILE, "r");
-    char word[16] = "";
-    int was = 100;
-
-    mixer = open("/dev/mixer", O_RDONLY | O_CLOEXEC);
-    if (f) {
-        if (fscanf(f, "%d %15s", &was, word) < 1)
-            was = 100;
-        fclose(f);
-    }
-    volume = -1; // so it's set whatever it is
-    if (mixer >= 0)
-        set_volume(was, !strcmp(word, "muted"));
-}
-
-static void close_sound(void) {
-    if (sound_open)
-        add_damage(sound_panel());
-    sound_open = setting_volume = false;
-}
-
-static void set_volume_at(int x) {
-    struct rect r = volume_slider();
-
-    set_volume(((x - r.x) * 100 + r.width / 2) / r.width, muted);
-}
-
-static void draw_sound(struct gui_canvas *c, int ox, int oy) {
-    struct rect p = sound_panel(), r = volume_slider(), m = mute_row();
-    int knob = r.x + r.width * volume / 100, line = r.y + r.height / 2;
-    char percent[8];
-
-    draw_panel(c, p, ox, oy);
-    snprintf(percent, sizeof(percent), "%d%%", volume);
-    gui_text(c, p.x + 12 - ox, p.y + 8 - oy, "Volume", TASKBAR_TEXT, 1);
-    gui_text(c, p.x + p.width - 12 - gui_text_width(percent, 1) - ox, p.y + 8 - oy, percent,
-             muted ? TASKBAR_DIM_TEXT : TASKBAR_TEXT, 1);
-    gui_fill(c, r.x - ox, line - 2 - oy, r.width, 4, TASKBAR_LINE);
-    gui_fill(c, r.x - ox, line - 2 - oy, knob - r.x, 4, muted ? TASKBAR_DIM_TEXT : TITLE_FOCUSED);
-    gui_fill(c, knob - 5 - ox, line - 8 - oy, 10, 16, muted ? TASKBAR_DIM_TEXT : TITLE_FOCUSED);
-    gui_fill(c, m.x + 4 - ox, m.y + 3 - oy, 14, 14, TASKBAR_TEXT);
-    gui_fill(c, m.x + 5 - ox, m.y + 4 - oy, 12, 12, muted ? TITLE_FOCUSED : TASKBAR_COLOR);
-    gui_text(c, m.x + 26 - ox, m.y + (m.height - GUI_CHAR_HEIGHT) / 2 - oy, "Mute", TASKBAR_TEXT, 1);
-}
-
 // Notifications stack up from the bottom right corner, the newest lowest, until
-// they've been up NOTICE_MS or they're clicked.
+// they've been up NOTICE_MS or they're clicked. The last HISTORY are kept for the
+// tray, newest first, with how many came since it was last looked at.
 #define MAX_NOTICES 4
 #define NOTICE_MS 5000
 #define NOTICE_WIDTH 300
 #define NOTICE_HEIGHT 52
+#define HISTORY 6
 struct notice {
     char title[GUI_TITLE_MAX], text[GUI_TITLE_MAX], app[GUI_TITLE_MAX];
     char file[GUI_PATH_MAX]; // that clicking it opens, if there is one
+    char time[8];
     int64_t until;
 };
-static struct notice notices[MAX_NOTICES];
-static int notice_count;
+static struct notice notices[MAX_NOTICES], history[HISTORY];
+static int notice_count, history_count, unseen;
 
 static int64_t now_ms(void) {
     struct timespec t;
@@ -760,23 +674,6 @@ static struct rect notice_rect(int index) {
 static void damage_notices(void) {
     for (int i = 0; i < notice_count; i++)
         add_damage(notice_rect(i));
-}
-
-static struct notice *add_notice(const char *title, const char *text, const char *app) {
-    damage_notices();
-    if (notice_count == MAX_NOTICES) // the oldest makes way
-        memmove(notices, notices + 1, --notice_count * sizeof(*notices));
-
-    struct notice *n = &notices[notice_count++];
-
-    snprintf(n->title, sizeof(n->title), "%.*s", GUI_TITLE_MAX - 1, title);
-    snprintf(n->text, sizeof(n->text), "%.*s", GUI_TITLE_MAX - 1, text);
-    snprintf(n->app, sizeof(n->app), "%s", app ? app : "");
-    n->file[0] = '\0';
-    n->until = now_ms() + NOTICE_MS;
-    damage_notices();
-    printf("wm: notice %s: %s\n", n->title, n->text);
-    return n;
 }
 
 static void remove_notice(int index) {
@@ -806,19 +703,348 @@ static int notice_at(int x, int y) {
     return -1;
 }
 
+static void draw_notice(struct gui_canvas *c, struct rect r, const struct notice *n, int ox, int oy) {
+    int text_x = r.x + 12 + (n->app[0] ? ICON_SIZE + 10 : 0), width = r.x + r.width - 12 - text_x;
+
+    if (n->app[0])
+        draw_icon(c, n->app, r.x + 12, r.y + 10, ox, oy);
+    fitted_text(c, text_x - ox, r.y + 8 - oy, width, n->title, TASKBAR_TEXT);
+    fitted_text(c, text_x - ox, r.y + 8 + GUI_CHAR_HEIGHT + 4 - oy, width, n->text, TASKBAR_DIM_TEXT);
+}
+
 static void draw_notices(struct gui_canvas *c, int ox, int oy) {
     for (int i = 0; i < notice_count; i++) {
         struct rect r = notice_rect(i);
-        const struct notice *n = &notices[i];
-        int text_x = r.x + 12 + (n->app[0] ? ICON_SIZE + 10 : 0), width = r.x + r.width - 12 - text_x;
 
         draw_panel(c, r, ox, oy);
         gui_fill(c, r.x - ox, r.y - oy, 3, r.height, TITLE_FOCUSED);
-        if (n->app[0])
-            draw_icon(c, n->app, r.x + 12, r.y + 10, ox, oy);
-        fitted_text(c, text_x - ox, r.y + 8 - oy, width, n->title, TASKBAR_TEXT);
-        fitted_text(c, text_x - ox, r.y + 8 + GUI_CHAR_HEIGHT + 4 - oy, width, n->text, TASKBAR_DIM_TEXT);
+        draw_notice(c, r, &notices[i], ox, oy);
     }
+}
+
+// The tray, left of the clock: the network, notifications and, if there's a sound
+// card, the volume, each an icon that opens a panel above it.
+enum { TRAY_NETWORK, TRAY_NOTICES, TRAY_SOUND, TRAY_ITEMS };
+#define TRAY_ICON 24
+#define PANEL_LINE 20
+#define VOLUME_FILE "/system/etc/volume"
+#define VOLUME_STEP 5
+#define NET_CHECK_MS 5000 // how often the network's looked at, for its icon
+static int panel = -1; // the one open
+static int mixer = -1, volume = 100;
+static bool muted, setting_volume;
+static struct net_info net;
+
+static bool connected(void) {
+    return net.has_device && net.address;
+}
+
+static int tray_count(void) {
+    return mixer >= 0 ? TRAY_ITEMS : TRAY_SOUND;
+}
+
+static struct rect tray_item(int item) {
+    char clock[16];
+    int right = screen.width - gui_text_width(clock_text(clock), 1) - 12 - 8;
+
+    return (struct rect){right - (tray_count() - item) * TRAY_ICON, taskbar().y + 4, TRAY_ICON, TASKBAR_HEIGHT - 8};
+}
+
+static struct rect tray(void) {
+    struct rect first = tray_item(0);
+
+    return (struct rect){first.x, first.y, tray_count() * TRAY_ICON, first.height};
+}
+
+static int tray_item_at(int x, int y) {
+    for (int i = 0; i < tray_count(); i++) {
+        if (contains(tray_item(i), x, y))
+            return i;
+    }
+    return -1;
+}
+
+static struct rect panel_rect(int item) {
+    static const int widths[] = {260, NOTICE_WIDTH, 220};
+    int heights[] = {16 + 7 * PANEL_LINE, 40 + (history_count ? history_count : 1) * (NOTICE_HEIGHT - 8), 82};
+    struct rect t = tray_item(item);
+    int x = t.x + t.width - widths[item];
+
+    return (struct rect){x > 0 ? x : 0, taskbar().y - heights[item], widths[item], heights[item]};
+}
+
+// Where the slider can be clicked, and the line it's drawn on through its middle.
+static struct rect volume_slider(void) {
+    struct rect p = panel_rect(TRAY_SOUND);
+
+    return (struct rect){p.x + 16, p.y + 30, p.width - 32, 20};
+}
+
+static struct rect mute_row(void) {
+    struct rect p = panel_rect(TRAY_SOUND);
+
+    return (struct rect){p.x + 12, p.y + 56, p.width - 24, 20};
+}
+
+static struct rect clear_button(void) {
+    struct rect p = panel_rect(TRAY_NOTICES);
+
+    return (struct rect){p.x + p.width - 64, p.y + 6, 56, 22};
+}
+
+static struct rect history_row(int index) {
+    struct rect p = panel_rect(TRAY_NOTICES);
+
+    return (struct rect){p.x + 4, p.y + 34 + index * (NOTICE_HEIGHT - 8), p.width - 8, NOTICE_HEIGHT - 8};
+}
+
+static void damage_tray(void) {
+    add_damage(tray());
+    if (panel >= 0)
+        add_damage(panel_rect(panel));
+}
+
+static void close_panel(void) {
+    damage_tray();
+    panel = -1;
+    setting_volume = false;
+}
+
+static struct notice *add_notice(const char *title, const char *text, const char *app) {
+    time_t now = time(NULL);
+
+    damage_notices();
+    damage_tray(); // before the history panel grows
+    if (notice_count == MAX_NOTICES) // the oldest makes way
+        memmove(notices, notices + 1, --notice_count * sizeof(*notices));
+
+    struct notice *n = &notices[notice_count++];
+
+    snprintf(n->title, sizeof(n->title), "%.*s", GUI_TITLE_MAX - 1, title);
+    snprintf(n->text, sizeof(n->text), "%.*s", GUI_TITLE_MAX - 1, text);
+    snprintf(n->app, sizeof(n->app), "%s", app ? app : "");
+    strftime(n->time, sizeof(n->time), "%H:%M", localtime(&now));
+    n->file[0] = '\0';
+    n->until = now_ms() + NOTICE_MS;
+    memmove(history + 1, history, (HISTORY - 1) * sizeof(*history));
+    history[0] = *n;
+    history_count += history_count < HISTORY;
+    unseen += panel != TRAY_NOTICES;
+    damage_notices();
+    damage_tray();
+    printf("wm: notice %s: %s\n", n->title, n->text);
+    return n;
+}
+
+// A file to open for the notice just added, kept in its history as well.
+static void notice_file(struct notice *n, const char *path) {
+    snprintf(n->file, sizeof(n->file), "%s", path);
+    snprintf(history[0].file, sizeof(history[0].file), "%s", path);
+}
+
+static void clear_history(void) {
+    damage_tray();
+    history_count = unseen = 0;
+}
+
+static void set_volume(int to, bool mute) {
+    FILE *f;
+
+    to = to < 0 ? 0 : to > 100 ? 100 : to;
+    if (to == volume && mute == muted)
+        return;
+    volume = to;
+    muted = mute;
+    ioctl(mixer, MIXER_SET_VOLUME, &volume);
+    ioctl(mixer, MIXER_SET_MUTE, &(int){muted});
+    if ((f = fopen(VOLUME_FILE, "w"))) {
+        fprintf(f, "%d%s\n", volume, muted ? " muted" : "");
+        fclose(f);
+    }
+    printf("wm: volume %d%s\n", volume, muted ? ", muted" : "");
+    damage_tray();
+}
+
+// What was set last time, which the sound card starts without.
+static void load_volume(void) {
+    FILE *f = fopen(VOLUME_FILE, "r");
+    char word[16] = "";
+    int was = 100;
+
+    mixer = open("/dev/mixer", O_RDONLY | O_CLOEXEC);
+    if (f) {
+        if (fscanf(f, "%d %15s", &was, word) < 1)
+            was = 100;
+        fclose(f);
+    }
+    volume = -1; // so it's set whatever it is
+    if (mixer >= 0)
+        set_volume(was, !strcmp(word, "muted"));
+}
+
+static void set_volume_at(int x) {
+    struct rect r = volume_slider();
+
+    set_volume(((x - r.x) * 100 + r.width / 2) / r.width, muted);
+}
+
+// Looks at the network again, redrawing the tray if it's come or gone.
+static void check_network(void) {
+    bool was = connected();
+    struct net_info now;
+
+    if (net_info(&now) < 0)
+        now = (struct net_info){0};
+    if (panel == TRAY_NETWORK && memcmp(&now, &net, sizeof(now)))
+        add_damage(panel_rect(TRAY_NETWORK));
+    net = now;
+    if (connected() != was) {
+        printf("wm: network %s\n", connected() ? "connected" : "disconnected");
+        add_damage(tray());
+    }
+}
+
+static void open_panel(int item) {
+    close_panel();
+    panel = item;
+    if (item == TRAY_NETWORK)
+        check_network();
+    if (item == TRAY_NOTICES) {
+        unseen = 0;
+        while (notice_count)
+            remove_notice(0); // they're all in the panel
+    }
+    damage_tray();
+}
+
+static void draw_address(struct gui_canvas *c, struct rect p, int line, const char *label, uint32_t address, int ox,
+                         int oy) {
+    struct in_addr in = {htonl(address)};
+    int y = p.y + 8 + line * PANEL_LINE - oy;
+
+    gui_text(c, p.x + 12 - ox, y, label, TASKBAR_DIM_TEXT, 1);
+    gui_text(c, p.x + 96 - ox, y, address ? inet_ntoa(in) : "none", TASKBAR_TEXT, 1);
+}
+
+static void draw_amount(struct gui_canvas *c, struct rect p, int line, const char *label, uint64_t bytes, int ox,
+                        int oy) {
+    char shown[32];
+    int y = p.y + 8 + line * PANEL_LINE - oy;
+
+    snprintf(shown, sizeof(shown), bytes >= 10 << 20 ? "%llu MB" : bytes >= 10 << 10 ? "%llu KB" : "%llu bytes",
+             (unsigned long long)(bytes >= 10 << 20 ? bytes >> 20 : bytes >= 10 << 10 ? bytes >> 10 : bytes));
+    gui_text(c, p.x + 12 - ox, y, label, TASKBAR_DIM_TEXT, 1);
+    gui_text(c, p.x + 96 - ox, y, shown, TASKBAR_TEXT, 1);
+}
+
+static void draw_network(struct gui_canvas *c, struct rect p, int ox, int oy) {
+    const char *state = !net.has_device ? "No network card" : !net.address ? "Not connected" : "Connected";
+
+    gui_text(c, p.x + 12 - ox, p.y + 8 - oy, "Network", TASKBAR_TEXT, 1);
+    gui_text(c, p.x + p.width - 12 - gui_text_width(state, 1) - ox, p.y + 8 - oy, state,
+             connected() ? TASKBAR_TEXT : TASKBAR_DIM_TEXT, 1);
+    draw_address(c, p, 1, "Address", net.address, ox, oy);
+    draw_address(c, p, 2, "Gateway", net.gateway, ox, oy);
+    draw_address(c, p, 3, "DNS", net.dns, ox, oy);
+    gui_text(c, p.x + 12 - ox, p.y + 8 + 4 * PANEL_LINE - oy, "Set by", TASKBAR_DIM_TEXT, 1);
+    gui_text(c, p.x + 96 - ox, p.y + 8 + 4 * PANEL_LINE - oy, net.automatic ? "DHCP" : "hand", TASKBAR_TEXT, 1);
+    draw_amount(c, p, 5, "Received", net.rx_bytes, ox, oy);
+    draw_amount(c, p, 6, "Sent", net.tx_bytes, ox, oy);
+}
+
+static void draw_history(struct gui_canvas *c, struct rect p, int ox, int oy) {
+    struct rect clear = clear_button();
+
+    gui_text(c, p.x + 12 - ox, p.y + 10 - oy, "Notifications", TASKBAR_TEXT, 1);
+    if (history_count) {
+        gui_fill(c, clear.x - ox, clear.y - oy, clear.width, clear.height, TASKBAR_BUTTON);
+        gui_text(c, clear.x + (clear.width - gui_text_width("Clear", 1)) / 2 - ox,
+                 clear.y + (clear.height - GUI_CHAR_HEIGHT) / 2 - oy, "Clear", TASKBAR_TEXT, 1);
+    } else {
+        gui_text(c, p.x + 12 - ox, p.y + 44 - oy, "Nothing new", TASKBAR_DIM_TEXT, 1);
+    }
+    for (int i = 0; i < history_count; i++) {
+        struct rect r = history_row(i);
+        const struct notice *n = &history[i];
+
+        if (contains(r, cursor_x, cursor_y) && n->file[0])
+            gui_fill(c, r.x - ox, r.y - oy, r.width, r.height, TASKBAR_BUTTON);
+        gui_text(c, r.x + r.width - 8 - gui_text_width(n->time, 1) - ox, r.y + 4 - oy, n->time, TASKBAR_DIM_TEXT, 1);
+        draw_notice(c, (struct rect){r.x - 4, r.y - 4, r.width - 6 * GUI_CHAR_WIDTH, r.height}, n, ox, oy);
+    }
+}
+
+static void draw_sound(struct gui_canvas *c, struct rect p, int ox, int oy) {
+    struct rect r = volume_slider(), m = mute_row();
+    int knob = r.x + r.width * volume / 100, line = r.y + r.height / 2;
+    char percent[8];
+
+    snprintf(percent, sizeof(percent), "%d%%", volume);
+    gui_text(c, p.x + 12 - ox, p.y + 8 - oy, "Volume", TASKBAR_TEXT, 1);
+    gui_text(c, p.x + p.width - 12 - gui_text_width(percent, 1) - ox, p.y + 8 - oy, percent,
+             muted ? TASKBAR_DIM_TEXT : TASKBAR_TEXT, 1);
+    gui_fill(c, r.x - ox, line - 2 - oy, r.width, 4, TASKBAR_LINE);
+    gui_fill(c, r.x - ox, line - 2 - oy, knob - r.x, 4, muted ? TASKBAR_DIM_TEXT : TITLE_FOCUSED);
+    gui_fill(c, knob - 5 - ox, line - 8 - oy, 10, 16, muted ? TASKBAR_DIM_TEXT : TITLE_FOCUSED);
+    gui_fill(c, m.x + 4 - ox, m.y + 3 - oy, 14, 14, TASKBAR_TEXT);
+    gui_fill(c, m.x + 5 - ox, m.y + 4 - oy, 12, 12, muted ? TITLE_FOCUSED : TASKBAR_COLOR);
+    gui_text(c, m.x + 26 - ox, m.y + (m.height - GUI_CHAR_HEIGHT) / 2 - oy, "Mute", TASKBAR_TEXT, 1);
+}
+
+static void draw_open_panel(struct gui_canvas *c, int ox, int oy) {
+    struct rect p = panel_rect(panel);
+
+    draw_panel(c, p, ox, oy);
+    if (panel == TRAY_NETWORK)
+        draw_network(c, p, ox, oy);
+    else if (panel == TRAY_NOTICES)
+        draw_history(c, p, ox, oy);
+    else
+        draw_sound(c, p, ox, oy);
+}
+
+static void draw_tray(struct gui_canvas *c, int ox, int oy) {
+    const char *names[] = {connected() ? "network" : "offline", "bell", muted || !volume ? "muted" : "speaker"};
+
+    for (int i = 0; i < tray_count(); i++) {
+        struct rect t = tray_item(i);
+        const struct gui_image *icon = gui_icon(names[i]);
+
+        if (panel == i)
+            gui_fill(c, t.x - ox, t.y - oy, t.width, t.height, TASKBAR_BUTTON);
+        if (icon)
+            gui_draw_image(c, t.x + (t.width - ICON_SIZE) / 2 - ox, t.y + (t.height - ICON_SIZE) / 2 - oy, icon);
+    }
+    if (unseen) {
+        struct rect b = tray_item(TRAY_NOTICES);
+
+        gui_fill(c, b.x + b.width - 8 - ox, b.y + 1 - oy, 6, 6, CLOSE_COLOR);
+    }
+}
+
+static void open_file(const char *path);
+
+// A click in an open panel does what it's on there, returning false if it's
+// outside the panel.
+static bool panel_click(void) {
+    if (!contains(panel_rect(panel), cursor_x, cursor_y))
+        return false;
+    if (panel == TRAY_SOUND && contains(volume_slider(), cursor_x, cursor_y)) {
+        setting_volume = true;
+        set_volume_at(cursor_x);
+    } else if (panel == TRAY_SOUND && contains(mute_row(), cursor_x, cursor_y)) {
+        set_volume(volume, !muted);
+    } else if (panel == TRAY_NOTICES && history_count && contains(clear_button(), cursor_x, cursor_y)) {
+        clear_history();
+        printf("wm: notifications cleared\n");
+    }
+    for (int i = 0; panel == TRAY_NOTICES && i < history_count; i++) {
+        if (contains(history_row(i), cursor_x, cursor_y) && history[i].file[0]) {
+            open_file(history[i].file);
+            close_panel();
+        }
+    }
+    return true;
 }
 
 static void draw_taskbar(struct gui_canvas *c, int ox, int oy) {
@@ -860,15 +1086,7 @@ static void draw_taskbar(struct gui_canvas *c, int ox, int oy) {
     }
 
     gui_text(c, bar.width - gui_text_width(shown, 1) - 12 - ox, text_y, shown, TASKBAR_TEXT, 1);
-    if (mixer >= 0) {
-        struct rect t = tray();
-        const struct gui_image *speaker = gui_icon(muted || !volume ? "muted" : "speaker");
-
-        if (sound_open)
-            gui_fill(c, t.x - ox, t.y - oy, t.width, t.height, TASKBAR_BUTTON);
-        if (speaker)
-            gui_draw_image(c, t.x + (t.width - ICON_SIZE) / 2 - ox, t.y + (t.height - ICON_SIZE) / 2 - oy, speaker);
-    }
+    draw_tray(c, ox, oy);
 }
 
 // A row in the menu or the switcher, with an icon, if it's not NULL.
@@ -992,10 +1210,15 @@ static void compose(struct rect r) {
     draw_notices(&c, r.x, r.y);
     if (menu_open)
         draw_menu(&c, r.x, r.y);
-    if (sound_open)
-        draw_sound(&c, r.x, r.y);
+    if (panel >= 0)
+        draw_open_panel(&c, r.x, r.y);
     if (switch_choice >= 0)
         draw_switcher(&c, r.x, r.y);
+    if (drag_file[0] && drag_icon && !no_cursor) {
+        struct rect d = drag_rect();
+
+        gui_draw_image(&c, d.x - r.x, d.y - r.y, drag_icon);
+    }
     if (!no_cursor)
         draw_cursor(&c, r.x, r.y);
 }
@@ -1315,46 +1538,67 @@ static void take_buffer(struct window *w, const struct gui_message *m) {
         ask_size(w, w->want_width, w->want_height);
 }
 
-static void set_clipboard(const struct gui_message *m) {
-    size_t length = m->width > 0 && m->width <= CLIPBOARD_MAX ? (size_t)m->width : 0;
+// A copy, ending in a zero byte, of the width bytes of shared memory a message
+// names, to be freed, or NULL if there are none or more than max.
+static char *copy_shared(const struct gui_message *m, size_t max) {
+    size_t length = m->width > 0 && (size_t)m->width <= max ? (size_t)m->width : 0;
     int fd = length ? open_shared(m, O_RDONLY) : -1;
     void *shared = fd < 0 ? MAP_FAILED : mmap(NULL, length, PROT_READ, MAP_SHARED, fd, 0);
-    char *copy = shared == MAP_FAILED ? NULL : malloc(length);
+    char *copy = shared == MAP_FAILED ? NULL : malloc(length + 1);
 
     if (fd >= 0)
         close(fd);
-    if (copy)
+    if (copy) {
         memcpy(copy, shared, length);
+        copy[length] = '\0';
+    }
     if (shared != MAP_FAILED)
         munmap(shared, length);
-    free(clipboard);
-    clipboard = copy;
-    clipboard_length = copy ? length : 0;
+    return copy;
 }
 
-// Answers with the clipboard in new shared memory, which the program removes.
-static void send_clipboard(struct client *client) {
+// Sends a message with data in new shared memory, named in its buffer, which the
+// program removes.
+static void send_shared(struct client *client, struct gui_message m, const char *data, size_t length) {
     static int created;
-    struct gui_message reply = {.type = GUI_CLIPBOARD};
     int fd = -1;
     void *shared = MAP_FAILED;
 
-    if (clipboard_length) {
-        snprintf(reply.buffer, sizeof(reply.buffer), "/wm-clipboard-%d", created++);
-        fd = shm_open(reply.buffer, O_RDWR | O_CREAT | O_EXCL, 0600);
-        if (fd >= 0 && ftruncate(fd, clipboard_length) == 0)
-            shared = mmap(NULL, clipboard_length, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (length) {
+        snprintf(m.buffer, sizeof(m.buffer), "/wm-shared-%d", created++);
+        fd = shm_open(m.buffer, O_RDWR | O_CREAT | O_EXCL, 0600);
+        if (fd >= 0 && ftruncate(fd, length) == 0)
+            shared = mmap(NULL, length, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
         if (fd >= 0)
             close(fd);
     }
     if (shared != MAP_FAILED) {
-        memcpy(shared, clipboard, clipboard_length);
-        munmap(shared, clipboard_length);
-        reply.width = (int32_t)clipboard_length;
-    } else if (clipboard_length) {
-        shm_unlink(reply.buffer);
+        memcpy(shared, data, length);
+        munmap(shared, length);
+        m.width = (int32_t)length;
+    } else if (length) {
+        shm_unlink(m.buffer);
     }
-    queue_message(client, &reply);
+    queue_message(client, &m);
+}
+
+static void set_clipboard(const struct gui_message *m) {
+    free(clipboard);
+    clipboard = copy_shared(m, CLIPBOARD_MAX);
+    clipboard_length = clipboard ? (size_t)m->width : 0;
+}
+
+static void start_drag(const struct client *client, const struct gui_message *m) {
+    char *path = grabbed && grabbed->client == client && buttons ? copy_shared(m, GUI_PATH_MAX - 1) : NULL;
+    struct stat st;
+
+    if (!path)
+        return;
+    snprintf(drag_file, sizeof(drag_file), "%s", path);
+    free(path);
+    drag_icon = gui_file_icon(drag_file, stat(drag_file, &st) == 0 && S_ISDIR(st.st_mode));
+    add_damage(drag_rect());
+    printf("wm: dragging %s\n", drag_file);
 }
 
 static void update_cursor(void);
@@ -1391,7 +1635,10 @@ static void handle_message(struct client *client, const struct gui_message *m) {
         set_clipboard(m);
         break;
     case GUI_CLIPBOARD_GET:
-        send_clipboard(client);
+        send_shared(client, (struct gui_message){.type = GUI_CLIPBOARD}, clipboard, clipboard_length);
+        break;
+    case GUI_DRAG:
+        start_drag(client, m);
         break;
     case GUI_UNLOCK:
         if (client == session && locked)
@@ -1513,16 +1760,16 @@ static void start_login(void) {
 }
 
 static void close_menu(void);
-static void close_sound(void);
 static void launch(const char *command);
 
 // Hides the desktop behind the lock screen, or the log-in screen once logged out.
 static void lock(void) {
     close_menu();
-    close_sound();
+    close_panel();
     switch_choice = -1;
     super_down = super_alone = false; // let go while locked
     dragging = grabbed = resizing = NULL;
+    drag_file[0] = '\0';
     stop_snap();
     set_focus(NULL);
     locked = true;
@@ -1543,6 +1790,7 @@ static void log_out(void) {
     clipboard = NULL;
     clipboard_length = 0;
     notice_count = 0;
+    clear_history();
     logged_in = false;
     workspace = 0;
     printf("wm: logged out\n");
@@ -1673,7 +1921,7 @@ static void screenshot(bool window) {
         return;
     }
     printf("wm: screenshot %s %dx%d\n", path, r.width, r.height);
-    snprintf(add_notice("Screenshot saved", strrchr(path, '/') + 1, "viewer")->file, GUI_PATH_MAX, "%s", path);
+    notice_file(add_notice("Screenshot saved", strrchr(path, '/') + 1, "viewer"), path);
 }
 
 static int compare_names(const void *a, const void *b) {
@@ -1693,7 +1941,7 @@ static void open_menu(void) {
     if (dir)
         closedir(dir);
     qsort(apps, app_count, sizeof(*apps), compare_names);
-    close_sound();
+    close_panel();
     menu_open = true;
     menu_choice = 0;
     add_damage(menu());
@@ -1798,7 +2046,7 @@ static void press(uint32_t changed) {
     }
 
     // Clicking a notification puts it away.
-    int notice = menu_open || sound_open ? -1 : notice_at(cursor_x, cursor_y);
+    int notice = menu_open || panel >= 0 ? -1 : notice_at(cursor_x, cursor_y);
 
     if (notice >= 0) {
         if (notices[notice].file[0])
@@ -1807,26 +2055,22 @@ static void press(uint32_t changed) {
         return;
     }
 
-    // A click in the sound menu sets the volume or the mute, and anywhere else closes it.
-    if (sound_open) {
-        if (contains(sound_panel(), cursor_x, cursor_y)) {
-            if (contains(volume_slider(), cursor_x, cursor_y)) {
-                setting_volume = true;
-                set_volume_at(cursor_x);
-            } else if (contains(mute_row(), cursor_x, cursor_y)) {
-                set_volume(volume, !muted);
-            }
+    // A click in an open panel does what it's on, and anywhere else closes it. Its
+    // icon in the tray closes it too, and another's opens that one.
+    int item = tray_item_at(cursor_x, cursor_y);
+
+    if (panel >= 0) {
+        int was = panel;
+
+        if (panel_click())
             return;
-        }
-        close_sound();
-        if (contains(tray(), cursor_x, cursor_y))
+        close_panel();
+        if (item == was)
             return;
     }
-    if (mixer >= 0 && contains(tray(), cursor_x, cursor_y) && (changed & MOUSE_BUTTON_LEFT)) {
+    if (item >= 0 && (changed & MOUSE_BUTTON_LEFT)) {
         close_menu();
-        sound_open = true;
-        add_damage(sound_panel());
-        add_damage(tray());
+        open_panel(item);
         return;
     }
 
@@ -1876,6 +2120,24 @@ static void press(uint32_t changed) {
         drag_x = cursor_x - w->x;
         drag_y = cursor_y - w->y;
     }
+}
+
+// A file let go over another window's contents goes to it, which comes to the top.
+static void drop_file(void) {
+    enum part part;
+    int edges;
+    struct window *w = window_at(cursor_x, cursor_y, &part, &edges);
+
+    add_damage(drag_rect());
+    if (w && part == PART_CONTENT && w != grabbed && !locked) {
+        set_focus(w);
+        raise_window(w);
+        send_shared(w->client, (struct gui_message){.type = GUI_DROP, .window = w->id, .x = cursor_x - w->x,
+                                                    .y = cursor_y - w->y},
+                    drag_file, strlen(drag_file));
+        printf("wm: dropped %s on %s\n", drag_file, w->title);
+    }
+    drag_file[0] = '\0';
 }
 
 static void handle_mouse(const struct mouse_event *e) {
@@ -1929,7 +2191,9 @@ static void handle_mouse(const struct mouse_event *e) {
                  resize_height + (edges & EDGE_BOTTOM ? dy : edges & EDGE_TOP ? -dy : 0));
     }
 
-    // The menu highlights what's under the mouse.
+    // The menu highlights what's under the mouse, and so do notifications in the tray.
+    if (panel == TRAY_NOTICES && moved)
+        add_damage(panel_rect(TRAY_NOTICES));
     if (menu_open && moved) {
         int choice = menu_item_at(cursor_x, cursor_y);
 
@@ -1948,7 +2212,8 @@ static void handle_mouse(const struct mouse_event *e) {
     if (released & MOUSE_BUTTON_LEFT)
         setting_volume = false;
     if (e->wheel && mixer >= 0 && !locked
-        && (contains(tray(), cursor_x, cursor_y) || (sound_open && contains(sound_panel(), cursor_x, cursor_y)))) {
+        && (contains(tray_item(TRAY_SOUND), cursor_x, cursor_y)
+            || (panel == TRAY_SOUND && contains(panel_rect(TRAY_SOUND), cursor_x, cursor_y)))) {
         set_volume(volume - e->wheel * VOLUME_STEP, muted);
         wheel = 0; // so no window gets it
     }
@@ -1966,6 +2231,8 @@ static void handle_mouse(const struct mouse_event *e) {
         press(pressed);
     if (released && grabbed)
         send_mouse(grabbed, GUI_MOUSE_BUTTON, released, 0);
+    if (!buttons && drag_file[0])
+        drop_file();
     if (!buttons && dragging && snap) {
         place(dragging, snap_rect(snap));
         printf("wm: snapped %s %s\n", dragging->title, snap == SNAP_TOP ? "maximized" : snap == SNAP_LEFT ? "left" : "right");
@@ -2083,9 +2350,9 @@ static void handle_key(const struct key_event *e) {
         return;
     }
     super_key(e);
-    if (sound_open && e->code == KEY_ESCAPE) {
+    if (panel >= 0 && e->code == KEY_ESCAPE) {
         if (e->pressed)
-            close_sound();
+            close_panel();
         return;
     }
     if (switch_key(e) || menu_key(e))
@@ -2298,6 +2565,11 @@ int main(int argc, char **argv) {
     printf("wm: running at %dx%d%s\n", screen.width, screen.height, can_set_mode ? "" : ", which can't change");
     fflush(stdout);
 
+    char clock[16], shown_clock[16];
+    int64_t net_checked = now_ms();
+
+    snprintf(shown_clock, sizeof(shown_clock), "%s", clock_text(clock));
+    check_network();
     while (!quitting) {
         struct pollfd fds[3 + MAX_CLIENTS] = {
             {.fd = listener, .events = POLLIN}, {.fd = mouse, .events = POLLIN}, {.fd = keyboard, .events = POLLIN},
@@ -2312,11 +2584,15 @@ int main(int argc, char **argv) {
 
         redraw();
 
-        // The clock changes at the start of each minute, and fading shadows each frame.
+        // The clock changes at the start of each minute, fading shadows each frame, and
+        // the network's looked at every NET_CHECK_MS.
         struct timespec now;
         clock_gettime(CLOCK_REALTIME, &now);
         int until_minute = (60 - now.tv_sec % 60) * 1000 - now.tv_nsec / 1000000;
         int timeout = fading ? FRAME_MS : until_minute > 0 ? until_minute : 1;
+        int64_t until_check = net_checked + NET_CHECK_MS - now_ms();
+
+        timeout = until_check < timeout ? (until_check > 0 ? (int)until_check : 0) : timeout;
 
         timeout = notice >= 0 && notice < timeout ? (notice > 0 ? notice : 1) : timeout;
         if (login_due >= 0) {
@@ -2332,8 +2608,14 @@ int main(int argc, char **argv) {
 
         if (ready < 0 && errno != EINTR)
             return fail("poll");
-        if (ready == 0)
+        if (strcmp(clock_text(clock), shown_clock)) {
+            snprintf(shown_clock, sizeof(shown_clock), "%s", clock_text(clock));
             damage_taskbar();
+        }
+        if (now_ms() >= net_checked + NET_CHECK_MS) {
+            check_network();
+            net_checked = now_ms();
+        }
 
         if (fds[0].revents & POLLIN)
             accept_client(listener);
