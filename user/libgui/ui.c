@@ -290,6 +290,7 @@ void gui_ui_end(struct gui_ui *ui) {
     memcpy(ui->menus, ui->next_menus, ui->next_menu_count * sizeof(*ui->menus));
     ui->menu_count = ui->next_menu_count;
     ui->reveal = 0;
+    ui->dropping = false;
     ui->order_count = ui->next_count;
     ui->wheel_owner = ui->next_wheel_owner;
     if (ui->mouse_released)
@@ -690,6 +691,78 @@ static void select_word(struct editing *e, size_t at) {
     *e->at = end;
 }
 
+// Undo and redo for text: copies of it from before each change, with typing kept a
+// word at a time, for each of the last few texts that had the keyboard. A change
+// from elsewhere, which leaves one different from how it was last left, starts it
+// afresh.
+#define UNDO_STEPS 32
+#define HISTORIES 4
+struct snapshot {
+    char *text;
+    size_t at, anchor;
+};
+struct history {
+    const char *text;
+    uint32_t hash;
+    struct snapshot undo[UNDO_STEPS], redo[UNDO_STEPS];
+    int undo_count, redo_count;
+    bool typing; // the last change was typing in a word, which more typing joins
+    long used;
+};
+static struct history histories[HISTORIES];
+static struct history *history; // the one being edited
+
+static uint32_t hash_of(const char *s) {
+    uint32_t hash = 2166136261u;
+
+    for (; *s; s++)
+        hash = (hash ^ (uint8_t)*s) * 16777619u;
+    return hash;
+}
+
+static void forget(struct snapshot *list, int *count) {
+    while (*count > 0)
+        free(list[--*count].text);
+}
+
+static bool push(struct snapshot *list, int *count, const struct editing *e) {
+    char *copy = strdup(e->s);
+
+    if (!copy)
+        return false;
+    if (*count == UNDO_STEPS) {
+        free(list[0].text);
+        memmove(list, list + 1, (UNDO_STEPS - 1) * sizeof(*list));
+        --*count;
+    }
+    list[(*count)++] = (struct snapshot){copy, *e->at, *e->anchor};
+    return true;
+}
+
+// Before a change: typing joins the typing before it, and anything else starts a step.
+static void remember(const struct editing *e, bool typing) {
+    if (e->secret || (typing && history->typing))
+        return;
+    push(history->undo, &history->undo_count, e);
+    forget(history->redo, &history->redo_count);
+    history->typing = typing;
+}
+
+// Puts back the last of from, keeping the text as it is in to, for going the other way.
+static bool restore(const struct editing *e, struct snapshot *from, int *from_count, struct snapshot *to, int *to_count) {
+    if (!*from_count || !push(to, to_count, e))
+        return false;
+
+    struct snapshot *s = &from[--*from_count];
+
+    snprintf(e->s, e->size, "%s", s->text);
+    *e->at = s->at < e->size ? s->at : strlen(e->s);
+    *e->anchor = s->anchor < e->size ? s->anchor : *e->at;
+    free(s->text);
+    history->typing = false;
+    return true;
+}
+
 static bool ctrl_key(const struct key_event *k, char letter) {
     return (k->modifiers & KEY_MOD_CTRL) && (k->text == (uint32_t)(letter & 0x1F) || k->text == (uint32_t)letter);
 }
@@ -723,9 +796,59 @@ void gui_set_focus(struct gui_ui *ui, const char *label, const char *text) {
     }
 }
 
+static bool edit_text(const struct key_event *k, struct editing *e);
+
+// The history for a text, or a fresh one in place of the one used longest ago.
+static struct history *history_of(const char *text) {
+    static long uses;
+    struct history *h = &histories[0];
+
+    for (int i = 0; i < HISTORIES; i++) {
+        if (histories[i].text == text) {
+            h = &histories[i];
+            break;
+        }
+        if (histories[i].used < h->used)
+            h = &histories[i];
+    }
+    if (h->text != text || h->hash != hash_of(text)) {
+        forget(h->undo, &h->undo_count);
+        forget(h->redo, &h->redo_count);
+        *h = (struct history){.text = text, .hash = hash_of(text)};
+    }
+    h->used = ++uses;
+    return h;
+}
+
+// Moving the cursor ends a word being typed.
+static void stop_typing(const char *text) {
+    for (int i = 0; i < HISTORIES; i++) {
+        if (histories[i].text == text)
+            histories[i].typing = false;
+    }
+}
+
 // Editing that's the same on one line or many. Shift with the keys that move the
-// cursor selects. Returns whether the text changed.
+// cursor selects, and Ctrl+Z and Ctrl+Y, or Ctrl+Shift+Z, undo and redo. Returns
+// whether the text changed.
 static bool edit(const struct key_event *k, struct editing *e) {
+    bool shift = k->modifiers & KEY_MOD_SHIFT, changed;
+
+    if (e->secret)
+        return edit_text(k, e);
+    history = history_of(e->s);
+    if (ctrl_key(k, 'z') && !shift)
+        changed = restore(e, history->undo, &history->undo_count, history->redo, &history->redo_count);
+    else if (ctrl_key(k, 'y') || (ctrl_key(k, 'z') && shift))
+        changed = restore(e, history->redo, &history->redo_count, history->undo, &history->undo_count);
+    else
+        changed = edit_text(k, e);
+    if (changed)
+        history->hash = hash_of(e->s);
+    return changed;
+}
+
+static bool edit_text(const struct key_event *k, struct editing *e) {
     char *s = e->s, typed = k->code == KEY_ENTER && e->multiline ? '\n' : (char)k->text;
     size_t len = strlen(s), at = *e->at, start = line_start(s, at), end = line_end(s, at), low, high;
     bool shift = k->modifiers & KEY_MOD_SHIFT, moved = true;
@@ -738,11 +861,17 @@ static bool edit(const struct key_event *k, struct editing *e) {
     }
     if ((ctrl_key(k, 'c') || ctrl_key(k, 'x')) && !e->secret) {
         copy_selection(e);
+        if (ctrl_key(k, 'x') && low != high)
+            remember(e, false);
         return ctrl_key(k, 'x') && delete_selection(e);
     }
     if (ctrl_key(k, 'v')) {
         size_t n;
         char *pasted = gui_clipboard_get(&n);
+
+        if (pasted && n)
+            remember(e, false);
+
         bool changed = pasted && insert(e, pasted, n);
 
         free(pasted);
@@ -770,9 +899,15 @@ static bool edit(const struct key_event *k, struct editing *e) {
         *e->at = at;
         if (!shift)
             *e->anchor = at;
+        stop_typing(e->s);
         return false;
     }
 
+    bool deletes = (k->code == KEY_BACKSPACE && (at > 0 || low != high)) || (k->code == KEY_DELETE && (at < len || low != high));
+    bool types = ((typed >= ' ' && typed < 127) || (typed == '\n' && e->multiline)) && !(k->modifiers & (KEY_MOD_CTRL | KEY_MOD_ALT));
+
+    if (deletes || types)
+        remember(e, types && typed != ' ' && typed != '\n' && low == high);
     if ((k->code == KEY_BACKSPACE || k->code == KEY_DELETE) && low != high)
         return delete_selection(e);
     if (k->code == KEY_BACKSPACE && at > 0) {
@@ -784,7 +919,7 @@ static bool edit(const struct key_event *k, struct editing *e) {
         memmove(s + at, s + at + 1, len - at);
         return true;
     }
-    if (((typed >= ' ' && typed < 127) || (typed == '\n' && e->multiline)) && !(k->modifiers & (KEY_MOD_CTRL | KEY_MOD_ALT)))
+    if (types)
         return insert(e, &typed, 1);
     return false;
 }
@@ -794,6 +929,7 @@ static bool edit(const struct key_event *k, struct editing *e) {
 static bool click_text(struct gui_ui *ui, uint32_t id, struct editing *e, size_t at) {
     if (ui->active != id || !ui->mouse_down)
         return false;
+    stop_typing(e->s);
     if (ui->mouse_pressed && ui->double_click)
         select_word(e, at);
     else if (ui->mouse_pressed)
@@ -1299,6 +1435,8 @@ int gui_list_icons(struct gui_ui *ui, const char *label, const char *const *item
             activated |= ui->mouse_pressed && ui->double_click && i == *selected;
             *selected = ui->clicked_item = i;
         }
+        if (ui->dropping && contains(intersect(r, inner), ui->drop_x, ui->drop_y))
+            ui->drop_item = i;
         int text_x = icons ? 12 + GUI_ICON_SIZE : 6;
 
         if (i == *selected || over(ui, r))
@@ -1312,6 +1450,90 @@ int gui_list_icons(struct gui_ui *ui, const char *label, const char *const *item
     if (focused)
         draw_focus(ui, frame);
     return activated ? GUI_LIST_ACTIVATED : *selected != before ? GUI_LIST_CHANGED : 0;
+}
+
+#define CELL_WIDTH 96
+#define CELL_HEIGHT (GUI_THUMBNAIL + GUI_CHAR_HEIGHT + 16)
+
+int gui_grid(struct gui_ui *ui, const char *label, const char *const *items, const struct gui_image *const *images,
+             int count, int *selected) {
+    uint32_t id = id_of(label);
+    struct gui_scroll *scroll = scroll_of(ui, id);
+    struct gui_rect frame, was;
+    int before = *selected;
+    bool activated = false, moved = false;
+
+    framed(ui, label, height_left(ui, CELL_HEIGHT + 4), &frame);
+
+    int columns = (frame.width - 4 - SCROLLBAR) / CELL_WIDTH > 0 ? (frame.width - 4 - SCROLLBAR) / CELL_WIDTH : 1;
+
+    scroll->content = (count + columns - 1) / columns * CELL_HEIGHT + 4;
+    if (over(ui, frame) && (ui->mouse_pressed || ui->right_pressed)) {
+        ui->focus = id;
+        ui->clicked_item = -1;
+    }
+
+    bool focused = focusable(ui, id);
+
+    for (int i = 0; focused && i < ui->key_count; i++) {
+        uint16_t code = ui->keys[i].code;
+
+        moved = true;
+        if (code == KEY_LEFT || code == KEY_RIGHT)
+            *selected += code == KEY_RIGHT ? 1 : -1;
+        else if (code == KEY_UP || code == KEY_DOWN)
+            *selected += code == KEY_DOWN ? columns : -columns;
+        else if (code == KEY_HOME || code == KEY_END)
+            *selected = code == KEY_HOME ? 0 : count - 1;
+        else
+            moved = false;
+        activated |= code == KEY_ENTER && count;
+    }
+    *selected = *selected >= count ? count - 1 : *selected < 0 ? 0 : *selected;
+    fill(ui, frame.x, frame.y, frame.width, frame.height, PANEL);
+    if (moved) {
+        int top = *selected / columns * CELL_HEIGHT, bottom = top + CELL_HEIGHT + 4;
+
+        scroll->offset = top < scroll->offset ? top : bottom > scroll->offset + frame.height ? bottom - frame.height
+                                                                                              : scroll->offset;
+    }
+
+    struct gui_rect inner = scrolling(ui, id, scroll, frame);
+
+    push_clip(ui, inner, &was);
+    for (int i = scroll->offset / CELL_HEIGHT * columns; i < count; i++) {
+        struct gui_rect r = {inner.x + 2 + i % columns * CELL_WIDTH, inner.y + 2 + i / columns * CELL_HEIGHT - scroll->offset,
+                             CELL_WIDTH - 4, CELL_HEIGHT - 4};
+        const struct gui_image *image = images ? images[i] : NULL;
+        int length = (int)strlen(items[i]), fits = (r.width - 8) / GUI_CHAR_WIDTH;
+        int shown = length < fits ? length : fits;
+
+        if (r.y >= inner.y + inner.height)
+            break;
+        if (over(ui, r) && (ui->mouse_pressed || ui->right_pressed)) {
+            activated |= ui->mouse_pressed && ui->double_click && i == *selected;
+            *selected = ui->clicked_item = i;
+        }
+        if (ui->dropping && contains(intersect(r, inner), ui->drop_x, ui->drop_y))
+            ui->drop_item = i;
+        if (i == *selected || over(ui, r))
+            fill(ui, r.x, r.y, r.width, r.height, i == *selected ? ACCENT : FRAME_HOT);
+        if (image)
+            draw_image(ui, r.x + (r.width - image->width) / 2, r.y + 6 + (GUI_THUMBNAIL - image->height) / 2, image);
+        draw_fitted(ui, r.x + (r.width - shown * GUI_CHAR_WIDTH) / 2, r.y + GUI_THUMBNAIL + 10, shown * GUI_CHAR_WIDTH,
+                    items[i], shown, i == *selected ? ON_ACCENT : TEXT);
+    }
+    ui->layout.clip = was;
+    if (focused)
+        draw_focus(ui, frame);
+    return activated ? GUI_LIST_ACTIVATED : *selected != before ? GUI_LIST_CHANGED : 0;
+}
+
+void gui_ui_drop(struct gui_ui *ui, int x, int y) {
+    ui->dropping = true;
+    ui->drop_x = x;
+    ui->drop_y = y;
+    ui->drop_item = ui->drop_tab = -1;
 }
 
 // Up and Down go through the open menu's items, and Left and Right to the menus
@@ -1449,6 +1671,8 @@ int gui_tabs(struct gui_ui *ui, const char *const *names, int count, int *active
             *closing = i;
             result = GUI_TABS_CLOSE;
         }
+        if (ui->dropping && contains(r, ui->drop_x, ui->drop_y))
+            ui->drop_tab = i;
         if (on_tab && ui->mouse_pressed && *active != i) {
             *active = i;
             result = GUI_TABS_CHANGED;

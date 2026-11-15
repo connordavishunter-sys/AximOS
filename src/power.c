@@ -1,5 +1,6 @@
 #include <acpi.h>
 #include <block.h>
+#include <hda.h>
 #include <io.h>
 #include <kernel.h>
 #include <power.h>
@@ -21,6 +22,7 @@ static void flush_disks(void) {
 
 void power_off(void) {
     kprintf("kernel: powering off\n");
+    hda_shutdown();
     flush_disks();
     acpi_power_off();
     die("power off failed");
@@ -28,6 +30,7 @@ void power_off(void) {
 
 void power_reboot(void) {
     kprintf("kernel: rebooting\n");
+    hda_shutdown();
     flush_disks();
     acpi_reset();
 

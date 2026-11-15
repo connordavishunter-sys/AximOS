@@ -87,6 +87,26 @@ try:
     check('and muting it silences it', np.abs(sound).max(initial=0) == 0, np.abs(sound).max(initial=0))
     o = v.run('volume 100 unmute')
     check('until unmuted', 'volume 100\n' in o, o)
+
+    # Rebooting, and resetting the machine, in the middle of playing leaves it
+    # playing again after. Shift's held through each boot for the shell.
+    def boot_again(at):
+        end = time.time() + 60
+        while 'init: ' not in v.raw()[at:] and time.time() < end:
+            v.shift(True); time.sleep(0.05)
+        v.shift(False)
+        return v.wait('/$ ', 30, at)
+
+    for how in ('reboot', 'reset'):
+        at = v.mark()
+        v.type('tone 48000 &\n'); time.sleep(0.5)
+        if how == 'reboot':
+            v.type('reboot\n')
+        else:
+            v.command('system_reset')
+        check(f'back after a {how} while playing', boot_again(at), v.raw()[at:][-500:])
+        o, sound = recorded(v, how, 'tone 48000')
+        check(f'and plays after the {how}', 'tone: done' in o and 0.95 < len(sound) / 48000 < 1.05, (o, len(sound)))
 finally:
     v.close()
 finish()

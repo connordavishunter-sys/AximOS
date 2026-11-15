@@ -25,7 +25,7 @@
 #define MAX_WINDOWS 64
 #define MAX_DAMAGE 32
 #define MAX_SIZE 4096
-#define CLIPBOARD_MAX (1024 * 1024)
+#define CLIPBOARD_MAX (64 * 1024 * 1024)
 #define INBOX_SIZE (8 * sizeof(struct gui_message))
 #define OUTBOX_SIZE (64 * sizeof(struct gui_message))
 
@@ -194,6 +194,7 @@ static struct {
 static int icon_count;
 static char *clipboard;
 static size_t clipboard_length;
+static int clipboard_width, clipboard_height; // a picture's, or 0 for text
 
 static struct rect damage[MAX_DAMAGE];
 static int damage_count;
@@ -203,8 +204,9 @@ static uint32_t buttons;
 static struct window *dragging; // by its title bar
 static int drag_x, drag_y;
 static struct window *grabbed; // pressed in its contents, so it gets the mouse until release
-static char drag_file[GUI_PATH_MAX]; // dragged from grabbed, to drop on another window
+static char drag_file[GUI_PATH_MAX]; // dragged from grabbed, to drop on a window
 static const struct gui_image *drag_icon;
+static uint16_t modifiers; // the keys held, which go with a drop: Ctrl copies, rather than moving
 static struct window *resizing;
 static int resize_x, resize_y, resize_width, resize_height;
 static int resize_room; // above the frame, which it can't grow into
@@ -723,8 +725,11 @@ static void draw_notices(struct gui_canvas *c, int ox, int oy) {
 }
 
 // The tray, left of the clock: the network, notifications and, if there's a sound
-// card, the volume, each an icon that opens a panel above it.
-enum { TRAY_NETWORK, TRAY_NOTICES, TRAY_SOUND, TRAY_ITEMS };
+// card, the volume, each an icon that opens a panel above it. The clock opens a
+// calendar.
+enum { TRAY_NETWORK, TRAY_NOTICES, TRAY_SOUND, TRAY_ITEMS, TRAY_CALENDAR = TRAY_ITEMS };
+#define DAY_WIDTH 32
+#define DAY_HEIGHT 24
 #define TRAY_ICON 24
 #define PANEL_LINE 20
 #define VOLUME_FILE "/system/etc/volume"
@@ -734,6 +739,7 @@ static int panel = -1; // the one open
 static int mixer = -1, volume = 100;
 static bool muted, setting_volume;
 static struct net_info net;
+static int calendar_month; // shown, from this one
 
 static bool connected(void) {
     return net.has_device && net.address;
@@ -745,8 +751,10 @@ static int tray_count(void) {
 
 static struct rect tray_item(int item) {
     char clock[16];
-    int right = screen.width - gui_text_width(clock_text(clock), 1) - 12 - 8;
+    int width = gui_text_width(clock_text(clock), 1), right = screen.width - width - 12 - 8;
 
+    if (item == TRAY_CALENDAR)
+        return (struct rect){right + 2, taskbar().y + 4, width + 16, TASKBAR_HEIGHT - 8};
     return (struct rect){right - (tray_count() - item) * TRAY_ICON, taskbar().y + 4, TRAY_ICON, TASKBAR_HEIGHT - 8};
 }
 
@@ -761,12 +769,13 @@ static int tray_item_at(int x, int y) {
         if (contains(tray_item(i), x, y))
             return i;
     }
-    return -1;
+    return contains(tray_item(TRAY_CALENDAR), x, y) ? TRAY_CALENDAR : -1;
 }
 
 static struct rect panel_rect(int item) {
-    static const int widths[] = {260, NOTICE_WIDTH, 220};
-    int heights[] = {16 + 7 * PANEL_LINE, 40 + (history_count ? history_count : 1) * (NOTICE_HEIGHT - 8), 82};
+    static const int widths[] = {260, NOTICE_WIDTH, 220, 7 * DAY_WIDTH + 24};
+    int heights[] = {16 + 7 * PANEL_LINE, 40 + (history_count ? history_count : 1) * (NOTICE_HEIGHT - 8), 82,
+                     40 + 7 * DAY_HEIGHT};
     struct rect t = tray_item(item);
     int x = t.x + t.width - widths[item];
 
@@ -786,6 +795,13 @@ static struct rect mute_row(void) {
     return (struct rect){p.x + 12, p.y + 56, p.width - 24, 20};
 }
 
+// The calendar's arrows to the month before and after, either side of its name.
+static struct rect month_arrow(bool next) {
+    struct rect p = panel_rect(TRAY_CALENDAR);
+
+    return (struct rect){next ? p.x + p.width - 8 - 24 : p.x + 8, p.y + 6, 24, 24};
+}
+
 static struct rect clear_button(void) {
     struct rect p = panel_rect(TRAY_NOTICES);
 
@@ -800,6 +816,7 @@ static struct rect history_row(int index) {
 
 static void damage_tray(void) {
     add_damage(tray());
+    add_damage(tray_item(TRAY_CALENDAR));
     if (panel >= 0)
         add_damage(panel_rect(panel));
 }
@@ -904,11 +921,43 @@ static void check_network(void) {
     }
 }
 
+static bool leap(int year) {
+    return (year % 4 == 0 && year % 100) || year % 400 == 0;
+}
+
+// Monday as 0, by Sakamoto's method.
+static int weekday(int year, int month, int day) {
+    static const int offsets[] = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4};
+
+    year -= month < 2;
+    return (year + year / 4 - year / 100 + year / 400 + offsets[month] + day + 6) % 7;
+}
+
+// The month shown, from this one, as a year and a month from 0.
+static void shown_month(int *year, int *month) {
+    time_t now = time(NULL);
+    struct tm *t = localtime(&now);
+    int months = t->tm_year * 12 + t->tm_mon + calendar_month;
+
+    *year = 1900 + (months >= 0 ? months / 12 : (months - 11) / 12);
+    *month = months - (*year - 1900) * 12;
+}
+
+static const char *const month_names[] = {"January", "February", "March", "April", "May", "June", "July",
+                                          "August", "September", "October", "November", "December"};
+
 static void open_panel(int item) {
     close_panel();
     panel = item;
+    calendar_month = 0;
     if (item == TRAY_NETWORK)
         check_network();
+    if (item == TRAY_CALENDAR) {
+        int year, month;
+
+        shown_month(&year, &month);
+        printf("wm: calendar %s %d\n", month_names[month], year);
+    }
     if (item == TRAY_NOTICES) {
         unseen = 0;
         while (notice_count)
@@ -991,6 +1040,42 @@ static void draw_sound(struct gui_canvas *c, struct rect p, int ox, int oy) {
     gui_text(c, m.x + 26 - ox, m.y + (m.height - GUI_CHAR_HEIGHT) / 2 - oy, "Mute", TASKBAR_TEXT, 1);
 }
 
+static void draw_calendar(struct gui_canvas *c, struct rect p, int ox, int oy) {
+    static const char *const days[] = {"Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"};
+    static const int lengths[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    time_t now = time(NULL);
+    struct tm today = *localtime(&now);
+    int year, month;
+    char title[32];
+
+    shown_month(&year, &month);
+    snprintf(title, sizeof(title), "%s %d", month_names[month], year);
+    gui_text(c, p.x + (p.width - gui_text_width(title, 1)) / 2 - ox, p.y + 10 - oy, title, TASKBAR_TEXT, 1);
+    for (int next = 0; next < 2; next++) {
+        struct rect a = month_arrow(next);
+
+        gui_fill(c, a.x - ox, a.y - oy, a.width, a.height, TASKBAR_BUTTON);
+        gui_text(c, a.x + 8 - ox, a.y + 4 - oy, next ? ">" : "<", TASKBAR_TEXT, 1);
+    }
+
+    int left = p.x + 12, top = p.y + 40, first = weekday(year, month, 1);
+    int length = lengths[month] + (month == 1 && leap(year));
+
+    for (int i = 0; i < 7; i++)
+        gui_text(c, left + i * DAY_WIDTH + 8 - ox, top + 4 - oy, days[i], TASKBAR_DIM_TEXT, 1);
+    for (int day = 1; day <= length; day++) {
+        int cell = first + day - 1, x = left + cell % 7 * DAY_WIDTH, y = top + (cell / 7 + 1) * DAY_HEIGHT;
+        bool is_today = day == today.tm_mday && month == today.tm_mon && year == today.tm_year + 1900;
+        char number[4];
+
+        snprintf(number, sizeof(number), "%d", day);
+        if (is_today)
+            gui_fill(c, x + 2 - ox, y - oy, DAY_WIDTH - 4, DAY_HEIGHT - 2, TITLE_FOCUSED);
+        gui_text(c, x + DAY_WIDTH - 8 - gui_text_width(number, 1) - ox, y + 3 - oy, number,
+                 is_today ? TITLE_TEXT : cell % 7 >= 5 ? TASKBAR_DIM_TEXT : TASKBAR_TEXT, 1);
+    }
+}
+
 static void draw_open_panel(struct gui_canvas *c, int ox, int oy) {
     struct rect p = panel_rect(panel);
 
@@ -999,6 +1084,8 @@ static void draw_open_panel(struct gui_canvas *c, int ox, int oy) {
         draw_network(c, p, ox, oy);
     else if (panel == TRAY_NOTICES)
         draw_history(c, p, ox, oy);
+    else if (panel == TRAY_CALENDAR)
+        draw_calendar(c, p, ox, oy);
     else
         draw_sound(c, p, ox, oy);
 }
@@ -1037,6 +1124,14 @@ static bool panel_click(void) {
     } else if (panel == TRAY_NOTICES && history_count && contains(clear_button(), cursor_x, cursor_y)) {
         clear_history();
         printf("wm: notifications cleared\n");
+    } else if (panel == TRAY_CALENDAR && (contains(month_arrow(false), cursor_x, cursor_y)
+                                          || contains(month_arrow(true), cursor_x, cursor_y))) {
+        int year, month;
+
+        calendar_month += contains(month_arrow(true), cursor_x, cursor_y) ? 1 : -1;
+        shown_month(&year, &month);
+        printf("wm: calendar %s %d\n", month_names[month], year);
+        add_damage(panel_rect(TRAY_CALENDAR));
     }
     for (int i = 0; panel == TRAY_NOTICES && i < history_count; i++) {
         if (contains(history_row(i), cursor_x, cursor_y) && history[i].file[0]) {
@@ -1085,6 +1180,11 @@ static void draw_taskbar(struct gui_canvas *c, int ox, int oy) {
                     w == focused ? TITLE_TEXT : w->minimized ? TASKBAR_DIM_TEXT : TASKBAR_TEXT);
     }
 
+    if (panel == TRAY_CALENDAR) {
+        struct rect t = tray_item(TRAY_CALENDAR);
+
+        gui_fill(c, t.x - ox, t.y - oy, t.width, t.height, TASKBAR_BUTTON);
+    }
     gui_text(c, bar.width - gui_text_width(shown, 1) - 12 - ox, text_y, shown, TASKBAR_TEXT, 1);
     draw_tray(c, ox, oy);
 }
@@ -1170,6 +1270,205 @@ static void draw_snap(struct gui_canvas *c, int ox, int oy) {
     }
 }
 
+// Icons on the desktop for what's in Desktop in the home folder, in columns from the
+// top left, with pictures as small copies of themselves. Clicking one selects it,
+// double-clicking opens it, and dragging it takes it to a window, as from Files. A
+// file from Files dropped on the desktop is copied there.
+#define DESKTOP_ICON 32
+#define DESKTOP_CELL_WIDTH 88
+#define DESKTOP_CELL_HEIGHT 72
+#define MAX_DESKTOP 64
+#define DOUBLE_CLICK_MS 400
+#define DRAG_DISTANCE 6
+struct desktop_item {
+    char name[256];
+    bool folder;
+    time_t changed;
+    off_t size;
+    struct gui_image picture;
+};
+static struct desktop_item desktop_items[MAX_DESKTOP];
+static int desktop_count, desktop_selected = -1, desktop_pressed = -1, pressed_x, pressed_y;
+static int64_t desktop_clicked; // when the one selected was clicked
+static char desktop_dir[GUI_PATH_MAX];
+static bool dragging_from_desktop;
+
+static struct rect desktop_cell(int index) {
+    int rows = (desktop().height - 3 * GUI_CHAR_HEIGHT - 8) / DESKTOP_CELL_HEIGHT;
+
+    rows = rows > 0 ? rows : 1;
+    return (struct rect){8 + index / rows * DESKTOP_CELL_WIDTH, 8 + index % rows * DESKTOP_CELL_HEIGHT,
+                         DESKTOP_CELL_WIDTH - 4, DESKTOP_CELL_HEIGHT - 4};
+}
+
+static void desktop_path(int index, char out[GUI_PATH_MAX]) {
+    snprintf(out, GUI_PATH_MAX, "%s/%s", desktop_dir, desktop_items[index].name);
+}
+
+static int desktop_item_at(int x, int y) {
+    for (int i = 0; i < desktop_count; i++) {
+        if (contains(desktop_cell(i), x, y))
+            return i;
+    }
+    return -1;
+}
+
+static int compare_desktop(const void *a, const void *b) {
+    const struct desktop_item *x = a, *y = b;
+
+    return x->folder != y->folder ? y->folder - x->folder : strcmp(x->name, y->name);
+}
+
+// A picture shrunk to fit, or an icon made bigger.
+static void make_picture(struct desktop_item *item, const char *path) {
+    const struct gui_image *icon = gui_file_icon(item->name, item->folder);
+    struct gui_image full;
+
+    if (icon == gui_icon("image") && gui_image_load(path, &full)) {
+        int big = full.width > full.height ? full.width : full.height, w = full.width * DESKTOP_ICON / big,
+            h = full.height * DESKTOP_ICON / big;
+
+        if (!gui_image_scale(&full, w > 0 ? w : 1, h > 0 ? h : 1, &item->picture))
+            item->picture = (struct gui_image){0};
+        gui_image_free(&full);
+    } else if (!icon || !gui_image_scale(icon, DESKTOP_ICON, DESKTOP_ICON, &item->picture)) {
+        item->picture = (struct gui_image){0};
+    }
+}
+
+// Lists Desktop again, redrawing the desktop only if something's changed.
+static void load_desktop(void) {
+    static struct desktop_item found[MAX_DESKTOP];
+    DIR *dir = opendir(desktop_dir);
+    struct dirent *d;
+    int count = 0;
+
+    while (dir && count < MAX_DESKTOP && (d = readdir(dir))) {
+        char path[GUI_PATH_MAX];
+        struct stat st;
+
+        if (d->d_name[0] == '.')
+            continue;
+        snprintf(path, sizeof(path), "%s/%s", desktop_dir, d->d_name);
+        if (stat(path, &st) < 0)
+            continue;
+        found[count] = (struct desktop_item){.folder = S_ISDIR(st.st_mode), .changed = st.st_mtime, .size = st.st_size};
+        snprintf(found[count++].name, sizeof(found[0].name), "%s", d->d_name);
+    }
+    if (dir)
+        closedir(dir);
+    qsort(found, count, sizeof(*found), compare_desktop);
+
+    bool same = count == desktop_count;
+
+    for (int i = 0; same && i < count; i++)
+        same = !strcmp(found[i].name, desktop_items[i].name) && found[i].changed == desktop_items[i].changed
+            && found[i].size == desktop_items[i].size && found[i].folder == desktop_items[i].folder;
+    if (same)
+        return;
+    for (int i = 0; i < desktop_count; i++) {
+        add_damage(desktop_cell(i));
+        gui_image_free(&desktop_items[i].picture);
+    }
+    memcpy(desktop_items, found, count * sizeof(*found));
+    desktop_count = count;
+    desktop_selected = desktop_pressed = -1;
+    printf("wm: desktop:");
+    for (int i = 0; i < count; i++) {
+        char path[GUI_PATH_MAX];
+
+        desktop_path(i, path);
+        make_picture(&desktop_items[i], path);
+        add_damage(desktop_cell(i));
+        printf(" %s", desktop_items[i].name);
+    }
+    printf("\n");
+}
+
+// Half the colour over what's there.
+static void tint(struct gui_canvas *c, struct rect r, int ox, int oy, uint32_t colour) {
+    for (int y = r.y - oy < 0 ? 0 : r.y - oy; y < r.y + r.height - oy && y < c->height; y++) {
+        uint32_t *row = c->pixels + (long)y * c->stride;
+
+        for (int x = r.x - ox < 0 ? 0 : r.x - ox; x < r.x + r.width - ox && x < c->width; x++)
+            row[x] = ((row[x] >> 1) & 0x7F7F7F) + ((colour >> 1) & 0x7F7F7F);
+    }
+}
+
+static void draw_desktop(struct gui_canvas *c, int ox, int oy) {
+    for (int i = 0; i < desktop_count; i++) {
+        struct rect r = desktop_cell(i);
+        const struct desktop_item *item = &desktop_items[i];
+        char label[12];
+        int width;
+
+        if (i == desktop_selected)
+            tint(c, r, ox, oy, TITLE_FOCUSED);
+        if (item->picture.pixels)
+            gui_draw_image(c, r.x + (r.width - item->picture.width) / 2 - ox,
+                           r.y + 6 + (DESKTOP_ICON - item->picture.height) / 2 - oy, &item->picture);
+        snprintf(label, sizeof(label), "%.10s", item->name);
+        width = gui_text_width(label, 1);
+        gui_text(c, r.x + (r.width - width) / 2 + 1 - ox, r.y + DESKTOP_ICON + 13 - oy, label, 0x000000, 1);
+        gui_text(c, r.x + (r.width - width) / 2 - ox, r.y + DESKTOP_ICON + 12 - oy, label, 0xFFFFFF, 1);
+    }
+}
+
+static void select_desktop_item(int index) {
+    if (desktop_selected >= 0)
+        add_damage(desktop_cell(desktop_selected));
+    desktop_selected = index;
+    if (index >= 0)
+        add_damage(desktop_cell(index));
+}
+
+// A click on the desktop selects what's there, or nothing, and a second soon after opens it.
+static void desktop_press(void) {
+    int index = desktop_item_at(cursor_x, cursor_y);
+    int64_t now = now_ms();
+    char path[GUI_PATH_MAX];
+
+    if (index >= 0 && index == desktop_selected && now - desktop_clicked < DOUBLE_CLICK_MS) {
+        desktop_path(index, path);
+        open_file(path);
+        now = 0; // a third click starts again
+    }
+    select_desktop_item(index);
+    desktop_clicked = now;
+    desktop_pressed = index;
+    pressed_x = cursor_x;
+    pressed_y = cursor_y;
+}
+
+// Holding the mouse on an icon and moving it drags the file.
+static void desktop_drag(void) {
+    if (desktop_pressed < 0 || drag_file[0] || abs(cursor_x - pressed_x) + abs(cursor_y - pressed_y) < DRAG_DISTANCE)
+        return;
+    desktop_path(desktop_pressed, drag_file);
+    drag_icon = gui_file_icon(drag_file, desktop_items[desktop_pressed].folder);
+    dragging_from_desktop = true;
+    desktop_pressed = -1;
+    add_damage(drag_rect());
+    printf("wm: dragging %s\n", drag_file);
+}
+
+// A copy of a file let go on the desktop goes in Desktop, unless it's there already.
+static void copy_to_desktop(const char *path) {
+    const char *slash = strrchr(path, '/');
+    pid_t child;
+
+    if (!slash || ((size_t)(slash - path) == strlen(desktop_dir) && !strncmp(path, desktop_dir, slash - path)))
+        return;
+    if ((child = fork()) == 0) {
+        execl("/system/bin/cp", "cp", "-r", path, desktop_dir, (char *)NULL);
+        _exit(127);
+    }
+    if (child > 0)
+        waitpid(child, NULL, 0);
+    printf("wm: copied %s to the desktop\n", path);
+    load_desktop();
+}
+
 // Draws everything that overlaps a rectangle, through a canvas that is only that
 // part of the screen.
 static void compose(struct rect r) {
@@ -1187,8 +1486,10 @@ static void compose(struct rect r) {
             gui_copy(&c, 0, 0, &wallpaper, r.x, r.y, r.width, r.height);
         else
             gui_fill(&c, 0, 0, r.width, r.height, DESKTOP_COLOR);
-        if (!locked)
+        if (!locked) {
             gui_text(&c, GUI_CHAR_WIDTH - r.x, hint_y - r.y, HINT, HINT_COLOR, 1);
+            draw_desktop(&c, r.x, r.y);
+        }
         first = 0;
     }
     for (int i = first; i < window_count; i++) {
@@ -1582,10 +1883,28 @@ static void send_shared(struct client *client, struct gui_message m, const char 
     queue_message(client, &m);
 }
 
+// A picture must be as long as its size says.
 static void set_clipboard(const struct gui_message *m) {
+    bool image = !strncmp(m->text, "image", sizeof(m->text));
+
     free(clipboard);
     clipboard = copy_shared(m, CLIPBOARD_MAX);
     clipboard_length = clipboard ? (size_t)m->width : 0;
+    clipboard_width = image ? m->x : 0;
+    clipboard_height = image ? m->y : 0;
+    if (image && (m->x <= 0 || m->y <= 0 || (size_t)m->x * m->y * 4 != clipboard_length)) {
+        free(clipboard);
+        clipboard = NULL;
+        clipboard_length = clipboard_width = clipboard_height = 0;
+    }
+}
+
+static void send_clipboard(struct client *client) {
+    struct gui_message m = {.type = GUI_CLIPBOARD, .x = clipboard_width, .y = clipboard_height};
+
+    if (clipboard_width)
+        snprintf(m.text, sizeof(m.text), "image");
+    send_shared(client, m, clipboard, clipboard_length);
 }
 
 static void start_drag(const struct client *client, const struct gui_message *m) {
@@ -1635,7 +1954,7 @@ static void handle_message(struct client *client, const struct gui_message *m) {
         set_clipboard(m);
         break;
     case GUI_CLIPBOARD_GET:
-        send_shared(client, (struct gui_message){.type = GUI_CLIPBOARD}, clipboard, clipboard_length);
+        send_clipboard(client);
         break;
     case GUI_DRAG:
         start_drag(client, m);
@@ -1788,7 +2107,7 @@ static void log_out(void) {
     }
     free(clipboard);
     clipboard = NULL;
-    clipboard_length = 0;
+    clipboard_length = clipboard_width = clipboard_height = 0;
     notice_count = 0;
     clear_history();
     logged_in = false;
@@ -1875,15 +2194,46 @@ static void launch_app(const char *name) {
     }
 }
 
+// Opens a file in what it's for: folders in Files, pictures in the viewer, sounds
+// in the player and anything else in the editor.
 static void open_file(const char *path) {
+    struct stat st;
+    bool folder = stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+    const struct gui_image *icon = gui_file_icon(path, folder);
+    const char *app = folder                      ? "files"
+                    : icon == gui_icon("image") ? "viewer"
+                    : icon == gui_icon("audio") ? "player"
+                                                : "editor";
+    char program[sizeof(APPS_DIR) + 16];
+
+    snprintf(program, sizeof(program), APPS_DIR "/%s", app);
+    printf("wm: opening %s in %s\n", path, app);
     if (fork() == 0) {
-        execl(APPS_DIR "/viewer", "viewer", path, (char *)NULL);
+        execl(program, app, path, (char *)NULL);
         _exit(127);
     }
 }
 
+// Puts pixels on the clipboard, as a picture.
+static bool copy_picture(const struct gui_canvas *from) {
+    size_t row = (size_t)from->width * sizeof(uint32_t);
+    char *copy = malloc(row * from->height);
+
+    if (!copy)
+        return false;
+    for (int y = 0; y < from->height; y++)
+        memcpy(copy + y * row, from->pixels + (long)y * from->stride, row);
+    free(clipboard);
+    clipboard = copy;
+    clipboard_length = row * from->height;
+    clipboard_width = from->width;
+    clipboard_height = from->height;
+    return true;
+}
+
 // Print Screen saves the screen, and with Alt the focused window, as it's shown but
 // without the cursor, in a new file in Pictures, which the notice saying so opens.
+// It's put on the clipboard as well.
 static void screenshot(bool window) {
     struct rect r = {0, 0, screen.width, screen.height};
     char dir[GUI_PATH_MAX], path[GUI_PATH_MAX], stamp[32];
@@ -1921,7 +2271,9 @@ static void screenshot(bool window) {
         return;
     }
     printf("wm: screenshot %s %dx%d\n", path, r.width, r.height);
-    notice_file(add_notice("Screenshot saved", strrchr(path, '/') + 1, "viewer"), path);
+    notice_file(add_notice(copy_picture(&shot) ? "Screenshot saved and copied" : "Screenshot saved",
+                           strrchr(path, '/') + 1, "viewer"),
+                path);
 }
 
 static int compare_names(const void *a, const void *b) {
@@ -2091,8 +2443,11 @@ static void press(uint32_t changed) {
             taskbar_click();
         return;
     }
-    if (!w)
+    if (!w) {
+        if (changed & MOUSE_BUTTON_LEFT)
+            desktop_press();
         return;
+    }
     set_focus(w);
     if (w != windows[window_count - 1])
         raise_window(w);
@@ -2122,18 +2477,22 @@ static void press(uint32_t changed) {
     }
 }
 
-// A file let go over another window's contents goes to it, which comes to the top.
+// A file let go over a window's contents goes to it, which comes to the top, with
+// the keys held.
 static void drop_file(void) {
     enum part part;
     int edges;
     struct window *w = window_at(cursor_x, cursor_y, &part, &edges);
 
     add_damage(drag_rect());
-    if (w && part == PART_CONTENT && w != grabbed && !locked) {
+    if (!w && !locked && !dragging_from_desktop && !contains(taskbar(), cursor_x, cursor_y))
+        copy_to_desktop(drag_file);
+    dragging_from_desktop = false;
+    if (w && part == PART_CONTENT && !locked) {
         set_focus(w);
         raise_window(w);
         send_shared(w->client, (struct gui_message){.type = GUI_DROP, .window = w->id, .x = cursor_x - w->x,
-                                                    .y = cursor_y - w->y},
+                                                    .y = cursor_y - w->y, .key.modifiers = modifiers},
                     drag_file, strlen(drag_file));
         printf("wm: dropped %s on %s\n", drag_file, w->title);
     }
@@ -2227,6 +2586,8 @@ static void handle_mouse(const struct mouse_event *e) {
     if (target && wheel)
         send_mouse(target, GUI_MOUSE_WHEEL, 0, wheel);
 
+    if (moved && (buttons & MOUSE_BUTTON_LEFT))
+        desktop_drag();
     if (pressed)
         press(pressed);
     if (released && grabbed)
@@ -2242,6 +2603,7 @@ static void handle_mouse(const struct mouse_event *e) {
         dragging = NULL;
         grabbed = NULL;
         resizing = NULL;
+        desktop_pressed = -1;
     }
     update_cursor();
 }
@@ -2344,6 +2706,7 @@ static void update_cursor(void) {
 static void handle_key(const struct key_event *e) {
     bool super = e->modifiers & KEY_MOD_SUPER;
 
+    modifiers = e->modifiers;
     if (locked) {
         if (focused && focused->client == session)
             send_to(focused, (struct gui_message){.type = GUI_KEY, .key = *e});
@@ -2554,10 +2917,19 @@ int main(int argc, char **argv) {
 
     cursor_x = screen.width / 2;
     cursor_y = screen.height / 2;
+
+    // Programs start in the home folder, which has the desktop's.
+    const char *home = getenv("HOME");
+
+    snprintf(desktop_dir, sizeof(desktop_dir), "%s/Desktop", home && strcmp(home, "/") ? home : "");
+    if (home && chdir(home) < 0)
+        printf("wm: can't go to %s\n", home);
+    mkdir(desktop_dir, 0755);
     add_damage((struct rect){0, 0, screen.width, screen.height});
     make_falloff();
     load_settings();
     load_volume();
+    load_desktop();
     if (login_mode)
         lock();
     else
@@ -2614,6 +2986,7 @@ int main(int argc, char **argv) {
         }
         if (now_ms() >= net_checked + NET_CHECK_MS) {
             check_network();
+            load_desktop();
             net_checked = now_ms();
         }
 

@@ -28,7 +28,8 @@ enum gui_message_type {
     GUI_SETTINGS,
 
     // The clipboard, which wm keeps. Text goes either way in shared memory named
-    // in buffer, width bytes long, which whoever gets it maps and then removes.
+    // in buffer, width bytes long, which whoever gets it maps and then removes. A
+    // picture goes the same way, with "image" in text, as x by y pixels.
     GUI_CLIPBOARD_SET, // width and buffer, or width 0 to empty it
     GUI_CLIPBOARD_GET, // answered with GUI_CLIPBOARD
     GUI_NOTIFY,        // a notification: its title in text and what it says in buffer, from
@@ -130,8 +131,14 @@ bool gui_notify(struct gui_window *window, const char *title, const char *text);
 bool gui_clipboard_set(const char *text, size_t length);
 
 // What's on the clipboard, ending in a zero byte, to be freed, or NULL if it's
-// empty. length, if not NULL, gets its length.
+// empty or a picture. length, if not NULL, gets its length.
 char *gui_clipboard_get(size_t *length);
+
+// Puts a picture on the clipboard, or gets one, to be freed, returning false if
+// there's none.
+struct gui_image;
+bool gui_clipboard_set_image(const struct gui_canvas *from);
+bool gui_clipboard_get_image(struct gui_image *image);
 
 // Drags a file from the window the mouse is held in, which wm shows by the cursor
 // and gives to the window it's let go over, as a GUI_DROP.
@@ -331,6 +338,11 @@ struct gui_ui {
     // A widget Tab moved the keyboard to, which the areas it's in scroll to show.
     uint32_t reveal;
 
+    // A file dropped at drop_x, drop_y, from gui_ui_drop, and the item of a list or
+    // grid, and the tab, it was dropped on that frame, or -1.
+    bool dropping;
+    int drop_x, drop_y, drop_item, drop_tab;
+
     // Where the next widget goes, with what it was before each scrolling area.
     struct gui_layout layout;
     struct {
@@ -349,6 +361,9 @@ void gui_ui_init(struct gui_ui *ui, struct gui_window *window);
 // Takes an event's input, and resizes the window when wm asks. Returns whether the
 // frame should be drawn again, which is false for events it has no use for.
 bool gui_ui_event(struct gui_ui *ui, const struct gui_message *event);
+
+// Says where a file was dropped, for the next frame to find what it's on.
+void gui_ui_drop(struct gui_ui *ui, int x, int y);
 
 // A frame starts with a blank window, and ends by showing it.
 void gui_ui_begin(struct gui_ui *ui);
@@ -426,6 +441,13 @@ int gui_list(struct gui_ui *ui, const char *label, const char *const *items, int
 // The same, with an icon before each item, where icons has one that isn't NULL.
 int gui_list_icons(struct gui_ui *ui, const char *label, const char *const *items, const struct gui_image *const *icons,
                    int count, int *selected, int rows);
+
+// All of count items in a grid, each with its picture, up to GUI_THUMBNAIL square,
+// over its name, down to the bottom of the window, which scrolls. It's chosen from
+// like gui_list, and the arrows move about it.
+#define GUI_THUMBNAIL 64
+int gui_grid(struct gui_ui *ui, const char *label, const char *const *items, const struct gui_image *const *images,
+             int count, int *selected);
 
 // A bar of menus across the top, which goes first in a frame. Each gui_menu that
 // returns true is open, and has its items next, then gui_menu_end. An item returns

@@ -64,7 +64,8 @@ try:
     at = v.mark()
     drag(0, (300, 400))
     time.sleep(1)
-    check('dropping in Files itself does nothing', 'wm: dropped' not in v.text(at), v.text(at))
+    check('dropping in its own folder in Files leaves it', 'files: dropped /drop/hello.c where it was' in v.text(at)
+          and 'files: moved' not in v.text(at), v.text(at))
     v.pointer(960, 400, 1); v.pointer(960, 400, 0); v.key('meta_l-q'); time.sleep(0.5)
 
     # The editor colours C, and finds, replaces and goes to lines.

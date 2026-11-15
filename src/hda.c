@@ -220,6 +220,7 @@ static void set_up_paths(void) {
         command(pin, SET_PIN, PIN_OUT_ENABLE | (headphone ? PIN_HEADPHONE : 0));
         if (parameter(pin, PARAM_PIN) & PIN_EAPD)
             command(pin, SET_EAPD, 0x02);
+        command(dac, SET_STREAM, 0); // off the stream first, which stops it if it was left playing
         command(dac, SET_STREAM, STREAM_TAG << 4);
         command(dac, SET_FORMAT, format);
     }
@@ -346,6 +347,15 @@ void hda_set_rate(int rate) {
         command(paths[p][path_lengths[p] - 1], SET_FORMAT, format);
 }
 
+// A codec can keep thinking a stream is playing through a reset of the machine,
+// and then not play it when it's started again, so it's stopped first.
+void hda_shutdown(void) {
+    if (!registers)
+        return;
+    w8(stream + SD_CTL, r8(stream + SD_CTL) & ~SD_RUN);
+    wait_for(stream + SD_CTL, SD_RUN, 0, 8);
+}
+
 void hda_stop(void) {
     w8(stream + SD_CTL, r8(stream + SD_CTL) & ~SD_RUN);
     wait_for(stream + SD_CTL, SD_RUN, 0, 8);
@@ -414,6 +424,11 @@ bool hda_init(void) {
     }
     w32(INTCTL, 0);
     set_up_paths();
+
+    // And in case the last system didn't, the stream's started and stopped, so the
+    // codec knows it's stopped too.
+    hda_start();
+    hda_stop();
     kprintf("hda: codec %u, playing through %u pin%s\n", codec, path_count, path_count == 1 ? "" : "s");
     return true;
 }

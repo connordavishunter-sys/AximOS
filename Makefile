@@ -233,7 +233,7 @@ $(DISK): $(PROGRAM_ELFS) $(LIBC_SO) $(LIBGUI_SO) $(LIBAUDIO_SO) $(LIBOGG_SO) $(C
 	rm -f $@
 	mkfs.fat -F 32 -C $@ $$(($(DISK_SIZE_MB) * 1024))
 	mcopy -s -i $@ rootfs/system ::/
-	mmd -i $@ ::/system/boot ::/system/bin ::/system/bin/gui ::/system/lib ::/tmp
+	mmd -i $@ ::/system/boot ::/system/bin ::/system/bin/gui ::/system/lib ::/tmp ::/home ::/home/Desktop ::/home/Documents ::/home/Pictures
 	mcopy -s -i $@ $(ZONES) ::/system/share/
 	$(call install_stripped,$(LIBC_SO),/system/lib/libc.so)
 	$(call install_stripped,$(LIBGUI_SO),/system/lib/libgui.so)

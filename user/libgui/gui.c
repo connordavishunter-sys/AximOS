@@ -257,9 +257,10 @@ void gui_set_cursor(struct gui_window *window, enum gui_cursor cursor) {
     gui_send(connection, &(struct gui_message){.type = GUI_CURSOR, .window = window->id, .x = cursor});
 }
 
-// Sends a message of type with data in new shared memory, which wm maps and removes.
-static bool send_shared(uint32_t type, const char *data, size_t length) {
-    struct gui_message message = {.type = type, .width = (int32_t)length};
+// Sends a message with data in new shared memory, which wm maps and removes.
+static bool send_shared(struct gui_message message, const void *data, size_t length) {
+    message.width = (int32_t)length;
+
     char *shared = length ? new_shared(length, message.buffer) : NULL;
 
     if (length && !shared)
@@ -298,11 +299,26 @@ static char *take_shared(const struct gui_message *message, size_t max) {
 }
 
 bool gui_clipboard_set(const char *text, size_t length) {
-    return send_shared(GUI_CLIPBOARD_SET, text, length);
+    return send_shared((struct gui_message){.type = GUI_CLIPBOARD_SET}, text, length);
+}
+
+bool gui_clipboard_set_image(const struct gui_canvas *from) {
+    size_t row = (size_t)from->width * sizeof(uint32_t);
+    uint32_t *pixels = malloc(row * from->height);
+    bool ok;
+
+    if (!pixels)
+        return false;
+    for (int y = 0; y < from->height; y++)
+        memcpy(pixels + (size_t)y * from->width, from->pixels + (size_t)y * from->stride, row);
+    ok = send_shared((struct gui_message){.type = GUI_CLIPBOARD_SET, .text = "image", .x = from->width, .y = from->height},
+                     pixels, row * from->height);
+    free(pixels);
+    return ok;
 }
 
 bool gui_drag_file(const char *path) {
-    return send_shared(GUI_DRAG, path, strlen(path));
+    return send_shared((struct gui_message){.type = GUI_DRAG}, path, strlen(path));
 }
 
 bool gui_dropped_file(const struct gui_message *drop, char path[GUI_PATH_MAX]) {
@@ -322,21 +338,47 @@ bool gui_notify(struct gui_window *window, const char *title, const char *text) 
     return gui_send(connection, &message);
 }
 
-// Waits for the answer, keeping events that come first for gui_next_event.
-char *gui_clipboard_get(size_t *length) {
-    struct gui_message message = {.type = GUI_CLIPBOARD_GET};
-    char *text;
-
-    if (length)
-        *length = 0;
-    if (!gui_send(connection, &message))
+// What's on the clipboard, and whether it's a picture, waiting for the answer and
+// keeping events that come first for gui_next_event.
+static char *clipboard(struct gui_message *message, bool *image) {
+    *message = (struct gui_message){.type = GUI_CLIPBOARD_GET};
+    *image = false;
+    if (!gui_send(connection, message))
         return NULL;
-    while (gui_receive(connection, &message) && message.type != GUI_CLIPBOARD)
-        gui_post(&message);
-    text = message.type == GUI_CLIPBOARD ? take_shared(&message, INT32_MAX) : NULL;
-    if (text && length)
-        *length = (size_t)message.width;
+    while (gui_receive(connection, message) && message->type != GUI_CLIPBOARD)
+        gui_post(message);
+    *image = !strncmp(message->text, "image", sizeof(message->text));
+    return message->type == GUI_CLIPBOARD ? take_shared(message, INT32_MAX) : NULL;
+}
+
+char *gui_clipboard_get(size_t *length) {
+    struct gui_message message;
+    bool image;
+    char *text = clipboard(&message, &image);
+
+    if (image) {
+        free(text);
+        text = NULL;
+    }
+    if (length)
+        *length = text ? (size_t)message.width : 0;
     return text;
+}
+
+bool gui_clipboard_get_image(struct gui_image *out) {
+    struct gui_message message;
+    bool image;
+    uint32_t *pixels = (uint32_t *)clipboard(&message, &image);
+    size_t count = (size_t)message.x * message.y;
+
+    if (!pixels || !image || message.x <= 0 || message.y <= 0 || count * sizeof(uint32_t) != (size_t)message.width) {
+        free(pixels);
+        return false;
+    }
+    for (size_t i = 0; i < count; i++)
+        pixels[i] |= 0xFF000000; // nothing's see-through
+    *out = (struct gui_image){pixels, message.x, message.y};
+    return true;
 }
 
 void gui_show(struct gui_window *window) {

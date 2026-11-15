@@ -18,6 +18,9 @@ void hda_set_rate(int rate);
 void hda_start(void);
 void hda_stop(void);
 
+// Stops playing, if there's a sound card, before the machine resets.
+void hda_shutdown(void);
+
 // Where in the buffer it's playing, and writing there.
 uint32_t hda_played(void);
 void hda_put(uint32_t offset, const void *data, uint32_t len);

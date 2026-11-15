@@ -10,7 +10,7 @@ try:
     o = v.run('cd /system/etc'); check('cd changes the prompt', '/system/etc$ ' in o, o)
     o = v.run('pwd'); check('pwd', '\n/system/etc\n' in o, o)
     v.run('cd /')
-    o = v.run('echo $SHELL $HOME $PATH'); check('environment from init', '/system/bin/dash / /system/bin' in o, o)
+    o = v.run('echo $SHELL $HOME $PATH'); check('environment from init', '/system/bin/dash /home /system/bin' in o, o)
     o = v.run('nosuchcommand'); check('unknown command', 'not found' in o, o)
     o = v.run('echo piped | cat | cat'); check('pipes', '\npiped\n' in o, o)
     v.run('echo hi > /tmp/x')

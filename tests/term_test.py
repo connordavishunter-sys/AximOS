@@ -61,7 +61,7 @@ try:
     check('wm starts', v.wait('wm: running', 10, at), v.text(at))
     v.mouse(600, 380) # out of the way, near the bottom right corner
     lines = wait_screen(v, '/$')
-    check('term shows the prompt', lines[0].startswith('/$'), '\n'.join(lines))
+    check('term shows the prompt', lines[0].startswith('/home$'), '\n'.join(lines))
 
     v.type('echo only-in-term\n')
     lines = wait_screen(v, 'only-in-term')
@@ -92,12 +92,12 @@ try:
     v.key('q'); time.sleep(0.5)
     v.type('clear; echo cleared\n')
     lines = wait_screen(v, 'cleared')
-    check('clear', lines[0] == 'cleared' and lines[1].startswith('/$'), '\n'.join(lines))
+    check('clear', lines[0] == 'cleared' and lines[1].startswith('/home$'), '\n'.join(lines))
 
     # Long output scrolls, leaving the last lines at the bottom.
     v.type('seq=1; while [ $seq -le 40 ]; do echo line$seq; seq=$((seq+1)); done\n')
     lines = wait_screen(v, 'line40')
-    check('scrolls', lines[23] == 'line40' and lines[22] == 'line39' and lines[24].startswith('/$'), '\n'.join(lines))
+    check('scrolls', lines[23] == 'line40' and lines[22] == 'line39' and lines[24].startswith('/home$'), '\n'.join(lines))
 
     # What scrolled off since clear is kept: Shift+Page Up goes back a screen less a
     # line, which is all of it, and the wheel goes three lines at a time.
@@ -171,7 +171,7 @@ try:
     # exit closes it too.
     v.key('meta_l-ret'); time.sleep(1.5)
     lines = wait_screen(v, '/$', shift=32)
-    check('Super+Enter opens term', lines[0].startswith('/$'), '\n'.join(lines))
+    check('Super+Enter opens term', lines[0].startswith('/home$'), '\n'.join(lines))
     v.type('exit\n'); time.sleep(1)
     w, h, px = v.screenshot()
     check('exit closes term', px(300, 300) == 0x1E2430, hex(px(300, 300)))

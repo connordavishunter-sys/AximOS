@@ -215,6 +215,14 @@ static void go_to_line(struct gui_ui *ui) {
     bar = NO_BAR;
 }
 
+// The menu's Undo and Redo are the keys, sent to the text.
+static void undo_key(struct gui_ui *ui, bool redo) {
+    gui_select_text(ui, TEXT, selected_from, selected_to);
+    gui_post(&(struct gui_message){.type = GUI_KEY,
+                                   .key = {.code = redo ? 0x15 : 0x2C, .text = redo ? 'y' : 'z',
+                                           .modifiers = KEY_MOD_CTRL, .pressed = true}});
+}
+
 static void open_bar(int which) {
     bar = which;
     bar_focus = true;
@@ -268,6 +276,11 @@ static void editing(struct gui_ui *ui) {
         gui_menu_end(ui);
     }
     if (gui_menu(ui, "Edit")) {
+        if (gui_menu_item(ui, "Undo"))
+            undo_key(ui, false);
+        if (gui_menu_item(ui, "Redo"))
+            undo_key(ui, true);
+        gui_menu_separator(ui);
         if (gui_menu_item(ui, "Find..."))
             open_bar(FINDING);
         if (gui_menu_item(ui, "Find next"))

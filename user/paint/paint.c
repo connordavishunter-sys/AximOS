@@ -12,6 +12,13 @@
 #define SWATCH 22
 #define WHITE 0xFFFFFF
 #define ACCENT 0x3D63DD
+#define AROUND 0x2A2E37 // the window, round a picture smaller than it
+#define BAR 12          // scroll bars
+#define BAR_TRACK 0x22252D
+#define BAR_THUMB 0x4A5263
+#define WHEEL_STEP 48
+#define KEY_EQUALS 0x0D
+#define KEY_MINUS 0x0C
 
 // Pictures drawn with the mouse, saved and opened as PNG files.
 enum tool { PENCIL, LINE, BOX, OVAL, FILL, ERASER, PICKER, TOOLS };
@@ -24,9 +31,18 @@ static const uint32_t palette[] = {
 
 static struct gui_window *window;
 static struct gui_file_picker picker;
-static struct gui_canvas picture;
-static uint32_t *undo[UNDO];
+static struct gui_canvas picture, preview; // the picture, and a copy with the shape being drawn
+static struct gui_canvas undo[UNDO];
 static int undo_count;
+
+// The picture's shown zoom times its size, scrolled by scroll_x and scroll_y of
+// those pixels, in view, with bars to scroll it when it doesn't fit.
+static const double zooms[] = {0.25, 0.5, 1, 2, 4, 8};
+#define ZOOMS ((int)(sizeof(zooms) / sizeof(zooms[0])))
+#define ACTUAL_SIZE 2
+static int zoom_index = ACTUAL_SIZE, scroll_x, scroll_y;
+static struct gui_rect view, bars[2]; // across the bottom and down the side, if they're shown
+static int dragging_bar = -1, bar_grab;
 static enum tool tool;
 static uint32_t colour;
 static int size = 3;
@@ -46,7 +62,8 @@ static bool new_picture(int width, int height) {
     picture = (struct gui_canvas){pixels, width, height, width};
     gui_fill(&picture, 0, 0, width, height, WHITE);
     for (; undo_count > 0; undo_count--)
-        free(undo[undo_count - 1]);
+        free(undo[undo_count - 1].pixels);
+    scroll_x = scroll_y = 0;
     return true;
 }
 
@@ -71,7 +88,7 @@ static void set_modified(bool now) {
     closing = false;
 }
 
-// Keeps the picture as it is, to go back to.
+// Keeps the picture as it is, and its size, to go back to.
 static void save_undo(void) {
     size_t bytes = (size_t)picture.width * picture.height * sizeof(uint32_t);
     uint32_t *copy = malloc(bytes);
@@ -80,20 +97,70 @@ static void save_undo(void) {
         return;
     memcpy(copy, picture.pixels, bytes);
     if (undo_count == UNDO) {
-        free(undo[0]);
+        free(undo[0].pixels);
         memmove(undo, undo + 1, (UNDO - 1) * sizeof(*undo));
         undo_count--;
     }
-    undo[undo_count++] = copy;
+    undo[undo_count++] = (struct gui_canvas){copy, picture.width, picture.height, picture.width};
 }
 
 static void undo_last(void) {
     if (!undo_count)
         return;
     free(picture.pixels);
-    picture.pixels = undo[--undo_count];
+    picture = undo[--undo_count];
     set_modified(true);
     printf("paint: undone\n");
+}
+
+static void copy_picture(void) {
+    if (gui_clipboard_set_image(&picture))
+        printf("paint: copied %dx%d\n", picture.width, picture.height);
+}
+
+// A picture from the clipboard goes at the top left, making the picture bigger if
+// it's smaller.
+static void paste_picture(void) {
+    struct gui_image pasted;
+
+    if (!gui_clipboard_get_image(&pasted)) {
+        snprintf(status, sizeof(status), "There's no picture to paste");
+        return;
+    }
+
+    int width = pasted.width > picture.width ? pasted.width : picture.width;
+    int height = pasted.height > picture.height ? pasted.height : picture.height;
+    uint32_t *pixels = width <= MAX_SIZE && height <= MAX_SIZE ? malloc((size_t)width * height * sizeof(uint32_t)) : NULL;
+
+    if (pixels) {
+        struct gui_canvas bigger = {pixels, width, height, width};
+
+        save_undo();
+        gui_fill(&bigger, 0, 0, width, height, WHITE);
+        gui_copy(&bigger, 0, 0, &picture, 0, 0, picture.width, picture.height);
+        gui_draw_image(&bigger, 0, 0, &pasted);
+        free(picture.pixels);
+        picture = bigger;
+        set_modified(true);
+        printf("paint: pasted %dx%d\n", pasted.width, pasted.height);
+    }
+    gui_image_free(&pasted);
+}
+
+static int zoomed(int pixels) {
+    return (int)(pixels * zooms[zoom_index]);
+}
+
+// Zooms in or out, keeping what's in the middle of the view there.
+static void zoom_by(int steps) {
+    int to = zoom_index + steps < 0 ? 0 : zoom_index + steps >= ZOOMS ? ZOOMS - 1 : zoom_index + steps;
+    double middle_x = (scroll_x + view.width / 2.0) / zooms[zoom_index];
+    double middle_y = (scroll_y + view.height / 2.0) / zooms[zoom_index];
+
+    zoom_index = steps ? to : ACTUAL_SIZE;
+    scroll_x = (int)(middle_x * zooms[zoom_index] - view.width / 2.0);
+    scroll_y = (int)(middle_y * zooms[zoom_index] - view.height / 2.0);
+    printf("paint: zoom %d%%\n", (int)(zooms[zoom_index] * 100));
 }
 
 // What's partly see-through goes on white, as there's nothing under a picture.
@@ -264,11 +331,23 @@ static void choose_colour(uint32_t to) {
     printf("paint: colour %06X\n", to);
 }
 
-// The mouse on the picture, shown at area, uses the tool.
-static void use_tool(struct gui_ui *ui, struct gui_rect area) {
-    int x = ui->mouse_x - area.x, y = ui->mouse_y - area.y;
-    bool on = x >= 0 && y >= 0 && x < picture.width && y < picture.height && ui->mouse_x < area.x + area.width
-           && ui->mouse_y < area.y + area.height;
+static bool inside(struct gui_rect r, int x, int y) {
+    return x >= r.x && y >= r.y && x < r.x + r.width && y < r.y + r.height;
+}
+
+// Which pixel of the picture is at a point in the window, rounding down.
+static int picture_x(int x) {
+    return (int)floor((x - view.x + scroll_x) / zooms[zoom_index]);
+}
+
+static int picture_y(int y) {
+    return (int)floor((y - view.y + scroll_y) / zooms[zoom_index]);
+}
+
+// The mouse on the picture uses the tool.
+static void use_tool(struct gui_ui *ui) {
+    int x = picture_x(ui->mouse_x), y = picture_y(ui->mouse_y);
+    bool on = x >= 0 && y >= 0 && x < picture.width && y < picture.height && inside(view, ui->mouse_x, ui->mouse_y);
 
     if (ui->mouse_pressed && on && !ui->mouse_in_popup) {
         if (tool == PICKER) {
@@ -300,6 +379,102 @@ static void use_tool(struct gui_ui *ui, struct gui_rect area) {
     }
 }
 
+// Scroll bars across the bottom and down the side, when the picture's wider or
+// taller than the view, which the wheel scrolls up and down too.
+static void scroll_bars(struct gui_ui *ui) {
+    int content[2] = {zoomed(picture.width), zoomed(picture.height)}, *scroll[2] = {&scroll_x, &scroll_y};
+    int length[2] = {view.width, view.height};
+
+    scroll_y += ui->wheel * WHEEL_STEP;
+    for (int i = 0; i < 2; i++) {
+        int most = content[i] - length[i] > 0 ? content[i] - length[i] : 0;
+        struct gui_rect track = bars[i];
+        int along = i ? track.height : track.width, thumb = most ? along * length[i] / content[i] : along;
+        int mouse = i ? ui->mouse_y - track.y : ui->mouse_x - track.x;
+
+        thumb = thumb < 16 ? 16 : thumb;
+        if (most && ui->mouse_pressed && inside(track, ui->mouse_x, ui->mouse_y)) {
+            int at = *scroll[i] * (along - thumb) / most;
+
+            dragging_bar = i;
+            bar_grab = mouse >= at && mouse < at + thumb ? mouse - at : thumb / 2;
+        }
+        if (dragging_bar == i && along > thumb)
+            *scroll[i] = (mouse - bar_grab) * most / (along - thumb);
+        *scroll[i] = *scroll[i] < 0 ? 0 : *scroll[i] > most ? most : *scroll[i];
+        if (most) {
+            int at = *scroll[i] * (along - thumb) / most;
+
+            gui_fill(&window->canvas, track.x, track.y, track.width, track.height, BAR_TRACK);
+            gui_fill(&window->canvas, track.x + (i ? 2 : at + 2), track.y + (i ? at + 2 : 2), i ? BAR - 4 : thumb - 4,
+                     i ? thumb - 4 : BAR - 4, dragging_bar == i ? ACCENT : BAR_THUMB);
+        }
+    }
+    if (!ui->mouse_down)
+        dragging_bar = -1;
+}
+
+// What's to be shown, the picture or the preview, zoomed in view, each pixel from
+// the nearest of the picture's.
+static void draw_zoomed(const struct gui_canvas *from) {
+    struct gui_canvas *c = &window->canvas;
+
+    for (int y = view.y; y < view.y + view.height; y++) {
+        int sy = picture_y(y);
+        uint32_t *row = c->pixels + (long)y * c->stride;
+
+        for (int x = view.x; x < view.x + view.width; x++) {
+            int sx = picture_x(x);
+
+            row[x] = sx < from->width && sy < from->height ? from->pixels[(long)sy * from->stride + sx] : AROUND;
+        }
+    }
+}
+
+// The picture in area, with room taken from it for scroll bars when it doesn't fit.
+static void show_picture(struct gui_ui *ui, struct gui_rect area) {
+    bool across = zoomed(picture.width) > area.width, down = zoomed(picture.height) > area.height;
+
+    across |= down && zoomed(picture.width) > area.width - BAR;
+    down |= across && zoomed(picture.height) > area.height - BAR;
+    view = (struct gui_rect){area.x, area.y, area.width - (down ? BAR : 0), area.height - (across ? BAR : 0)};
+    if (view.width <= 0 || view.height <= 0)
+        return;
+    bars[0] = across ? (struct gui_rect){view.x, view.y + view.height, view.width, BAR} : (struct gui_rect){0};
+    bars[1] = down ? (struct gui_rect){view.x + view.width, view.y, BAR, view.height} : (struct gui_rect){0};
+    scroll_bars(ui);
+
+    // Where the picture is, and how far it's scrolled, for tests, as far as it's shown.
+    static int was_x = -1, was_y = -1;
+
+    if (scroll_x != was_x || scroll_y != was_y)
+        printf("paint: scrolled %d %d\n", scroll_x, scroll_y);
+    was_x = scroll_x;
+    was_y = scroll_y;
+    int shown_width = zoomed(picture.width) - scroll_x, shown_height = zoomed(picture.height) - scroll_y;
+
+    report(TOOLS + 1, "picture",
+           (struct gui_rect){view.x, view.y, shown_width < view.width ? shown_width : view.width,
+                             shown_height < view.height ? shown_height : view.height});
+    if (dragging_bar < 0)
+        use_tool(ui);
+    if (drawing && tool != PENCIL && tool != ERASER) {
+        size_t bytes = (size_t)picture.width * picture.height * sizeof(uint32_t);
+
+        if (preview.width != picture.width || preview.height != picture.height) {
+            free(preview.pixels);
+            preview = (struct gui_canvas){malloc(bytes), picture.width, picture.height, picture.width};
+        }
+        if (preview.pixels) {
+            memcpy(preview.pixels, picture.pixels, bytes);
+            shape(&preview, picture_x(ui->mouse_x), picture_y(ui->mouse_y));
+            draw_zoomed(&preview);
+            return;
+        }
+    }
+    draw_zoomed(&picture);
+}
+
 static void painting(struct gui_ui *ui) {
     gui_menu_bar(ui);
     if (gui_menu(ui, "File")) {
@@ -319,10 +494,33 @@ static void painting(struct gui_ui *ui) {
     if (gui_menu(ui, "Edit")) {
         if (gui_menu_item(ui, "Undo"))
             undo_last();
+        if (gui_menu_item(ui, "Copy"))
+            copy_picture();
+        if (gui_menu_item(ui, "Paste"))
+            paste_picture();
         gui_menu_end(ui);
+    }
+    if (gui_menu(ui, "View")) {
+        if (gui_menu_item(ui, "Zoom in"))
+            zoom_by(1);
+        if (gui_menu_item(ui, "Zoom out"))
+            zoom_by(-1);
+        if (gui_menu_item(ui, "Actual size"))
+            zoom_by(0);
+        gui_menu_end(ui);
+    }
+    for (int i = 0; i < ui->key_count; i++) {
+        const struct key_event *k = &ui->keys[i];
+
+        if ((k->modifiers & KEY_MOD_CTRL) && (k->code == KEY_EQUALS || k->code == KEY_MINUS))
+            zoom_by(k->code == KEY_EQUALS ? 1 : -1);
     }
     if (gui_shortcut(ui, 'z'))
         undo_last();
+    if (gui_shortcut(ui, 'c'))
+        copy_picture();
+    if (gui_shortcut(ui, 'v'))
+        paste_picture();
     if (gui_shortcut(ui, 's'))
         save();
     if (gui_shortcut(ui, 'o'))
@@ -365,24 +563,10 @@ static void painting(struct gui_ui *ui) {
     gui_same_line(ui);
     gui_label(ui, "%s", status);
 
-    // The picture fills the rest of the window, or as much as it can.
     struct gui_rect last = gui_last_rect(ui);
-    struct gui_rect area = {10, last.y + last.height + 14, window->canvas.width - 20, 0};
 
-    area.height = window->canvas.height - 10 - area.y;
-    area.width = area.width < picture.width ? area.width : picture.width;
-    area.height = area.height < picture.height ? area.height : picture.height;
-    if (area.width <= 0 || area.height <= 0)
-        return;
-    report(TOOLS + 1, "picture", area);
-    use_tool(ui, area);
-    gui_copy(&window->canvas, area.x, area.y, &picture, 0, 0, area.width, area.height);
-
-    struct gui_canvas shown = {window->canvas.pixels + (long)area.y * window->canvas.stride + area.x, area.width,
-                               area.height, window->canvas.stride};
-
-    if (drawing)
-        shape(&shown, ui->mouse_x - area.x, ui->mouse_y - area.y);
+    show_picture(ui, (struct gui_rect){10, last.y + last.height + 14, window->canvas.width - 20,
+                                       window->canvas.height - 24 - last.y - last.height});
 }
 
 static void frame(struct gui_ui *ui) {

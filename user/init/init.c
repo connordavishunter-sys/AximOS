@@ -9,7 +9,7 @@
 #define WM_PATH "/system/bin/wm"
 #define EXEC_FAILED 127
 
-static char *const env[] = {"PATH=/system/bin:/system/bin/gui", "HOME=/", "SHELL=" SHELL_PATH, "PS1=$PWD$ ", NULL};
+static char *const env[] = {"PATH=/system/bin:/system/bin/gui", "HOME=/home", "SHELL=" SHELL_PATH, "PS1=$PWD$ ", NULL};
 
 // Runs a program in its own group, with the terminal to go with it, which it waits
 // for otherwise, and collects any orphans until it's done.

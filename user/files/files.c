@@ -1,3 +1,4 @@
+#include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -46,6 +47,21 @@ static int count, selected;
 static char *folder = tabs[0].folder, typed[PATH_MAX], status[PATH_MAX + 64];
 static bool quitting;
 
+// In the grid, each entry has a picture: a picture's own, made small, or its icon
+// made bigger, kept for each icon.
+#define BIG_ICON 48
+static bool grid;
+static struct gui_image thumbnails[MAX_ENTRIES];
+static const struct gui_image *pictures[MAX_ENTRIES];
+static struct {
+    const struct gui_image *icon;
+    struct gui_image big;
+} big_icons[8];
+
+// A file dropped on the window, for the frame to put where it was dropped.
+static char dropped[PATH_MAX];
+static bool drop_copies;
+
 // What the strip under the address bar is asking, if anything.
 static enum { NOTHING, RENAMING, NEW_FOLDER, NEW_FILE, DELETING } asking;
 static char answer[NAME_MAX + 1];
@@ -77,6 +93,61 @@ static void name_tab(struct tab *t) {
     const char *slash = strrchr(t->folder, '/');
 
     snprintf(t->name, sizeof(t->name), "%s", slash && slash[1] ? slash + 1 : "/");
+}
+
+static const struct gui_image *big_icon(const struct gui_image *icon) {
+    for (int i = 0; icon && i < (int)(sizeof(big_icons) / sizeof(big_icons[0])); i++) {
+        if (big_icons[i].icon == icon)
+            return &big_icons[i].big;
+        if (!big_icons[i].icon && gui_image_scale(icon, BIG_ICON, BIG_ICON, &big_icons[i].big)) {
+            big_icons[i].icon = icon;
+            return &big_icons[i].big;
+        }
+    }
+    return icon;
+}
+
+static void forget_pictures(void) {
+    for (int i = 0; i < MAX_ENTRIES; i++) {
+        gui_image_free(&thumbnails[i]);
+        pictures[i] = NULL;
+    }
+}
+
+// Pictures for the grid, made small to fit GUI_THUMBNAIL, never bigger than they are.
+static void make_pictures(void) {
+    forget_pictures();
+    for (int i = 0; i < count; i++) {
+        char path[PATH_MAX];
+        struct gui_image full;
+
+        path_of(path, entries[i].name);
+        pictures[i] = big_icon(icons[i]);
+        if (icons[i] != gui_icon("image") || !gui_image_load(path, &full))
+            continue;
+
+        int big = full.width > full.height ? full.width : full.height;
+
+        if (big <= GUI_THUMBNAIL) {
+            thumbnails[i] = full;
+            pictures[i] = &thumbnails[i];
+            continue;
+        }
+        if (gui_image_scale(&full, full.width * GUI_THUMBNAIL / big > 0 ? full.width * GUI_THUMBNAIL / big : 1,
+                            full.height * GUI_THUMBNAIL / big > 0 ? full.height * GUI_THUMBNAIL / big : 1, &thumbnails[i]))
+            pictures[i] = &thumbnails[i];
+        gui_image_free(&full);
+    }
+}
+
+static void set_grid(bool on) {
+    grid = on;
+    if (grid)
+        make_pictures();
+    else
+        forget_pictures();
+    printf("files: view %s\n", grid ? "grid" : "list");
+    gui_post(&(struct gui_message){.type = GUI_REDRAW}); // with the button's new name
 }
 
 // Lists a folder, going there in this tab, and choosing the entry called select if there is one.
@@ -126,6 +197,8 @@ static bool read_folder(const char *path, const char *select) {
     snprintf(typed, sizeof(typed), "%s", folder);
     asking = NOTHING;
     describe();
+    if (grid)
+        make_pictures();
     return true;
 }
 
@@ -327,14 +400,15 @@ static bool delete_tree(const char *path) {
     return ok && rmdir(path) == 0;
 }
 
-// A name in the folder that isn't taken: the same, or with (copy), (copy 2) and so on.
-static void free_name(const char *name, char out[NAME_MAX + 1]) {
+// A name in a folder that isn't taken: the same, or with (copy), (copy 2) and so on.
+static void free_name(const char *into, const char *name, char out[NAME_MAX + 1]) {
     char path[PATH_MAX];
     const char *dot = strrchr(name, '.');
     int stem = dot && dot != name ? (int)(dot - name) : (int)strlen(name);
 
     snprintf(out, NAME_MAX + 1, "%s", name);
-    for (int i = 1; path_of(path, out), access(path, F_OK) == 0; i++) {
+    for (int i = 1; snprintf(path, sizeof(path), "%s%s%s", into, strcmp(into, "/") ? "/" : "", out), access(path, F_OK) == 0;
+         i++) {
         if (i == 1)
             snprintf(out, NAME_MAX + 1, "%.*s (copy)%s", stem, name, name + stem);
         else
@@ -342,14 +416,43 @@ static void free_name(const char *name, char out[NAME_MAX + 1]) {
     }
 }
 
+// Copies a file or folder into a folder, or moves it there, with a name that isn't
+// taken, saying what it did as done. Returns where it went, or NULL.
+static const char *put(const char *from, const char *into, bool moving, const char *done) {
+    static char to[PATH_MAX];
+    char name[NAME_MAX + 1], here[PATH_MAX];
+    const char *base = strrchr(from, '/') ? strrchr(from, '/') + 1 : from;
+    size_t length = strlen(from);
+    bool ok;
+
+    snprintf(here, sizeof(here), "%s%s%s", into, strcmp(into, "/") ? "/" : "", base);
+    if (moving && !strcmp(here, from)) // already there
+        return NULL;
+    if (!strncmp(into, from, length) && (into[length] == '/' || !into[length])) {
+        snprintf(status, sizeof(status), "Can't put %s inside itself", base);
+        return NULL;
+    }
+    free_name(into, base, name);
+    snprintf(to, sizeof(to), "%s%s%s", into, strcmp(into, "/") ? "/" : "", name);
+    if (moving)
+        ok = rename(from, to) == 0 || (errno == EXDEV && copy_tree(from, to) && delete_tree(from));
+    else
+        ok = copy_tree(from, to);
+    if (!ok) {
+        snprintf(status, sizeof(status), "Can't put %s in %s: %s", base, into, strerror(errno));
+        return NULL;
+    }
+    printf("files: %s %s to %s\n", done, from, to);
+    snprintf(status, sizeof(status), "%c%s %s", toupper((unsigned char)done[0]), done + 1, base);
+    return to;
+}
+
 // Copies what's on the clipboard here, or moves it if it was cut.
 static void paste(void) {
-    char *from = gui_clipboard_get(NULL), cut[PATH_MAX] = "", name[NAME_MAX + 1], to[PATH_MAX];
-    const char *base;
+    char *from = gui_clipboard_get(NULL), cut[PATH_MAX] = "";
     struct stat st;
     FILE *f = fopen(CUT, "r");
-    size_t length = from ? strlen(from) : 0;
-    bool moving, ok;
+    const char *to;
 
     if (f) {
         if (!fgets(cut, sizeof(cut), f))
@@ -361,35 +464,38 @@ static void paste(void) {
         free(from);
         return;
     }
-    moving = !strcmp(cut, from);
-    base = strrchr(from, '/') + 1;
-    path_of(to, base);
-    if (moving && !strcmp(to, from)) { // already here
-        free(from);
-        return;
-    }
-    if (!strncmp(folder, from, length) && (folder[length] == '/' || !folder[length])) {
-        snprintf(status, sizeof(status), "Can't put %s inside itself", base);
-        free(from);
-        return;
-    }
-    free_name(base, name);
-    path_of(to, name);
-    if (moving)
-        ok = rename(from, to) == 0 || (errno == EXDEV && copy_tree(from, to) && delete_tree(from));
-    else
-        ok = copy_tree(from, to);
-    if (ok) {
-        printf("files: %s %s to %s\n", moving ? "moved" : "pasted", from, to);
+
+    bool moving = !strcmp(cut, from);
+
+    if ((to = put(from, folder, moving, moving ? "moved" : "pasted"))) {
         if (moving) {
             unlink(CUT);
             gui_clipboard_set(to, strlen(to)); // where it is now, to paste copies of
         }
-        read_folder(folder, name);
-    } else {
-        snprintf(status, sizeof(status), "Can't paste %s: %s", base, strerror(errno));
+        read_folder(folder, strrchr(to, '/') + 1);
     }
     free(from);
+}
+
+// A file dropped on a folder, or a tab, goes there, and on the rest of the window
+// it comes here, if it isn't here already. It's moved, or copied with Ctrl held.
+static void take_drop(struct gui_ui *ui) {
+    char into[PATH_MAX], from_folder[PATH_MAX];
+    const char *to;
+
+    snprintf(from_folder, sizeof(from_folder), "%.*s", (int)(strrchr(dropped, '/') - dropped), dropped);
+    if (ui->drop_tab >= 0)
+        snprintf(into, sizeof(into), "%s", tabs[ui->drop_tab].folder);
+    else if (ui->drop_item >= 0 && entries[ui->drop_item].folder)
+        path_of(into, entries[ui->drop_item].name);
+    else
+        snprintf(into, sizeof(into), "%s", folder);
+    if ((!strcmp(into, folder) && !strcmp(from_folder[0] ? from_folder : "/", folder) && !drop_copies)
+        || !strcmp(into, dropped))
+        printf("files: dropped %s where it was\n", dropped);
+    else if ((to = put(dropped, into, !drop_copies, drop_copies ? "copied" : "moved")))
+        refresh();
+    dropped[0] = '\0';
 }
 
 static void delete_selected(void) {
@@ -453,6 +559,10 @@ static void address_bar(struct gui_ui *ui) {
     gui_same_line(ui);
     if (gui_button(ui, "Go"))
         read_folder(typed, NULL);
+    gui_same_line(ui);
+    if (gui_button(ui, grid ? "List" : "Grid"))
+        set_grid(!grid);
+    report(ui, 3, "view");
     gui_same_line(ui);
     gui_textbox(ui, ADDRESS, typed, sizeof(typed));
     report(ui, 1, "address");
@@ -595,7 +705,8 @@ static void frame(struct gui_ui *ui) {
         asking_strip(ui);
     gui_label(ui, "%s", status);
 
-    result = gui_list_icons(ui, LIST, items, icons, count, &selected, 0);
+    result = grid ? gui_grid(ui, LIST, items, pictures, count, &selected)
+                  : gui_list_icons(ui, LIST, items, icons, count, &selected, 0);
 
     struct gui_rect list = gui_last_rect(ui);
 
@@ -607,6 +718,8 @@ static void frame(struct gui_ui *ui) {
         asking = NOTHING; // they were about the one that was selected
     if (result == GUI_LIST_CHANGED)
         describe();
+    if (ui->dropping && dropped[0])
+        take_drop(ui);
     list_keys(ui);
     context_menu(ui, list);
     gui_ui_end(ui);
@@ -616,7 +729,7 @@ static void frame(struct gui_ui *ui) {
 // A window showing what's in folders, in tabs, to go about them and open what's there.
 int main(int argc, char **argv) {
     help_option(argc, argv, "usage: files [folder]\n"
-                            "Opens a window showing what's in the folder, or /.\n");
+                            "Opens a window showing what's in the folder, or the home folder.\n");
     if (!gui_connect()) {
         dprintf(STDERR_FILENO, "files: wm isn't running\n");
         return 1;
@@ -632,11 +745,18 @@ int main(int argc, char **argv) {
     }
     tab_count = 1;
     tab_names[0] = tabs[0].name;
-    if (!read_folder(argc > 1 ? argv[1] : "/", NULL))
+    const char *home = getenv("HOME");
+
+    if (!read_folder(argc > 1 ? argv[1] : home ? home : "/", NULL))
         read_folder("/", NULL);
     gui_ui_init(&ui, window);
     frame(&ui);
     while (!quitting && gui_next_event(&e) && e.type != GUI_CLOSE) {
+        if (gui_dropped_file(&e, dropped)) {
+            drop_copies = e.key.modifiers & KEY_MOD_CTRL;
+            gui_ui_drop(&ui, e.x, e.y);
+            frame(&ui);
+        }
         if (gui_ui_event(&ui, &e))
             frame(&ui);
     }

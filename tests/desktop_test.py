@@ -15,7 +15,7 @@ img = disk_copy('desktop')
 v = VM(disk=img, vmmouse=True)
 try:
     check('prompt at boot', v.wait('/$ ', 30), v.text())
-    v.run('echo none > /system/etc/wallpaper; rm -f /system/etc/gui.conf /Pictures/*')
+    v.run('echo none > /system/etc/wallpaper; rm -f /system/etc/gui.conf /home/Pictures/*')
     at = v.mark()
     v.type('wm calculator\n')
     check('wm starts', v.wait('wm: running', 10, at), v.text(at))
@@ -41,7 +41,7 @@ try:
     v.pointer(700, 500); time.sleep(0.3)
     at = v.mark()
     v.key('print')
-    check('Print Screen saves the screen', v.wait('wm: screenshot /Pictures/screenshot-', 10, at)
+    check('Print Screen saves the screen', v.wait('wm: screenshot /home/Pictures/screenshot-', 10, at)
           and v.wait(' 1280x800', 2, at), v.text(at))
     check('and says so', v.wait('wm: notice Screenshot saved', 5, at), v.text(at))
     shot = re.findall(r'wm: screenshot (\S+) ', v.text(at))[0]
@@ -49,12 +49,12 @@ try:
     screen = [px(x, y) for x, y in ((10, 10), (CALC_X + 20, CALC_Y + 30), (*button(0, 0),), (700, 790))]
     at = v.mark()
     v.key('alt-print')
-    check('Alt+Print Screen saves the window, with its frame', v.wait('wm: screenshot /Pictures/screenshot-', 10, at)
+    check('Alt+Print Screen saves the window, with its frame', v.wait('wm: screenshot /home/Pictures/screenshot-', 10, at)
           and v.wait(' 262x342', 2, at), v.text(at))
     time.sleep(0.5)
     at = v.mark()
     click(1280 - 12 - 150, TASKBAR_Y - 12 - 26)
-    check('clicking the notice opens it', v.wait('viewer: showing /Pictures/screenshot-', 10, at)
+    check('clicking the notice opens it', v.wait('viewer: showing /home/Pictures/screenshot-', 10, at)
           and v.wait('262x342', 2, at), v.text(at))
     time.sleep(1)
     v.key('meta_l-q'); time.sleep(0.5)
@@ -141,7 +141,7 @@ try:
     check('over the whole desktop', px(5, 700) != DESKTOP and px(1275, 700) != DESKTOP, (hex(px(5, 700)), hex(px(1275, 700))))
 
     v.key('meta_l-shift-q'); time.sleep(1)
-    o = v.run('ls /Pictures')
+    o = v.run('ls /home/Pictures')
     check('both screenshots are in Pictures', o.count('screenshot-') == 2, o)
 finally:
     v.close()
