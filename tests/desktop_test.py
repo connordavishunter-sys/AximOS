@@ -118,7 +118,17 @@ try:
     check('on the left half', px(600, 700) != DESKTOP and px(700, 700) == DESKTOP and px(1, 300) != ACCENT,
           (hex(px(600, 700)), hex(px(700, 700))))
     v.pointer(300, 12, 1)
-    for x, y in ((400, 200), (640, 100)):
+    for x in (600, 1000, 1279):
+        v.pointer(x, 400)
+    time.sleep(0.5)
+    w, h, px = v.screenshot()
+    check('dragging to the right edge, the last pixel the host gives, shows where it goes',
+          px(1278, 300) == ACCENT and px(641, 300) == ACCENT, (hex(px(1278, 300)), hex(px(641, 300))))
+    v.pointer(1279, 400, 0)
+    check('and letting go tiles it there', v.wait('wm: snapped Terminal right', 5, at), v.text(at))
+    time.sleep(1)
+    v.pointer(900, 12, 1)
+    for x, y in ((800, 200), (640, 100)):
         v.pointer(x, y)
     time.sleep(0.5)
     w, h, px = v.screenshot()

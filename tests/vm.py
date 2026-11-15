@@ -171,8 +171,8 @@ class VM:
         return reply
 
     def pointer(self, x, y, buttons=None, width=1280, height=800):
-        """Puts the absolute pointer in the middle of pixel x, y, then sets the buttons."""
-        axis = lambda name, at, size: {'type': 'abs', 'data': {'axis': name, 'value': int((at + 0.5) * 0x8000 / size)}}
+        """Puts the absolute pointer on pixel x, y, scaled as QEMU's window does it, then sets the buttons."""
+        axis = lambda name, at, size: {'type': 'abs', 'data': {'axis': name, 'value': at * 0x7FFF // size}}
         self.qmp_command('input-send-event', events=[axis('x', x, width), axis('y', y, height)])
         time.sleep(0.05)
         if buttons is not None:

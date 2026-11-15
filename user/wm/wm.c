@@ -1882,8 +1882,10 @@ static void handle_mouse(const struct mouse_event *e) {
     enum part part;
     int edges;
     uint32_t pressed = e->buttons & ~buttons, released = buttons & ~e->buttons;
-    int x = e->absolute ? (int)((int64_t)e->x * screen.width / (MOUSE_ABSOLUTE_MAX + 1)) : cursor_x + e->dx;
-    int y = e->absolute ? (int)((int64_t)e->y * screen.height / (MOUSE_ABSOLUTE_MAX + 1)) : cursor_y + e->dy;
+    // To the nearest pixel, as the host gives the last one as a little under its share of the range.
+    int64_t range = MOUSE_ABSOLUTE_MAX + 1;
+    int x = e->absolute ? (int)(((int64_t)e->x * screen.width + range / 2) / range) : cursor_x + e->dx;
+    int y = e->absolute ? (int)(((int64_t)e->y * screen.height + range / 2) / range) : cursor_y + e->dy;
 
     x = x < 0 ? 0 : x >= screen.width ? screen.width - 1 : x;
     y = y < 0 ? 0 : y >= screen.height ? screen.height - 1 : y;
