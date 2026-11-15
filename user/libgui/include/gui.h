@@ -209,6 +209,8 @@ bool gui_image_scale(const struct gui_image *from, int width, int height, struct
 
 // Draws an image, blending what's partly transparent with what's under it.
 void gui_draw_image(struct gui_canvas *canvas, int x, int y, const struct gui_image *image);
+// Saves pixels as a PNG file, returning false, with gui_image_error saying why, if it couldn't.
+bool gui_image_save(const char *path, const struct gui_canvas *from);
 
 // Icons, 16 pixels square, from /system/share/icons/name.png, loaded once and
 // kept. NULL if there's no such icon.
@@ -343,6 +345,8 @@ void gui_ui_end(struct gui_ui *ui);
 
 // Puts the next widget to the right of the last, rather than under it.
 void gui_same_line(struct gui_ui *ui);
+// How much of the line is left, from where the next widget would go.
+int gui_room(const struct gui_ui *ui);
 
 // Where the last widget went, in the window.
 struct gui_rect gui_last_rect(const struct gui_ui *ui);
@@ -367,6 +371,11 @@ void gui_set_focus(struct gui_ui *ui, const char *label, const char *text);
 
 // These return true when they're pressed, or when what they hold changes.
 bool gui_button(struct gui_ui *ui, const char *label);
+// A button width by height, with its label in the middle, or as wide as the label if
+// width is 0, and the usual height if height is 0.
+bool gui_button_sized(struct gui_ui *ui, const char *label, int width, int height);
+// A panel across the line, height tall, with text twice the usual size at its right.
+void gui_display(struct gui_ui *ui, const char *text, int height);
 bool gui_checkbox(struct gui_ui *ui, const char *label, bool *value);
 
 // A picture, with the label under it, framed in the accent colour when selected.

@@ -290,6 +290,22 @@ def log_out(d, s):
     d.polygon([(11 * s, 4.5 * s), (15 * s, 8 * s), (11 * s, 11.5 * s)], fill=blue)
 
 
+def calculator(d, s):
+    d.rounded_rectangle((2.5 * s, 1 * s, 13.5 * s, 15 * s), 1.5 * s, fill=(70, 78, 95))
+    d.rectangle((4 * s, 2.5 * s, 12 * s, 5.5 * s), fill=(190, 220, 190))
+    for row in range(3):
+        for col in range(3):
+            x, y = 4 + col * 3, 7 + row * 2.7
+            colour = (240, 150, 40) if col == 2 else (220, 225, 235)
+            d.rectangle((x * s, y * s, (x + 2) * s, (y + 1.8) * s), fill=colour)
+
+
+def graph(d, s):
+    d.rounded_rectangle((1 * s, 2 * s, 15 * s, 14 * s), 1.5 * s, fill=(22, 26, 34), outline=(90, 100, 120), width=s)
+    d.line([(3 * s, 11 * s), (5.5 * s, 8 * s), (7.5 * s, 10 * s), (10 * s, 5 * s), (13 * s, 7.5 * s)],
+           fill=(110, 220, 110), width=int(1.4 * s), joint='curve')
+
+
 def squares(d, s):
     for i, colour in enumerate(((230, 70, 80), (70, 190, 110), (70, 120, 230), (240, 190, 60))):
         x, y = 1.5 + (i % 2) * 7, 1.5 + (i // 2) * 7
@@ -308,5 +324,5 @@ for name, paint in (('folder', folder), ('file', page), ('text', lambda d, s: pa
     icon(paint).save(f'{SHARE}/icons/{name}.png', optimize=True)
 for name, paint in (('term', terminal), ('editor', editor), ('files', files), ('widgets', widgets),
                     ('guidemo', demo), ('fbdemo', squares), ('viewer', picture_icon), ('settings', gear), ('run', run),
-                    ('player', player)):
+                    ('player', player), ('calculator', calculator), ('tasks', graph)):
     icon(paint).save(f'{SHARE}/icons/apps/{name}.png', optimize=True)

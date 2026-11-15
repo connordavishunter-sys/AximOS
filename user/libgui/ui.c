@@ -473,9 +473,11 @@ void gui_progress(struct gui_ui *ui, float fraction) {
     text(ui, r.x + (r.width - gui_text_width(s, 1)) / 2, r.y + PADDING, s, TEXT, 1);
 }
 
-bool gui_button(struct gui_ui *ui, const char *label) {
+// A label centred in a button width by height, or as wide as the label if width is 0.
+bool gui_button_sized(struct gui_ui *ui, const char *label, int width, int height) {
     uint32_t id = id_of(label);
-    struct gui_rect r = place(ui, shown_length(label) * GUI_CHAR_WIDTH + 2 * PADDING + 4, FRAME_HEIGHT);
+    int label_width = shown_length(label) * GUI_CHAR_WIDTH;
+    struct gui_rect r = place(ui, width ? width : label_width + 2 * PADDING + 4, height ? height : FRAME_HEIGHT);
     bool clicked = interact(ui, id, r);
     bool focused = focusable(ui, id);
 
@@ -483,10 +485,27 @@ bool gui_button(struct gui_ui *ui, const char *label) {
     bool pressed = ui->active == id && ui->hot == id;
 
     fill(ui, r.x, r.y, r.width, r.height, pressed ? ACCENT : ui->hot == id ? FRAME_HOT : FRAME);
-    draw_label(ui, r.x + PADDING + 2, r.y + PADDING, label, pressed ? ON_ACCENT : TEXT);
+    draw_label(ui, r.x + (r.width - label_width) / 2, r.y + (r.height - GUI_CHAR_HEIGHT) / 2, label,
+               pressed ? ON_ACCENT : TEXT);
     if (focused)
         draw_focus(ui, r);
     return clicked;
+}
+
+bool gui_button(struct gui_ui *ui, const char *label) {
+    return gui_button_sized(ui, label, 0, 0);
+}
+
+// Text twice the size, to the right of a panel across the line, as on a calculator.
+void gui_display(struct gui_ui *ui, const char *s, int height) {
+    struct gui_rect r = place(ui, room(ui), height);
+
+    fill(ui, r.x, r.y, r.width, r.height, PANEL);
+    text(ui, r.x + r.width - PADDING * 2 - gui_text_width(s, 2), r.y + (r.height - 2 * GUI_CHAR_HEIGHT) / 2, s, TEXT, 2);
+}
+
+int gui_room(const struct gui_ui *ui) {
+    return room(ui);
 }
 
 bool gui_image_button(struct gui_ui *ui, const char *label, const struct gui_image *image, bool selected) {

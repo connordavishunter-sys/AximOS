@@ -14,6 +14,7 @@
 #include <sys/mman.h>
 #include <sys/reboot.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -105,8 +106,21 @@ static const struct theme *theme = &dark;
 #define KEY_Q 0x10
 #define KEY_R 0x13
 #define KEY_L 0x26
+#define TASKS_COMMAND "tasks" // Ctrl+Shift+Escape
 #define HINT "Super: apps   Super+R: run   Super+Enter: terminal   Alt+Tab: switch   Super+Q: close   Super+arrows: tile   " \
-             "Super+Shift+Q: quit"
+             "Super+1-4: workspaces   Super+Shift+Q: quit"
+
+// Four workspaces, each with its own windows, which Super and a number goes to, and
+// with Shift as well, sends the focused window to.
+#define WORKSPACES 4
+#define KEY_1 0x02
+#define WORKSPACE_SIZE 16 // each one's box on the taskbar, after the launcher
+#define WORKSPACE_GAP 4
+
+// Dragging a window to the left or right edge of the screen tiles it on that half,
+// and to the top maximizes it, as an outline shows while it's held there.
+enum snap { SNAP_NONE, SNAP_LEFT, SNAP_RIGHT, SNAP_TOP };
+#define SNAP_BORDER 3
 
 struct rect {
     int x, y, width, height;
@@ -149,6 +163,7 @@ struct window {
     int shadow, fade_from, fade_to;
     long fade_start;
     bool bare; // the log-in screen's, with no frame, in the middle of the screen
+    int workspace;
 };
 
 enum part { PART_NONE, PART_CONTENT, PART_TITLE, PART_CLOSE, PART_MAXIMIZE, PART_MINIMIZE, PART_RESIZE };
@@ -190,6 +205,8 @@ static struct window *resizing;
 static int resize_x, resize_y, resize_width, resize_height;
 static int resize_room; // above the frame, which it can't grow into
 static bool quitting;
+static int workspace; // the one shown
+static enum snap snap; // where the window being dragged would go, if let go now
 
 // With --login, the desktop is locked until the log-in screen, which wm starts
 // with a connection of its own, says someone's logged in. While it's locked only
@@ -289,6 +306,21 @@ static struct rect launcher(void) {
     return (struct rect){4, taskbar().y + 4, LAUNCHER_WIDTH, TASKBAR_HEIGHT - 8};
 }
 
+static struct rect workspace_box(int index) {
+    struct rect l = launcher();
+
+    return (struct rect){l.x + l.width + 8 + index * (WORKSPACE_SIZE + WORKSPACE_GAP),
+                         taskbar().y + (TASKBAR_HEIGHT - WORKSPACE_SIZE) / 2, WORKSPACE_SIZE, WORKSPACE_SIZE};
+}
+
+static struct rect snap_rect(enum snap to) {
+    struct rect d = desktop();
+
+    return to == SNAP_LEFT    ? (struct rect){0, 0, d.width / 2, d.height}
+         : to == SNAP_RIGHT ? (struct rect){d.width / 2, 0, d.width / 2, d.height}
+                            : d;
+}
+
 // The menu's items are the apps, then these, with RUN_COMMAND's icon for Run.
 // Locking and logging out are only for a desktop someone logged in to.
 enum { ITEM_RUN, ITEM_LOCK, ITEM_LOG_OUT, ITEM_REBOOT, ITEM_SHUT_DOWN, EXTRA_ITEMS };
@@ -349,9 +381,14 @@ static int menu_item_at(int x, int y) {
     return -1;
 }
 
-// While it's locked, only the log-in screen's windows are shown.
+// Windows on the workspace shown, and while it's locked, only the log-in screen's,
+// which is on all of them.
+static bool on_workspace(const struct window *w) {
+    return w->bare || w->workspace == workspace;
+}
+
 static bool visible(const struct window *w) {
-    return !w->minimized && (!locked || w->client == session);
+    return !w->minimized && on_workspace(w) && (!locked || w->client == session);
 }
 
 // Whether a window's frame hides all of a rectangle.
@@ -541,11 +578,15 @@ static void draw_window(struct gui_canvas *c, const struct window *w, int ox, in
     gui_copy(c, w->x - ox, w->y - oy, &w->canvas, 0, 0, w->canvas.width, w->canvas.height);
 }
 
-// Windows in the order they were made, which is how the taskbar shows them.
+// The workspace's windows in the order they were made, which is how the taskbar
+// shows them.
 static int windows_by_age(struct window *out[MAX_WINDOWS]) {
     int count = 0;
 
     for (int i = 0; i < window_count; i++) {
+        if (!on_workspace(windows[i]))
+            continue;
+
         int j = count++;
 
         while (j > 0 && out[j - 1]->id > windows[i]->id) {
@@ -558,7 +599,7 @@ static int windows_by_age(struct window *out[MAX_WINDOWS]) {
 }
 
 static struct rect taskbar_button(int index, int count) {
-    int start = LAUNCHER_WIDTH + 12, room = screen.width - start - 64;
+    int start = workspace_box(WORKSPACES).x + 8, room = screen.width - start - 64;
     int width = count && room / count < TASKBAR_BUTTON_WIDTH ? room / count : TASKBAR_BUTTON_WIDTH;
 
     return (struct rect){start + index * width, taskbar().y + 4, width - 4, TASKBAR_HEIGHT - 8};
@@ -696,6 +737,7 @@ static void draw_sound(struct gui_canvas *c, int ox, int oy) {
 #define NOTICE_HEIGHT 52
 struct notice {
     char title[GUI_TITLE_MAX], text[GUI_TITLE_MAX], app[GUI_TITLE_MAX];
+    char file[GUI_PATH_MAX]; // that clicking it opens, if there is one
     int64_t until;
 };
 static struct notice notices[MAX_NOTICES];
@@ -720,7 +762,7 @@ static void damage_notices(void) {
         add_damage(notice_rect(i));
 }
 
-static void add_notice(const char *title, const char *text, const char *app) {
+static struct notice *add_notice(const char *title, const char *text, const char *app) {
     damage_notices();
     if (notice_count == MAX_NOTICES) // the oldest makes way
         memmove(notices, notices + 1, --notice_count * sizeof(*notices));
@@ -730,9 +772,11 @@ static void add_notice(const char *title, const char *text, const char *app) {
     snprintf(n->title, sizeof(n->title), "%.*s", GUI_TITLE_MAX - 1, title);
     snprintf(n->text, sizeof(n->text), "%.*s", GUI_TITLE_MAX - 1, text);
     snprintf(n->app, sizeof(n->app), "%s", app ? app : "");
+    n->file[0] = '\0';
     n->until = now_ms() + NOTICE_MS;
     damage_notices();
     printf("wm: notice %s: %s\n", n->title, n->text);
+    return n;
 }
 
 static void remove_notice(int index) {
@@ -789,6 +833,20 @@ static void draw_taskbar(struct gui_canvas *c, int ox, int oy) {
     gui_fill(c, bar.x - ox, bar.y - oy, bar.width, 1, TASKBAR_LINE);
     gui_fill(c, l.x - ox, l.y - oy, l.width, l.height, TASKBAR_BUTTON);
     gui_text(c, l.x + (l.width - gui_text_width("Apps", 1)) / 2 - ox, text_y, "Apps", TASKBAR_TEXT, 1);
+
+    // A box for each workspace, the one shown in the accent colour, with a dot in
+    // those that have windows.
+    for (int i = 0; i < WORKSPACES; i++) {
+        struct rect b = workspace_box(i);
+        bool used = false;
+
+        for (int j = 0; j < window_count && !used; j++)
+            used = !windows[j]->bare && windows[j]->workspace == i;
+        gui_fill(c, b.x - ox, b.y - oy, b.width, b.height, i == workspace ? TITLE_FOCUSED : TASKBAR_BUTTON);
+        if (used)
+            gui_fill(c, b.x + b.width / 2 - 2 - ox, b.y + b.height / 2 - 2 - oy, 4, 4,
+                     i == workspace ? TITLE_TEXT : TASKBAR_TEXT);
+    }
 
     for (int i = 0; i < count; i++) {
         struct rect b = taskbar_button(i, count);
@@ -871,6 +929,29 @@ static void draw_cursor(struct gui_canvas *c, int ox, int oy) {
     }
 }
 
+static bool no_cursor; // while composing a screenshot
+
+// Where a dragged window would snap to: an outline, over a quarter of the accent colour.
+static void draw_snap(struct gui_canvas *c, int ox, int oy) {
+    struct rect r = snap_rect(snap), inner = {r.x + SNAP_BORDER, r.y + SNAP_BORDER, r.width - 2 * SNAP_BORDER,
+                                             r.height - 2 * SNAP_BORDER};
+    int x0 = r.x > ox ? r.x : ox, x1 = r.x + r.width < ox + c->width ? r.x + r.width : ox + c->width;
+    int y0 = r.y > oy ? r.y : oy, y1 = r.y + r.height < oy + c->height ? r.y + r.height : oy + c->height;
+    uint32_t a = TITLE_FOCUSED;
+
+    for (int y = y0; y < y1; y++) {
+        uint32_t *row = c->pixels + (long)(y - oy) * c->stride - ox;
+
+        for (int x = x0; x < x1; x++) {
+            uint32_t p = row[x];
+
+            row[x] = !contains(inner, x, y) ? a
+                   : ((((p & 0xFF00FF) * 3 + (a & 0xFF00FF)) >> 2) & 0xFF00FF)
+                         | ((((p & 0x00FF00) * 3 + (a & 0x00FF00)) >> 2) & 0x00FF00);
+        }
+    }
+}
+
 // Draws everything that overlaps a rectangle, through a canvas that is only that
 // part of the screen.
 static void compose(struct rect r) {
@@ -900,9 +981,12 @@ static void compose(struct rect r) {
         }
     }
     if (locked) {
-        draw_cursor(&c, r.x, r.y);
+        if (!no_cursor)
+            draw_cursor(&c, r.x, r.y);
         return;
     }
+    if (snap && overlaps(snap_rect(snap), r))
+        draw_snap(&c, r.x, r.y);
     if (r.y + r.height > bar.y)
         draw_taskbar(&c, r.x, r.y);
     draw_notices(&c, r.x, r.y);
@@ -912,7 +996,8 @@ static void compose(struct rect r) {
         draw_sound(&c, r.x, r.y);
     if (switch_choice >= 0)
         draw_switcher(&c, r.x, r.y);
-    draw_cursor(&c, r.x, r.y);
+    if (!no_cursor)
+        draw_cursor(&c, r.x, r.y);
 }
 
 // Composes all that changed before showing any of it, so a window being moved is
@@ -1077,11 +1162,42 @@ static void minimize(struct window *w) {
         focus_top();
 }
 
+// Takes away the outline of where a dragged window would snap to.
+static void stop_snap(void) {
+    if (snap)
+        add_damage(snap_rect(snap));
+    snap = SNAP_NONE;
+}
+
+static void go_to_workspace(int to);
+
 static void show(struct window *w) {
+    if (!on_workspace(w))
+        go_to_workspace(w->workspace);
     w->minimized = false;
     raise_window(w);
     set_focus(w);
     damage_taskbar();
+}
+
+static void go_to_workspace(int to) {
+    if (to == workspace)
+        return;
+    workspace = to;
+    add_damage((struct rect){0, 0, screen.width, screen.height});
+    focus_top();
+    printf("wm: workspace %d\n", to + 1);
+}
+
+// The focused window goes to another workspace, and the next one here gets the focus.
+static void send_to_workspace(struct window *w, int to) {
+    if (!w || w->bare || w->workspace == to)
+        return;
+    add_damage(extent_of(w));
+    damage_taskbar();
+    w->workspace = to;
+    focus_top();
+    printf("wm: %s to workspace %d\n", w->title, to + 1);
 }
 
 static void remove_window(struct window *w) {
@@ -1095,8 +1211,10 @@ static void remove_window(struct window *w) {
     damage_taskbar();
     memmove(&windows[i], &windows[i + 1], (window_count - i - 1) * sizeof(*windows));
     window_count--;
-    if (dragging == w)
+    if (dragging == w) {
         dragging = NULL;
+        stop_snap();
+    }
     if (grabbed == w)
         grabbed = NULL;
     if (resizing == w)
@@ -1142,6 +1260,7 @@ static void create_window(struct client *client, const struct gui_message *m) {
     w->want_width = w->canvas.width;
     w->want_height = w->canvas.height;
     w->bare = client == session;
+    w->workspace = workspace;
     if (w->bare)
         center(w);
     memcpy(w->title, m->text, sizeof(w->title));
@@ -1404,6 +1523,7 @@ static void lock(void) {
     switch_choice = -1;
     super_down = super_alone = false; // let go while locked
     dragging = grabbed = resizing = NULL;
+    stop_snap();
     set_focus(NULL);
     locked = true;
     add_damage((struct rect){0, 0, screen.width, screen.height});
@@ -1424,6 +1544,7 @@ static void log_out(void) {
     clipboard_length = 0;
     notice_count = 0;
     logged_in = false;
+    workspace = 0;
     printf("wm: logged out\n");
     lock();
 }
@@ -1504,6 +1625,55 @@ static void launch_app(const char *name) {
         execl(path, name, (char *)NULL);
         _exit(127);
     }
+}
+
+static void open_file(const char *path) {
+    if (fork() == 0) {
+        execl(APPS_DIR "/viewer", "viewer", path, (char *)NULL);
+        _exit(127);
+    }
+}
+
+// Print Screen saves the screen, and with Alt the focused window, as it's shown but
+// without the cursor, in a new file in Pictures, which the notice saying so opens.
+static void screenshot(bool window) {
+    struct rect r = {0, 0, screen.width, screen.height};
+    char dir[GUI_PATH_MAX], path[GUI_PATH_MAX], stamp[32];
+    const char *home = getenv("HOME");
+    time_t now = time(NULL);
+
+    if (window && focused) {
+        struct rect f = frame_of(focused);
+        int right = f.x + f.width < r.width ? f.x + f.width : r.width;
+        int bottom = f.y + f.height < r.height ? f.y + f.height : r.height;
+
+        r.x = f.x > 0 ? f.x : 0;
+        r.y = f.y > 0 ? f.y : 0;
+        r = (struct rect){r.x, r.y, right - r.x, bottom - r.y};
+    }
+    if (r.width <= 0 || r.height <= 0)
+        return;
+    snprintf(dir, sizeof(dir), "%s/Pictures", home && strcmp(home, "/") ? home : "");
+    mkdir(dir, 0755);
+    strftime(stamp, sizeof(stamp), "%Y-%m-%d-%H%M%S", localtime(&now));
+    snprintf(path, sizeof(path), "%s/screenshot-%s.png", dir, stamp);
+    for (int i = 2; access(path, F_OK) == 0; i++)
+        snprintf(path, sizeof(path), "%s/screenshot-%s-%d.png", dir, stamp, i);
+
+    no_cursor = true;
+    compose(r);
+    no_cursor = false;
+    add_damage(r); // to put the cursor back
+
+    struct gui_canvas shot = {screen.pixels + (long)r.y * screen.stride + r.x, r.width, r.height, screen.stride};
+
+    if (!gui_image_save(path, &shot)) {
+        printf("wm: screenshot %s: %s\n", path, gui_image_error());
+        add_notice("Couldn't save the screenshot", gui_image_error(), NULL);
+        return;
+    }
+    printf("wm: screenshot %s %dx%d\n", path, r.width, r.height);
+    snprintf(add_notice("Screenshot saved", strrchr(path, '/') + 1, "viewer")->file, GUI_PATH_MAX, "%s", path);
 }
 
 static int compare_names(const void *a, const void *b) {
@@ -1596,6 +1766,10 @@ static void taskbar_click(void) {
 
     if (contains(launcher(), cursor_x, cursor_y))
         open_menu();
+    for (int i = 0; i < WORKSPACES; i++) {
+        if (contains(workspace_box(i), cursor_x, cursor_y))
+            go_to_workspace(i);
+    }
     for (int i = 0; i < count; i++) {
         if (!contains(taskbar_button(i, count), cursor_x, cursor_y))
             continue;
@@ -1627,6 +1801,8 @@ static void press(uint32_t changed) {
     int notice = menu_open || sound_open ? -1 : notice_at(cursor_x, cursor_y);
 
     if (notice >= 0) {
+        if (notices[notice].file[0])
+            open_file(notices[notice].file);
         remove_notice(notice);
         return;
     }
@@ -1696,7 +1872,6 @@ static void press(uint32_t changed) {
         resize_room = frame_of(w).y;
         w->tiled = false;
     } else if (changed & MOUSE_BUTTON_LEFT) {
-        w->tiled = false;
         dragging = w;
         drag_x = cursor_x - w->x;
         drag_y = cursor_y - w->y;
@@ -1724,10 +1899,24 @@ static void handle_mouse(const struct mouse_event *e) {
     buttons = e->buttons;
 
     // Windows can be dragged partly off the screen, but the title bar stays on it.
+    // A tiled one goes back to its own size, as far across under the mouse as it was.
     if (dragging && moved) {
         int top = cursor_y - drag_y, bottom = desktop().height - BORDER;
+        enum snap to = cursor_x <= 0 ? SNAP_LEFT : cursor_x >= screen.width - 1 ? SNAP_RIGHT : cursor_y <= 0 ? SNAP_TOP
+                                                                                                              : SNAP_NONE;
 
+        if (dragging->tiled) {
+            struct rect r = dragging->restore;
+
+            drag_x = drag_x * (r.width - 2 * BORDER) / dragging->canvas.width;
+            untile(dragging);
+        }
         move_window(dragging, cursor_x - drag_x, top < TITLE_HEIGHT ? TITLE_HEIGHT : top > bottom ? bottom : top);
+        if (to != snap) {
+            add_damage(snap_rect(snap ? snap : to));
+            add_damage(snap_rect(to));
+            snap = to;
+        }
     }
     if (resizing && moved) {
         int edges = resizing->resize_edges, dx = cursor_x - resize_x, dy = cursor_y - resize_y;
@@ -1775,6 +1964,11 @@ static void handle_mouse(const struct mouse_event *e) {
         press(pressed);
     if (released && grabbed)
         send_mouse(grabbed, GUI_MOUSE_BUTTON, released, 0);
+    if (!buttons && dragging && snap) {
+        place(dragging, snap_rect(snap));
+        printf("wm: snapped %s %s\n", dragging->title, snap == SNAP_TOP ? "maximized" : snap == SNAP_LEFT ? "left" : "right");
+        stop_snap();
+    }
     if (!buttons) {
         dragging = NULL;
         grabbed = NULL;
@@ -1894,11 +2088,28 @@ static void handle_key(const struct key_event *e) {
     }
     if (switch_key(e) || menu_key(e))
         return;
+    if (e->code == KEY_PRINT_SCREEN || e->code == KEY_SYSRQ) { // which Alt+Print Screen is
+        if (e->pressed)
+            screenshot(e->code == KEY_SYSRQ || (e->modifiers & KEY_MOD_ALT));
+        return;
+    }
     if (super && e->code == KEY_Q) {
         if (e->pressed && (e->modifiers & KEY_MOD_SHIFT))
             quitting = true;
         else if (e->pressed && focused)
             send_to(focused, (struct gui_message){.type = GUI_CLOSE});
+        return;
+    }
+    if (super && e->code >= KEY_1 && e->code < KEY_1 + WORKSPACES) {
+        if (e->pressed && (e->modifiers & KEY_MOD_SHIFT))
+            send_to_workspace(focused, e->code - KEY_1);
+        else if (e->pressed)
+            go_to_workspace(e->code - KEY_1);
+        return;
+    }
+    if (e->code == KEY_ESCAPE && (e->modifiers & KEY_MOD_CTRL) && (e->modifiers & KEY_MOD_SHIFT)) {
+        if (e->pressed)
+            launch(TASKS_COMMAND);
         return;
     }
     if (super && e->code == KEY_L && login_mode) {

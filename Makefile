@@ -26,7 +26,7 @@ LIBC_SO_OBJS := $(patsubst user/libc/%,$(BUILD)/user/libc_pic/%.o,$(basename $(f
 # linked against. The apps go in /system/bin/gui, where wm's start menu finds them.
 LIBGUI_SO := $(BUILD)/user/libgui.so
 LIBGUI_SO_OBJS := $(patsubst user/libgui/%.c,$(BUILD)/user/libgui_pic/%.o,$(wildcard user/libgui/*.c))
-GUI_APPS := guidemo term fbdemo widgets editor files viewer settings player
+GUI_APPS := guidemo term fbdemo widgets editor files viewer settings player calculator tasks
 
 # /system/lib/libaudio.so reads and writes sound files, through a library for each
 # kind, which it loads when one's first opened. Those wrap libraries from elsewhere,

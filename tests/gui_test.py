@@ -108,7 +108,7 @@ try:
     w, h, px = v.screenshot()
     bar = h - 28
     check('taskbar', px(2, bar + 2) == TASKBAR and px(8, bar + 6) == TASKBAR_BUTTON, hex(px(2, bar + 2)))
-    check('taskbar button for the focused window', px(150, bar + 6) == FOCUSED, hex(px(150, bar + 6)))
+    check('taskbar button for the focused window', px(240, bar + 6) == FOCUSED, hex(px(240, bar + 6)))
     check('clock', count(px, w - 60, bar + 10, w - 10, bar + 18, 0xFFFFFF) > 20, 'no clock')
 
     # The 360x200 contents end at 440, 284, and the frame's border just past them.
@@ -156,27 +156,27 @@ try:
     check('minimizing takes the focus away', v.wait('guidemo: focus 0', 5, at), v.text(at))
     w, h, px = v.screenshot()
     check('minimized window is hidden', px(1000, 400) == DESKTOP, hex(px(1000, 400)))
-    check('and dim on the taskbar', px(150, bar + 6) == TASKBAR_MINIMIZED, hex(px(150, bar + 6)))
+    check('and dim on the taskbar', px(240, bar + 6) == TASKBAR_MINIMIZED, hex(px(240, bar + 6)))
     at = v.mark()
-    mouse.click(150, bar + 6)
+    mouse.click(240, bar + 6)
     check('clicking it on the taskbar brings it back', v.wait('guidemo: focus 1', 5, at), v.text(at))
     w, h, px = v.screenshot()
     check('shown again', px(1000, 400) == PAPER, hex(px(1000, 400)))
 
-    # The menu lists /system/bin/gui above the launcher, 24 pixels an app: editor,
-    # fbdemo, files, guidemo, player, settings, term, viewer, widgets. Then a line,
-    # Run..., Reboot and Shut down.
-    menu_top = bar - 12 * 24 - 9 - 8
+    # The menu lists /system/bin/gui above the launcher, 24 pixels an app: calculator,
+    # editor, fbdemo, files, guidemo, player, settings, tasks, term, viewer, widgets.
+    # Then a line, Run..., Reboot and Shut down.
+    menu_top = bar - 14 * 24 - 9 - 8
     mouse.click(36, bar + 14)
     time.sleep(0.5)
     w, h, px = v.screenshot()
     check('the launcher opens the menu', px(150, menu_top + 10) == FOCUSED, hex(px(150, menu_top + 10)))
     at = v.mark()
-    mouse.click(100, menu_top + 4 + 6 * 24 + 12)
+    mouse.click(100, menu_top + 4 + 8 * 24 + 12)
     check('clicking term in the menu opens a terminal', v.wait('guidemo: focus 0', 10, at), v.text(at))
     time.sleep(1)
     w, h, px = v.screenshot()
-    check('which gets a taskbar button', px(300, bar + 6) == FOCUSED, hex(px(300, bar + 6)))
+    check('which gets a taskbar button', px(400, bar + 6) == FOCUSED, hex(px(400, bar + 6)))
     check('and the menu closes', px(150, menu_top + 10) != FOCUSED, hex(px(150, menu_top + 10)))
 
     v.key('meta_l')
