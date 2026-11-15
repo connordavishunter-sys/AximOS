@@ -109,7 +109,7 @@ try:
     check('which pastes in Paint, making the picture bigger', v.wait('paint: pasted 1280x800', 5, at), v.text(at))
     v.key('ctrl-z')
     check('and undoes', v.wait('paint: undone', 5, at), v.text(at))
-    v.key('meta_l-q'); time.sleep(0.3); v.key('meta_l-q'); time.sleep(0.5) # not saved, so twice
+    v.key('meta_l-q'); time.sleep(0.5); v.key('right'); v.key('ret'); time.sleep(0.5) # not saved: Don't save
 
     # Undo takes typing back a word at a time, and redo puts it back.
     check('the editor opens', run('editor', 'editor: title'), v.text())

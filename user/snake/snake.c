@@ -9,24 +9,29 @@
 #define ROWS 18
 #define CELL 20
 #define BAR 28 // the score, over the field
-#define START_MS 140
-#define FASTEST_MS 60
 #define MAX_TURNS 3 // waiting, so quick presses aren't lost
 #define KEY_W 0x11
 #define KEY_A 0x1E
 #define KEY_S 0x1F
 #define KEY_D 0x20
 #define KEY_P 0x19
+#define KEY_Q 0x10
+#define KEY_1 0x02
+#define LEVELS 3
 
 // A snake that grows as it eats, until it runs into a wall or itself. The arrows
-// or WASD turn it, P or Space pauses, and Space or Enter starts again.
+// or WASD turn it, P, Space or Escape pauses, and Space or Enter starts again,
+// at the speed 1, 2 or 3 chose, each speed with its own best score.
+static const char *const level_names[LEVELS] = {"Slow", "Normal", "Fast"};
+static const int start_ms[LEVELS] = {180, 140, 100}, fastest_ms[LEVELS] = {90, 60, 40};
 struct point {
     int x, y;
 };
 
 static struct gui_window *window;
 static struct point body[COLUMNS * ROWS], food, direction, turns[MAX_TURNS];
-static int length, turn_count, score, best, timer = -1;
+static int length, turn_count, score, best[LEVELS], level = 1, timer = -1;
+static bool new_best;
 static enum { READY, PLAYING, PAUSED, OVER } state;
 static char best_path[GUI_PATH_MAX];
 static uint32_t background, field, text_colour, dim_colour;
@@ -37,8 +42,8 @@ static void load_best(void) {
 
     snprintf(best_path, sizeof(best_path), "%s/.snake-best", home && strcmp(home, "/") ? home : "");
     if ((f = fopen(best_path, "r"))) {
-        if (fscanf(f, "%d", &best) != 1)
-            best = 0;
+        for (int i = 0; i < LEVELS && fscanf(f, "%d", &best[i]) == 1; i++)
+            ;
         fclose(f);
     }
 }
@@ -47,7 +52,7 @@ static void save_best(void) {
     FILE *f = fopen(best_path, "w");
 
     if (f) {
-        fprintf(f, "%d\n", best);
+        fprintf(f, "%d %d %d\n", best[0], best[1], best[2]);
         fclose(f);
     }
 }
@@ -68,11 +73,11 @@ static void place_food(void) {
 
 // Faster as it grows.
 static void set_speed(void) {
-    int ms = START_MS - score * 4;
+    int ms = start_ms[level] - score * 4;
 
     if (timer >= 0)
         gui_timer_stop(timer);
-    timer = gui_timer_start(ms > FASTEST_MS ? ms : FASTEST_MS, true);
+    timer = gui_timer_start(ms > fastest_ms[level] ? ms : fastest_ms[level], true);
 }
 
 static void start(void) {
@@ -81,18 +86,20 @@ static void start(void) {
         body[i] = (struct point){COLUMNS / 2 - i, ROWS / 2};
     direction = (struct point){1, 0};
     turn_count = score = 0;
+    new_best = false;
     state = PLAYING;
     place_food();
     set_speed();
-    printf("snake: start\n");
+    printf("snake: start %s\n", level_names[level]);
 }
 
 static void stop(void) {
     state = OVER;
     gui_timer_stop(timer);
     timer = -1;
-    if (score > best) {
-        best = score;
+    if (score > best[level]) {
+        best[level] = score;
+        new_best = true;
         save_best();
     }
     printf("snake: game over %d\n", score);
@@ -147,9 +154,13 @@ static void key(const struct key_event *k) {
         turn(-1, 0);
     else if (c == KEY_RIGHT || c == KEY_D)
         turn(1, 0);
+    if (state != PLAYING && state != PAUSED && c >= KEY_1 && c < KEY_1 + LEVELS) {
+        level = c - KEY_1;
+        printf("snake: speed %s\n", level_names[level]);
+    }
     if (state != PLAYING && state != PAUSED && (c == KEY_SPACE || c == KEY_ENTER))
         start();
-    else if ((state == PLAYING || state == PAUSED) && (c == KEY_P || c == KEY_SPACE)) {
+    else if ((state == PLAYING && c == KEY_ESCAPE) || ((state == PLAYING || state == PAUSED) && (c == KEY_P || c == KEY_SPACE))) {
         state = state == PLAYING ? PAUSED : PLAYING;
         printf("snake: %s\n", state == PAUSED ? "paused" : "playing");
     }
@@ -167,7 +178,7 @@ static void draw(void) {
     gui_fill(c, 0, 0, c->width, c->height, background);
     snprintf(line, sizeof(line), "Score %d", score);
     gui_text(c, 10, (BAR - GUI_CHAR_HEIGHT) / 2, line, text_colour, 1);
-    snprintf(line, sizeof(line), "Best %d", best);
+    snprintf(line, sizeof(line), "%s  Best %d", level_names[level], best[level]);
     gui_text(c, c->width - 10 - gui_text_width(line, 1), (BAR - GUI_CHAR_HEIGHT) / 2, line, dim_colour, 1);
     gui_fill(c, left, top, COLUMNS * CELL, ROWS * CELL, field);
     if (state != READY)
@@ -181,11 +192,16 @@ static void draw(void) {
     if (state == READY)
         centred(c, middle - 40, "SNAKE", text_colour, 4);
     if (state == OVER)
-        centred(c, middle - 40, "GAME OVER", text_colour, 3);
+        centred(c, middle - 40, new_best ? "NEW BEST!" : "GAME OVER", text_colour, 3);
     if (state == PAUSED)
         centred(c, middle - 16, "PAUSED", text_colour, 2);
-    if (state == READY || state == OVER)
+    if (state == PAUSED)
+        centred(c, middle + 20, "P or Space to go on", dim_colour, 1);
+    if (state == READY || state == OVER) {
+        snprintf(line, sizeof(line), "Speed: %s, 1 2 3 to change", level_names[level]);
         centred(c, middle + 30, "Space to start, arrows to turn", dim_colour, 1);
+        centred(c, middle + 50, line, dim_colour, 1);
+    }
     gui_show(window);
 }
 
@@ -201,7 +217,7 @@ static void use_theme(void) {
 
 int main(int argc, char **argv) {
     help_option(argc, argv, "usage: snake\n"
-                            "A snake that grows as it eats. Arrows or WASD turn it, P pauses.\n");
+                            "A snake that grows as it eats. Arrows or WASD turn it, P pauses, 1 to 3 set the speed.\n");
     if (!gui_connect()) {
         dprintf(STDERR_FILENO, "snake: wm isn't running\n");
         return 1;
@@ -221,6 +237,8 @@ int main(int argc, char **argv) {
     printf("snake: ready\n");
     fflush(stdout);
     while (gui_next_event(&e) && e.type != GUI_CLOSE) {
+        if (e.type == GUI_KEY && e.key.pressed && e.key.code == KEY_Q && (e.key.modifiers & KEY_MOD_CTRL))
+            break;
         if (e.type == GUI_KEY && e.key.pressed)
             key(&e.key);
         else if (e.type == GUI_TIMER && e.x == timer && state == PLAYING)

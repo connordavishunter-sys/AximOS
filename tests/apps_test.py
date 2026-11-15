@@ -134,16 +134,18 @@ try:
     v.key('ctrl-o'); time.sleep(0.5); v.key('esc')
     check('Escape cancels picking', v.wait('editor: picking cancelled', 5, at), v.text(at))
 
-    # With changes, Open and closing ask first.
+    # hello.txt opened in a second tab, so the text is lower. With changes, closing
+    # asks first, and Don't save closes without them.
+    check('in a tab of its own', 'editor: tab 2 of 2' in v.text(), v.text())
     at = v.mark()
-    mouse.click(112 + 300, text_line)
+    mouse.click(112 + 300, text_line + 60)
     v.type('!')
-    v.key('ctrl-o'); time.sleep(0.5)
-    check('Open with changes asks first', 'editor: picking in' not in v.text(at), v.text(at))
-    v.key('meta_l-q'); time.sleep(1)
-    check("closing with changes asks first", 'editor: closed' not in v.text(at), v.text(at))
     v.key('meta_l-q')
-    check('and closing again closes', v.wait('editor: closed', 5, at), v.text(at))
+    check('closing with changes asks first', v.wait('editor: asking about hello.txt', 5, at), v.text(at))
+    time.sleep(0.5)
+    check('and waits', 'editor: closed' not in v.text(at), v.text(at))
+    v.key('right'); v.key('ret')
+    check("and Don't save closes", v.wait('editor: closed', 5, at), v.text(at))
     time.sleep(0.5)
 
     # Back in files: right-clicking where there's no item has New folder first,

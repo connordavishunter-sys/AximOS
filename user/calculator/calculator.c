@@ -9,6 +9,9 @@
 #define BUTTON_HEIGHT 40
 #define GAP 8 // between buttons, as libgui puts them
 #define DIGITS 15
+#define PAD 240     // wide, the display and the buttons
+#define HISTORY 64  // sums kept, newest first
+#define HISTORY_WIDTH 220
 
 // The buttons, four to a row, with 0 twice as wide.
 static const char *const keys[] = { // clang-format off
@@ -26,6 +29,26 @@ static double before;
 static char op;
 static bool fresh = true; // the next digit starts a new number
 static bool error;
+
+// The sums done, newest first, and the answer of each.
+static char history[HISTORY][64];
+static const char *history_items[HISTORY];
+static double answers[HISTORY];
+static int history_count, history_selected = -1;
+
+static void remember(double a, char o, double b, double result) {
+    char line[64];
+
+    snprintf(line, sizeof(line), "%.10g %c %.10g = %.10g", a, o, b, result);
+    memmove(history[1], history[0], (HISTORY - 1) * sizeof(history[0]));
+    memmove(answers + 1, answers, (HISTORY - 1) * sizeof(*answers));
+    snprintf(history[0], sizeof(history[0]), "%s", line);
+    answers[0] = result;
+    history_count += history_count < HISTORY;
+    for (int i = 0; i < history_count; i++)
+        history_items[i] = history[i];
+    history_selected = -1;
+}
 
 static double value(void) {
     return strtod(entry, NULL);
@@ -77,8 +100,13 @@ static void press(const char *key) {
         show(value() / 100);
         fresh = true;
     } else { // an operator, or =
-        if (op && (!fresh || c == '=')) // = again does it again
-            show(apply(before, op, value()));
+        if (op && (!fresh || c == '=')) { // = again does it again
+            double b = value(), result = apply(before, op, b);
+
+            show(result);
+            if (!error)
+                remember(before, op, b, result);
+        }
         before = value();
         op = c == '=' ? 0 : c;
         fresh = true;
@@ -109,11 +137,35 @@ static void typed(struct gui_ui *ui) {
     ui->key_count = kept;
 }
 
+static void copy_answer(void) {
+    if (!error && gui_clipboard_set(entry, strlen(entry)))
+        printf("calculator: copied %s\n", entry);
+}
+
+// A number from the clipboard, in place of what's being typed.
+static void paste_number(void) {
+    char *text = gui_clipboard_get(NULL), *end;
+    double v = text ? strtod(text, &end) : 0;
+
+    if (text && end != text) {
+        show(v);
+        fresh = true;
+        printf("calculator: pasted %s\n", entry);
+    }
+    free(text);
+}
+
 static void frame(struct gui_ui *ui) {
     gui_ui_begin(ui);
+    if (gui_shortcut(ui, 'c'))
+        copy_answer();
+    if (gui_shortcut(ui, 'v'))
+        paste_number();
     typed(ui);
+    gui_column_begin(ui, PAD);
     gui_display(ui, error ? "Error" : entry, DISPLAY_HEIGHT);
 
+    struct gui_rect display = gui_last_rect(ui);
     int width = (gui_room(ui) - 3 * GAP) / 4;
 
     for (int i = 0; i < KEY_COUNT; i++) {
@@ -121,6 +173,29 @@ static void frame(struct gui_ui *ui) {
             gui_same_line(ui);
         if (gui_button_sized(ui, keys[i], i == 16 ? 2 * width + GAP : width, BUTTON_HEIGHT))
             press(keys[i]);
+    }
+    gui_column_end(ui);
+
+    // The sums done, which put their answer back when one's chosen.
+    gui_column_begin(ui, gui_room(ui));
+    gui_label(ui, "History");
+    gui_same_line(ui);
+    if (gui_button(ui, "Clear")) {
+        history_count = 0;
+        history_selected = -1;
+    }
+    if (gui_list(ui, "##history", history_items, history_count, &history_selected, 0) && history_selected >= 0) {
+        show(answers[history_selected]);
+        fresh = true;
+        printf("calculator: %s\n", entry);
+    }
+    gui_column_end(ui);
+    if (gui_context_menu(ui, "##display", display)) {
+        if (gui_menu_item(ui, "Copy"))
+            copy_answer();
+        if (gui_menu_item(ui, "Paste"))
+            paste_number();
+        gui_menu_end(ui);
     }
     gui_ui_end(ui);
     fflush(stdout);
@@ -134,7 +209,7 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    struct gui_window *window = gui_create_window("Calculator", 260, 2 * 10 + DISPLAY_HEIGHT + 5 * (BUTTON_HEIGHT + GAP));
+    struct gui_window *window = gui_create_window("Calculator", 20 + PAD + 8 + HISTORY_WIDTH, 2 * 10 + DISPLAY_HEIGHT + 5 * (BUTTON_HEIGHT + GAP));
     struct gui_ui ui;
     struct gui_message e;
 

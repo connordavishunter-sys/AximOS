@@ -736,6 +736,10 @@ enum { TRAY_NETWORK, TRAY_NOTICES, TRAY_SOUND, TRAY_ITEMS, TRAY_CALENDAR = TRAY_
 #define VOLUME_STEP 5
 #define NET_CHECK_MS 5000 // how often the network's looked at, for its icon
 static int panel = -1; // the one open
+
+// What the player's playing, which it keeps in NOW_PLAYING, shown under the volume.
+#define NOW_PLAYING "/tmp/now-playing"
+static char now_playing[GUI_TITLE_MAX];
 static int mixer = -1, volume = 100;
 static bool muted, setting_volume;
 static struct net_info net;
@@ -774,7 +778,8 @@ static int tray_item_at(int x, int y) {
 
 static struct rect panel_rect(int item) {
     static const int widths[] = {260, NOTICE_WIDTH, 220, 7 * DAY_WIDTH + 24};
-    int heights[] = {16 + 7 * PANEL_LINE, 40 + (history_count ? history_count : 1) * (NOTICE_HEIGHT - 8), 82,
+    int heights[] = {16 + 7 * PANEL_LINE, 40 + (history_count ? history_count : 1) * (NOTICE_HEIGHT - 8),
+                     82 + (now_playing[0] ? 24 : 0),
                      40 + 7 * DAY_HEIGHT};
     struct rect t = tray_item(item);
     int x = t.x + t.width - widths[item];
@@ -948,8 +953,18 @@ static const char *const month_names[] = {"January", "February", "March", "April
 
 static void open_panel(int item) {
     close_panel();
-    panel = item;
     calendar_month = 0;
+    now_playing[0] = '\0';
+    if (item == TRAY_SOUND) {
+        FILE *f = fopen(NOW_PLAYING, "r");
+
+        if (f && fgets(now_playing, sizeof(now_playing), f))
+            now_playing[strcspn(now_playing, "\n")] = '\0';
+        if (f)
+            fclose(f);
+        printf("wm: sound panel%s%s\n", now_playing[0] ? ", " : "", now_playing);
+    }
+    panel = item;
     if (item == TRAY_NETWORK)
         check_network();
     if (item == TRAY_CALENDAR) {
@@ -1038,6 +1053,12 @@ static void draw_sound(struct gui_canvas *c, struct rect p, int ox, int oy) {
     gui_fill(c, m.x + 4 - ox, m.y + 3 - oy, 14, 14, TASKBAR_TEXT);
     gui_fill(c, m.x + 5 - ox, m.y + 4 - oy, 12, 12, muted ? TITLE_FOCUSED : TASKBAR_COLOR);
     gui_text(c, m.x + 26 - ox, m.y + (m.height - GUI_CHAR_HEIGHT) / 2 - oy, "Mute", TASKBAR_TEXT, 1);
+    if (now_playing[0]) {
+        char line[GUI_TITLE_MAX + 16];
+
+        snprintf(line, sizeof(line), "%.*s", (p.width - 24) / GUI_CHAR_WIDTH, now_playing);
+        gui_text(c, p.x + 12 - ox, p.y + 82 - oy, line, TASKBAR_DIM_TEXT, 1);
+    }
 }
 
 static void draw_calendar(struct gui_canvas *c, struct rect p, int ox, int oy) {
@@ -2194,17 +2215,10 @@ static void launch_app(const char *name) {
     }
 }
 
-// Opens a file in what it's for: folders in Files, pictures in the viewer, sounds
-// in the player and anything else in the editor.
+// Opens a file in the app the settings choose for its kind.
 static void open_file(const char *path) {
-    struct stat st;
-    bool folder = stat(path, &st) == 0 && S_ISDIR(st.st_mode);
-    const struct gui_image *icon = gui_file_icon(path, folder);
-    const char *app = folder                      ? "files"
-                    : icon == gui_icon("image") ? "viewer"
-                    : icon == gui_icon("audio") ? "player"
-                                                : "editor";
-    char program[sizeof(APPS_DIR) + 16];
+    const char *app = settings.apps[gui_kind_of(path)];
+    char program[sizeof(APPS_DIR) + 32];
 
     snprintf(program, sizeof(program), APPS_DIR "/%s", app);
     printf("wm: opening %s in %s\n", path, app);
@@ -2305,6 +2319,51 @@ static void close_menu(void) {
     menu_open = false;
 }
 
+// Logging out, rebooting and shutting down ask every window to close first, so
+// programs can save what they have, and go ahead once all have closed. Any still
+// open after LEAVE_MS, waiting for an answer about changes, stop it.
+#define LEAVE_MS 1500
+static int leaving = -1; // the item waiting for windows to close
+static int64_t leave_due;
+
+static void leave(int item) {
+    if (item == ITEM_LOG_OUT)
+        log_out();
+    else
+        reboot(item == ITEM_REBOOT ? RB_AUTOBOOT : RB_POWER_OFF);
+}
+
+static void start_leaving(int item) {
+    if (!window_count) {
+        leave(item);
+        return;
+    }
+    leaving = item;
+    leave_due = now_ms() + LEAVE_MS;
+    for (int i = 0; i < window_count; i++)
+        send_to(windows[i], (struct gui_message){.type = GUI_CLOSE});
+    printf("wm: asking %d windows to close\n", window_count);
+}
+
+// How long until it's time to give up waiting, or -1 if nothing is.
+static int check_leaving(void) {
+    if (leaving < 0)
+        return -1;
+    if (!window_count) {
+        int item = leaving;
+
+        leaving = -1;
+        leave(item);
+        return -1;
+    }
+    if (now_ms() < leave_due)
+        return (int)(leave_due - now_ms());
+    add_notice(leaving == ITEM_LOG_OUT ? "Not logged out" : leaving == ITEM_REBOOT ? "Not restarted" : "Not shut down",
+               "A program is still open", NULL);
+    leaving = -1;
+    return -1;
+}
+
 static void choose(int index) {
     int item = index >= app_count && index < menu_items() ? extra_item(index) : -1;
 
@@ -2315,10 +2374,8 @@ static void choose(int index) {
         launch(RUN_COMMAND);
     else if (item == ITEM_LOCK)
         lock();
-    else if (item == ITEM_LOG_OUT)
-        log_out();
     else if (item >= 0)
-        reboot(item == ITEM_REBOOT ? RB_AUTOBOOT : RB_POWER_OFF);
+        start_leaving(item);
 }
 
 static void move_window(struct window *w, int x, int y) {
@@ -2499,14 +2556,24 @@ static void drop_file(void) {
     drag_file[0] = '\0';
 }
 
+// A mouse that says how far it moved goes the speed the settings choose times
+// that, out of 5, keeping what's left of a pixel for next time.
+static int faster(int d, int axis) {
+    static int left[2];
+    int scaled = d * settings.mouse_speed + left[axis];
+
+    left[axis] = scaled % 5;
+    return scaled / 5;
+}
+
 static void handle_mouse(const struct mouse_event *e) {
     enum part part;
     int edges;
     uint32_t pressed = e->buttons & ~buttons, released = buttons & ~e->buttons;
     // To the nearest pixel, as the host gives the last one as a little under its share of the range.
     int64_t range = MOUSE_ABSOLUTE_MAX + 1;
-    int x = e->absolute ? (int)(((int64_t)e->x * screen.width + range / 2) / range) : cursor_x + e->dx;
-    int y = e->absolute ? (int)(((int64_t)e->y * screen.height + range / 2) / range) : cursor_y + e->dy;
+    int x = e->absolute ? (int)(((int64_t)e->x * screen.width + range / 2) / range) : cursor_x + faster(e->dx, 0);
+    int y = e->absolute ? (int)(((int64_t)e->y * screen.height + range / 2) / range) : cursor_y + faster(e->dy, 1);
 
     x = x < 0 ? 0 : x >= screen.width ? screen.width - 1 : x;
     y = y < 0 ? 0 : y >= screen.height ? screen.height - 1 : y;
@@ -2867,6 +2934,16 @@ static void load_settings(void) {
     theme = settings.light ? &light : &dark;
     ioctl(keyboard, KEYBOARD_SET_REPEAT_DELAY, &settings.repeat_delay);
     ioctl(keyboard, KEYBOARD_SET_REPEAT_RATE, &settings.repeat_rate);
+
+    // The volume may have been set elsewhere, as Settings does.
+    int now_volume = volume, now_muted = muted;
+
+    if (mixer >= 0 && ioctl(mixer, MIXER_GET_VOLUME, &now_volume) == 0 && ioctl(mixer, MIXER_GET_MUTE, &now_muted) == 0
+        && (now_volume != volume || now_muted != muted)) {
+        volume = now_volume;
+        muted = now_muted;
+        damage_tray();
+    }
     if (can_set_mode && settings.width && (settings.width != screen.width || settings.height != screen.height))
         change_resolution(settings.width, settings.height);
     load_wallpaper();
@@ -2967,6 +3044,10 @@ int main(int argc, char **argv) {
         timeout = until_check < timeout ? (until_check > 0 ? (int)until_check : 0) : timeout;
 
         timeout = notice >= 0 && notice < timeout ? (notice > 0 ? notice : 1) : timeout;
+
+        int leave_wait = check_leaving();
+
+        timeout = leave_wait >= 0 && leave_wait < timeout ? leave_wait : timeout;
         if (login_due >= 0) {
             int64_t wait = login_due - now_ms();
 

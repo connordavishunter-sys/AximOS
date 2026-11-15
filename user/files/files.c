@@ -8,17 +8,19 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #define MAX_ENTRIES 1024
 #define MAX_TABS 8
 #define EDITOR "/system/bin/gui/editor"
-#define VIEWER "/system/bin/gui/viewer"
-#define PLAYER "/system/bin/gui/player"
 #define TERM "/system/bin/gui/term"
 #define LIST "##entries"
 #define ADDRESS "##folder"
 #define ANSWER "##answer"
+#define SEARCH "Search##search"
+#define PLACES "##places"
+#define SIDEBAR 120
 #define CUT "/tmp/files-cut" // the path on the clipboard, when it was cut, to move it
 #define KEY_F2 (KEY_F1 + 1)
 #define KEY_F5 (KEY_F1 + 4)
@@ -28,7 +30,32 @@ struct entry {
     char name[NAME_MAX + 1];
     bool folder;
     off_t size;
+    time_t modified;
 };
+
+static const char *const help = "Enter         Open\n"
+                                "Backspace     Up a folder\n"
+                                "Ctrl+T, W     New tab, close the tab\n"
+                                "Ctrl+Tab      Next tab\n"
+                                "Ctrl+C, X, V  Copy, cut, paste\n"
+                                "F2            Rename\n"
+                                "Delete        Delete\n"
+                                "F5            Refresh\n"
+                                "Ctrl+F        Search this folder\n"
+                                "Ctrl+H        Show hidden files\n"
+                                "Ctrl+Q        Quit\n"
+                                "F1            This help";
+
+// Entries are listed folders first, then by name, size or when they changed, the
+// latter two biggest and newest first, leaving out those that start with a dot
+// unless they're shown, and those without what's searched for in their names.
+static enum { BY_NAME, BY_SIZE, BY_DATE } sort_by;
+static bool show_hidden;
+static char search[NAME_MAX + 1];
+
+// The places down the side.
+static const char *const place_names[] = {"Home", "Desktop", "Documents", "Pictures", "Computer"};
+static char place_paths[5][PATH_MAX];
 
 // Each tab is a folder, and what was selected in it. The one shown is listed.
 struct tab {
@@ -63,7 +90,7 @@ static char dropped[PATH_MAX];
 static bool drop_copies;
 
 // What the strip under the address bar is asking, if anything.
-static enum { NOTHING, RENAMING, NEW_FOLDER, NEW_FILE, DELETING } asking;
+static enum { NOTHING, RENAMING, NEW_FOLDER, NEW_FILE, DELETING, PROPERTIES } asking;
 static char answer[NAME_MAX + 1];
 static bool ask_focus; // the answer box, or the Delete button, gets the keyboard
 
@@ -71,11 +98,28 @@ static void path_of(char *out, const char *name) {
     snprintf(out, PATH_MAX, "%s%s%s", folder, strcmp(folder, "/") ? "/" : "", name);
 }
 
-// Folders first, then by name.
 static int compare_entries(const void *a, const void *b) {
     const struct entry *x = a, *y = b;
 
-    return x->folder != y->folder ? y->folder - x->folder : strcmp(x->name, y->name);
+    if (x->folder != y->folder)
+        return y->folder - x->folder;
+    if (sort_by == BY_SIZE && x->size != y->size)
+        return x->size < y->size ? 1 : -1;
+    if (sort_by == BY_DATE && x->modified != y->modified)
+        return x->modified < y->modified ? 1 : -1;
+    return strcmp(x->name, y->name);
+}
+
+static bool has(const char *name, const char *part) {
+    for (size_t n = strlen(part); *name; name++) {
+        size_t i = 0;
+
+        while (i < n && tolower((unsigned char)name[i]) == tolower((unsigned char)part[i]))
+            i++;
+        if (i == n)
+            return true;
+    }
+    return !*part;
 }
 
 static void describe(void) {
@@ -163,6 +207,8 @@ static bool read_folder(const char *path, const char *select) {
     snprintf(went, sizeof(went), "%s", path); // path may be folder itself
     for (size_t n = strlen(went); n > 1 && went[n - 1] == '/'; n--)
         went[n - 1] = '\0';
+    if (strcmp(folder, went))
+        search[0] = '\0'; // a search is in one folder
     snprintf(folder, PATH_MAX, "%s", went);
     name_tab(&tabs[current]);
     count = 0;
@@ -171,12 +217,14 @@ static bool read_folder(const char *path, const char *select) {
         char full[PATH_MAX];
         struct stat st;
 
-        if (!strcmp(d->d_name, ".") || !strcmp(d->d_name, ".."))
+        if (!strcmp(d->d_name, ".") || !strcmp(d->d_name, "..") || (d->d_name[0] == '.' && !show_hidden)
+            || !has(d->d_name, search))
             continue;
         snprintf(e->name, sizeof(e->name), "%s", d->d_name);
         path_of(full, e->name);
         e->folder = stat(full, &st) == 0 && S_ISDIR(st.st_mode);
         e->size = e->folder ? 0 : st.st_size;
+        e->modified = st.st_mtime;
         count++;
     }
     closedir(dir);
@@ -290,12 +338,14 @@ static void open_selected(void) {
     if (!chosen())
         return;
     path_of(path, chosen()->name);
-    if (chosen()->folder)
+    if (chosen()->folder) {
         read_folder(path, NULL);
-    else
-        open_with(icons[selected] == gui_icon("image")   ? VIEWER
-                  : icons[selected] == gui_icon("audio") ? PLAYER
-                                                         : EDITOR);
+    } else {
+        char program[64];
+
+        snprintf(program, sizeof(program), "/system/bin/gui/%s", gui_app_for(path));
+        open_with(program);
+    }
 }
 
 static void run_selected(void) {
@@ -502,7 +552,7 @@ static void delete_selected(void) {
     char path[PATH_MAX];
 
     path_of(path, chosen()->name);
-    if ((chosen()->folder ? rmdir(path) : unlink(path)) < 0) {
+    if (!delete_tree(path)) {
         snprintf(status, sizeof(status), "Can't delete %s: %s", chosen()->name, strerror(errno));
         asking = NOTHING;
         return;
@@ -544,7 +594,7 @@ static void answered(void) {
 
 // Says where a widget is when that changes, for the tests to find it.
 static void report(struct gui_ui *ui, int index, const char *what) {
-    static struct gui_rect places[4];
+    static struct gui_rect places[6];
     struct gui_rect r = gui_last_rect(ui);
 
     if (memcmp(&places[index], &r, sizeof(r)))
@@ -564,39 +614,176 @@ static void address_bar(struct gui_ui *ui) {
         set_grid(!grid);
     report(ui, 3, "view");
     gui_same_line(ui);
+    gui_column_begin(ui, gui_room(ui) - 180);
     gui_textbox(ui, ADDRESS, typed, sizeof(typed));
     report(ui, 1, "address");
+    gui_column_end(ui);
     if (gui_focused(ui, ADDRESS) && gui_key(ui, KEY_ENTER))
         read_folder(typed, NULL);
+
+    // Searching lists only what has the words in its name.
+    if (gui_shortcut(ui, 'f'))
+        gui_set_focus(ui, SEARCH, search);
+    if (gui_textbox(ui, SEARCH, search, sizeof(search))) {
+        refresh();
+        printf("files: searching for %s\n", search);
+    }
 }
 
-// Asks for a name, or whether to delete, under the address bar.
+static void set_sort(int by) {
+    static const char *const names[] = {"name", "size", "date"};
+
+    sort_by = by;
+    refresh();
+    printf("files: sorted by %s\n", names[by]);
+}
+
+static void toggle_hidden(void) {
+    show_hidden = !show_hidden;
+    refresh();
+    printf("files: hidden files %s\n", show_hidden ? "shown" : "hidden");
+}
+
+// Places down the side, the one this folder is highlighted, and how the folder's
+// listed under them.
+static void sidebar(struct gui_ui *ui) {
+    static const char *const sorts[] = {"By name", "By size", "By date"};
+    int by = sort_by;
+    bool hidden = show_hidden;
+    const struct gui_image *place_icons[5];
+    int at = -1;
+
+    for (int i = 0; i < 5; i++) {
+        place_icons[i] = gui_file_icon("", true);
+        if (!strcmp(place_paths[i], folder))
+            at = i;
+    }
+    gui_column_begin(ui, SIDEBAR);
+    if (gui_list_icons(ui, PLACES, place_names, place_icons, 5, &at, 5) && at >= 0) {
+        remember();
+        read_folder(place_paths[at], NULL);
+    }
+    if (gui_dropdown(ui, "##sort", sorts, 3, &by))
+        set_sort(by);
+    report(ui, 4, "sort");
+    if (gui_checkbox(ui, "Hidden", &hidden))
+        toggle_hidden();
+    report(ui, 5, "hidden");
+    gui_column_end(ui);
+}
+
+// Asks for a name under the address bar.
 static void asking_strip(struct gui_ui *ui) {
     static const char *const questions[] = {
         [RENAMING] = "Rename to", [NEW_FOLDER] = "New folder", [NEW_FILE] = "New file",
     };
-    bool deleting = asking == DELETING, yes, no;
+    bool yes, no;
 
     if (ask_focus)
-        gui_set_focus(ui, deleting ? "Delete" : ANSWER, deleting ? NULL : answer);
+        gui_set_focus(ui, ANSWER, answer);
     ask_focus = false;
-    if (deleting)
-        gui_label(ui, "Delete %s?", chosen()->name);
-    else
-        gui_label(ui, "%s:", questions[asking]);
+    gui_label(ui, "%s:", questions[asking]);
     gui_same_line(ui);
-    yes = gui_button(ui, deleting ? "Delete" : "OK");
+    yes = gui_button(ui, "OK");
     gui_same_line(ui);
     no = gui_button(ui, "Cancel");
-    if (!deleting) {
-        gui_same_line(ui);
-        gui_textbox(ui, ANSWER, answer, sizeof(answer));
-        yes |= gui_focused(ui, ANSWER) && gui_key(ui, KEY_ENTER);
-    }
+    gui_same_line(ui);
+    gui_textbox(ui, ANSWER, answer, sizeof(answer));
+    yes |= gui_focused(ui, ANSWER) && gui_key(ui, KEY_ENTER);
     if (no || gui_key(ui, KEY_ESCAPE))
         asking = NOTHING;
     else if (yes)
         answered();
+}
+
+// How much is in a folder, all the way down, and how many files.
+static off_t size_of_tree(const char *path, int *files) {
+    struct stat st;
+    struct dirent *d;
+    DIR *dir;
+    off_t total = 0;
+
+    if (lstat(path, &st) < 0)
+        return 0;
+    if (!S_ISDIR(st.st_mode)) {
+        ++*files;
+        return st.st_size;
+    }
+    if (!(dir = opendir(path)))
+        return 0;
+    while ((d = readdir(dir))) {
+        char inside[PATH_MAX];
+
+        if (strcmp(d->d_name, ".") && strcmp(d->d_name, "..")) {
+            snprintf(inside, sizeof(inside), "%s/%s", path, d->d_name);
+            total += size_of_tree(inside, files);
+        }
+    }
+    closedir(dir);
+    return total;
+}
+
+static void human_size(char *out, size_t n, off_t size) {
+    if (size < 1024)
+        snprintf(out, n, "%lld bytes", (long long)size);
+    else if (size < 1024 * 1024)
+        snprintf(out, n, "%.1f kB (%lld bytes)", size / 1024.0, (long long)size);
+    else
+        snprintf(out, n, "%.1f MB (%lld bytes)", size / (1024.0 * 1024), (long long)size);
+}
+
+// What's known about the selected item, worked out once when it's asked for.
+static void describe_properties(char *out, size_t n) {
+    const struct entry *e = chosen();
+    char path[PATH_MAX], size[64], when[32], kind[64];
+    struct stat st;
+    int files = 0;
+
+    path_of(path, e->name);
+    if (stat(path, &st) < 0) {
+        snprintf(out, n, "Can't look at %s: %s", e->name, strerror(errno));
+        return;
+    }
+    human_size(size, sizeof(size), e->folder ? size_of_tree(path, &files) : st.st_size);
+    strftime(when, sizeof(when), "%Y-%m-%d %H:%M", localtime(&st.st_mtime));
+    if (e->folder)
+        snprintf(kind, sizeof(kind), "Folder of %d files", files);
+    else
+        snprintf(kind, sizeof(kind), "%s", icons[selected] == gui_icon("image")   ? "Picture"
+                                         : icons[selected] == gui_icon("audio") ? "Sound"
+                                         : st.st_mode & 0111                    ? "Program"
+                                                                                : "File");
+    snprintf(out, n, "Name:      %s\nKind:      %s\nSize:      %s\nChanged:   %s\nIn:        %s\nMode:      %c%c%c%c%c%c%c%c%c",
+             e->name, kind, size, when, folder, st.st_mode & 0400 ? 'r' : '-', st.st_mode & 0200 ? 'w' : '-',
+             st.st_mode & 0100 ? 'x' : '-', st.st_mode & 040 ? 'r' : '-', st.st_mode & 020 ? 'w' : '-',
+             st.st_mode & 010 ? 'x' : '-', st.st_mode & 04 ? 'r' : '-', st.st_mode & 02 ? 'w' : '-',
+             st.st_mode & 01 ? 'x' : '-');
+    printf("files: properties of %s: %s\n", path, size);
+}
+
+// Deleting and properties are dialogs over the window.
+static void dialogs(struct gui_ui *ui) {
+    static const char *const delete_buttons[] = {"Delete", "Cancel"}, *const ok[] = {"OK"};
+    static char text[PATH_MAX + 512];
+    static int shown = NOTHING;
+
+    if (asking != DELETING && asking != PROPERTIES) {
+        shown = NOTHING;
+        return;
+    }
+    if (shown != (int)asking && asking == PROPERTIES)
+        describe_properties(text, sizeof(text));
+    else if (shown != (int)asking)
+        snprintf(text, sizeof(text), "Delete %s%s?\nIt can't be undone.", chosen()->name,
+                 chosen()->folder ? " and everything in it" : "");
+    shown = asking;
+
+    int button = gui_dialog(ui, text, asking == DELETING ? delete_buttons : ok, asking == DELETING ? 2 : 1);
+
+    if (button == 1 && asking == DELETING)
+        delete_selected();
+    else if (button)
+        asking = NOTHING;
 }
 
 // Right-clicking an item has what can be done with it, and anywhere else in the
@@ -630,6 +817,9 @@ static void context_menu(struct gui_ui *ui, struct gui_rect list) {
             ask(RENAMING);
         if (gui_menu_item(ui, "Delete"))
             ask(DELETING);
+        gui_menu_separator(ui);
+        if (gui_menu_item(ui, "Properties"))
+            ask(PROPERTIES);
     } else {
         if (gui_menu_item(ui, "New folder"))
             ask(NEW_FOLDER);
@@ -692,6 +882,12 @@ static void frame(struct gui_ui *ui) {
     while (waitpid(-1, NULL, WNOHANG) > 0)
         ; // programs it started that have finished
     gui_ui_begin(ui);
+    if (asking == DELETING || asking == PROPERTIES)
+        dialogs(ui);
+    else
+        gui_help(ui, help);
+    if (gui_shortcut(ui, 'h'))
+        toggle_hidden();
     result = gui_tabs(ui, tab_names, tab_count, &active, &closing);
     if (result == GUI_TABS_CHANGED) {
         remember();
@@ -704,6 +900,7 @@ static void frame(struct gui_ui *ui) {
     if (asking)
         asking_strip(ui);
     gui_label(ui, "%s", status);
+    sidebar(ui);
 
     result = grid ? gui_grid(ui, LIST, items, pictures, count, &selected)
                   : gui_list_icons(ui, LIST, items, icons, count, &selected, 0);
@@ -746,6 +943,10 @@ int main(int argc, char **argv) {
     tab_count = 1;
     tab_names[0] = tabs[0].name;
     const char *home = getenv("HOME");
+
+    for (int i = 0; i < 4; i++)
+        snprintf(place_paths[i], PATH_MAX, "%s%s%s", home ? home : "", i ? "/" : "", i ? place_names[i] : "");
+    snprintf(place_paths[4], PATH_MAX, "/");
 
     if (!read_folder(argc > 1 ? argv[1] : home ? home : "/", NULL))
         read_folder("/", NULL);

@@ -44,6 +44,23 @@ static int fd_find_free(int from) {
     return -EMFILE;
 }
 
+// Gives an open file a descriptor, closing it if there's none free. Opening can
+// sleep, and another thread of the process can take a descriptor meanwhile, so
+// the descriptor is only chosen once the file is open.
+static int fd_install(int status, struct file *file, bool close_on_exec) {
+    int fd = status < 0 ? status : fd_find_free(0);
+
+    if (fd < 0) {
+        if (status >= 0)
+            file_close(file);
+        return fd;
+    }
+    process_files()[fd] = file;
+    if (close_on_exec)
+        *process_close_on_exec() |= 1ull << fd;
+    return fd;
+}
+
 static int64_t sys_write(uint64_t fd, uint64_t buf, uint64_t len) {
     struct file *file = fd_lookup(fd);
 
@@ -75,17 +92,10 @@ static int64_t sys_open(uint64_t path_ptr, uint64_t flags) {
     if (len < 0)
         return len;
 
-    int fd = fd_find_free(0);
-    if (fd < 0)
-        return fd;
+    struct file *file;
+    int status = file_open(process_cwd(), path, flags & ~(O_CLOEXEC | O_NOCTTY), &file);
 
-    int status = file_open(process_cwd(), path, flags & ~(O_CLOEXEC | O_NOCTTY), &process_files()[fd]);
-
-    if (status < 0)
-        return status;
-    if (flags & O_CLOEXEC)
-        *process_close_on_exec() |= 1ull << fd;
-    return fd;
+    return fd_install(status, file, flags & O_CLOEXEC);
 }
 
 static int64_t sys_pipe(uint64_t fds_ptr) {
@@ -194,12 +204,10 @@ static int64_t sys_ioctl(uint64_t fd, uint64_t request, uint64_t arg) {
         return -EBADF;
     // Its argument is the flags themselves, and it makes a descriptor.
     if (request == TIOCGPTPEER) {
-        int fd = fd_find_free(0);
-        int status = fd < 0 ? fd : file_open_peer(file, arg, &process_files()[fd]);
+        struct file *peer;
+        int status = file_open_peer(file, arg, &peer);
 
-        if (status == 0 && (arg & O_CLOEXEC))
-            *process_close_on_exec() |= 1ull << fd;
-        return status < 0 ? status : fd;
+        return fd_install(status, peer, arg & O_CLOEXEC);
     }
     if (!mm_user_range_ok(arg, ioctl_arg_size(request), true))
         return -EFAULT;
@@ -1239,12 +1247,10 @@ static int64_t sys_shm_open(uint64_t name_ptr, uint64_t flags) {
     if (len < 0)
         return len;
 
-    int fd = fd_find_free(0);
-    if (fd < 0)
-        return fd;
+    struct file *file;
+    int status = file_shm_open(name, flags, &file);
 
-    int status = file_shm_open(name, flags, &process_files()[fd]);
-    return status < 0 ? status : fd;
+    return fd_install(status, file, false);
 }
 
 static int64_t sys_shm_unlink(uint64_t name_ptr) {

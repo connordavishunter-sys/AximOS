@@ -50,12 +50,12 @@ try:
     at = v.mark()
     v.key('alt-print')
     check('Alt+Print Screen saves the window, with its frame', v.wait('wm: screenshot /home/Pictures/screenshot-', 10, at)
-          and v.wait(' 262x342', 2, at), v.text(at))
+          and v.wait(' 490x342', 2, at), v.text(at))
     time.sleep(0.5)
     at = v.mark()
     click(1280 - 12 - 150, TASKBAR_Y - 12 - 26)
     check('clicking the notice opens it', v.wait('viewer: showing /home/Pictures/screenshot-', 10, at)
-          and v.wait('262x342', 2, at), v.text(at))
+          and v.wait('490x342', 2, at), v.text(at))
     time.sleep(1)
     v.key('meta_l-q'); time.sleep(0.5)
 
@@ -66,9 +66,9 @@ try:
     time.sleep(1)
     TASKS_X, TASKS_Y = 80 + 2 * 32, 84 + 2 * 32 # the third window
     where = lambda name: [tuple(map(int, m)) for m in re.findall(rf'tasks: at {name} (\d+) (\d+) (\d+) (\d+)', v.text())][-1]
-    x, y, bw, bh = where('sort')
-    click(TASKS_X + x + 40, TASKS_Y + y + bh // 2); v.key('down'); v.key('down'); v.key('down'); v.key('ret')
-    check('sorting by PID', v.wait('tasks: sort by PID', 5, at), v.text(at))
+    x, y, bw, bh = where('PID')
+    click(TASKS_X + x + 10, TASKS_Y + y + bh // 2)
+    check('sorting by PID, from its header', v.wait('tasks: sort by PID', 5, at), v.text(at))
     x, y, lw, lh = where('list')
     click(TASKS_X + x + 40, TASKS_Y + y + 12)
     for _ in range(60):
@@ -78,6 +78,9 @@ try:
     check('finding the calculator', re.search(r'tasks: selected \d+ \S*calculator', v.text(at)), v.text(at)[-500:])
     x, y, bw, bh = where('end')
     click(TASKS_X + x + 10, TASKS_Y + y + 5)
+    check('which asks first', v.wait('tasks: asking to end', 5, at) and 'tasks: Ended' not in v.text(at), v.text(at))
+    time.sleep(0.5)
+    v.key('ret')
     check('and ending it', v.wait('tasks: Ended ', 5, at) and 'calculator.' in v.text(at), v.text(at))
     time.sleep(1)
     w, h, px = v.screenshot()

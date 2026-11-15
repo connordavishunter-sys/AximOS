@@ -179,6 +179,10 @@ void gui_copy(struct gui_canvas *canvas, int x, int y, const struct gui_canvas *
 void gui_text(struct gui_canvas *canvas, int x, int y, const char *text, uint32_t color, int scale);
 int gui_text_width(const char *text, int scale);
 
+// Files by what they hold, each opened in an app the settings choose.
+enum { GUI_KIND_FOLDER, GUI_KIND_PICTURE, GUI_KIND_SOUND, GUI_KIND_TEXT, GUI_KINDS };
+extern const char *const gui_kinds[GUI_KINDS]; // their names in the settings
+
 // The desktop's settings, kept in /system/etc/gui.conf.
 struct gui_settings {
     bool light;         // the light theme, rather than the dark one
@@ -188,10 +192,16 @@ struct gui_settings {
     int repeat_delay;   // milliseconds a key's held before it repeats
     int repeat_rate;    // times a second it repeats then, or 0 for never
     bool sharp_text;    // the bitmap font, rather than text smoothed from a TrueType one
+    int mouse_speed;    // 1 to 10, with 5 as the mouse moves it
+    char apps[GUI_KINDS][32]; // which app in /system/bin/gui opens each kind of file
 };
 
 void gui_settings_load(struct gui_settings *settings);
 bool gui_settings_save(const struct gui_settings *settings);
+
+// What kind of file is at path, and the app the settings say opens it.
+int gui_kind_of(const char *path);
+const char *gui_app_for(const char *path);
 
 // Tells wm the settings have changed, and through it every program with a window.
 void gui_settings_changed(void);
@@ -353,6 +363,11 @@ struct gui_ui {
     } saved[GUI_UI_MAX_DEPTH];
     int depth;
     struct gui_rect last;
+    bool dialog_shown, dimmed, help_open;
+    int dialog_choice;
+    struct gui_layout column_saved; // the layout outside a column, and where it starts
+    int column_top;
+    uint32_t tab_owner, next_tab_owner; // code that takes Tab to indent, rather than moving on
     bool again; // something changed that was already drawn
 };
 
@@ -371,6 +386,10 @@ void gui_ui_end(struct gui_ui *ui);
 
 // Puts the next widget to the right of the last, rather than under it.
 void gui_same_line(struct gui_ui *ui);
+// Room for something the program draws itself, width by height, or across the
+// rest of the line if width is 0, returning where it is in the window.
+struct gui_rect gui_space(struct gui_ui *ui, int width, int height);
+
 // How much of the line is left, from where the next widget would go.
 int gui_room(const struct gui_ui *ui);
 
@@ -420,8 +439,12 @@ bool gui_textarea(struct gui_ui *ui, const char *label, char *text, size_t size,
 // its kind, in kinds, which is as long.
 enum gui_syntax { GUI_SYNTAX_PLAIN, GUI_SYNTAX_KEYWORD, GUI_SYNTAX_TYPE, GUI_SYNTAX_STRING, GUI_SYNTAX_NUMBER,
                   GUI_SYNTAX_COMMENT, GUI_SYNTAX_DIRECTIVE, GUI_SYNTAX_KINDS };
+// flags add numbers down the left of each line, wrap long lines rather than
+// scrolling sideways, and have Tab and Shift+Tab indent and Enter keep the indent.
 typedef void gui_highlighter(const char *text, uint8_t *kinds);
-bool gui_code_area(struct gui_ui *ui, const char *label, char *text, size_t size, int lines, gui_highlighter *highlight);
+enum { GUI_CODE_LINE_NUMBERS = 1, GUI_CODE_WRAP = 2, GUI_CODE_INDENT = 4 };
+bool gui_code_area(struct gui_ui *ui, const char *label, char *text, size_t size, int lines, gui_highlighter *highlight,
+                   int flags);
 
 // Gives the text widget with label the keyboard, selecting from one place in its
 // text to another, where the cursor goes, and scrolls to show it.
@@ -432,7 +455,7 @@ void gui_select_text(struct gui_ui *ui, const char *label, size_t from, size_t t
 bool gui_dropdown(struct gui_ui *ui, const char *label, const char *const *items, int count, int *selected);
 
 // All of count items in a list rows tall, or down to the bottom of the window if
-// rows is 0, which scrolls, with selected highlighted. Returns GUI_LIST_CHANGED
+// rows is 0, which scrolls, with selected highlighted, or none if it's -1. Returns GUI_LIST_CHANGED
 // when the selection changes, and GUI_LIST_ACTIVATED when the selected item is
 // double-clicked or Enter is pressed on it.
 enum { GUI_LIST_CHANGED = 1, GUI_LIST_ACTIVATED };
@@ -464,13 +487,30 @@ void gui_menu_end(struct gui_ui *ui);
 // selects the item clicked, and says which in clicked_item.
 bool gui_context_menu(struct gui_ui *ui, const char *label, struct gui_rect area);
 
-// A bar of tabs across the top, which goes first in a frame, named names, with
+// A bar of tabs across the top, which goes first in a frame, or after the menu bar, named names, with
 // active the one shown. Clicking a tab, or Ctrl+Tab and Ctrl+Shift+Tab, changes
 // active and returns GUI_TABS_CHANGED. A tab's x, or Ctrl+W for the active one,
 // returns GUI_TABS_CLOSE with closing set to it, and + or Ctrl+T GUI_TABS_NEW, for
 // the program to add or take away the tab. With closing NULL, there's no x or +.
 enum { GUI_TABS_CHANGED = 1, GUI_TABS_NEW, GUI_TABS_CLOSE };
+// A message, of lines split by \n, in a box over the middle of the window with count
+// buttons under it, which goes first in a frame, leaving everything after it dimmed
+// and without the mouse or keyboard. Returns the button pressed, from 1, with
+// Escape pressing the last, or 0 until then.
+int gui_dialog(struct gui_ui *ui, const char *message, const char *const *buttons, int count);
+
+// The program's help, its keyboard shortcuts, shown in a dialog when F1 is pressed
+// or gui_help_open called, until it's closed. Goes first in a frame, and returns
+// whether it's showing.
+bool gui_help(struct gui_ui *ui, const char *help);
+void gui_help_open(struct gui_ui *ui);
+
 int gui_tabs(struct gui_ui *ui, const char *const *names, int count, int *active, int *closing);
+
+// The widgets between these go in a column width wide, one under another, with
+// what comes after beside it, its top level with the column's.
+void gui_column_begin(struct gui_ui *ui, int width);
+void gui_column_end(struct gui_ui *ui);
 
 // The widgets between these go in an area height tall, or down to the bottom of
 // the window if height is 0, which the wheel and a scroll bar scroll when they

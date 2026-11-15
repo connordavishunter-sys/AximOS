@@ -1,3 +1,4 @@
+#include <audio_types.h>
 #include <dirent.h>
 #include <fcntl.h>
 #include <gui.h>
@@ -6,7 +7,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <sys/ioctl.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -21,9 +24,19 @@
 #define THUMB_HEIGHT 85
 #define THUMBS_ACROSS 3
 #define MAX_RESOLUTIONS 16
+#define MAX_APPS 32
+#define APPS_DIR "/system/bin/gui"
+#define VOLUME_FILE "/system/etc/volume" // as wm keeps it
+#define TEST_SOUND "/system/share/example_music/1.wav"
 
-enum { APPEARANCE, DISPLAY, KEYBOARD, TIME, TABS };
-static const char *const tabs[] = {"Appearance", "Display", "Keyboard", "Date & time"};
+enum { APPEARANCE, DISPLAY, KEYBOARD, TIME, SOUND, APPS, TABS };
+static const char *const tabs[] = {"Appearance", "Display", "Keyboard", "Date & time", "Sound", "Apps"};
+static const char *const kind_names[GUI_KINDS] = {"Folders", "Pictures", "Sounds", "Other files"};
+
+// The apps there are, to open each kind of file in.
+static char app_names[MAX_APPS][32];
+static const char *apps[MAX_APPS];
+static int app_count;
 static char try_typing[128];
 static const char *const themes[] = {"Dark", "Light"}, *const clocks[] = {"24 hour", "12 hour"};
 
@@ -250,7 +263,7 @@ static void screen_changed(void) {
 
 // Says where a widget is when that changes, for the tests to find it.
 static void report(struct gui_ui *ui, int index, const char *what) {
-    static struct gui_rect places[16 + MAX_WALLPAPERS];
+    static struct gui_rect places[32 + MAX_WALLPAPERS];
     struct gui_rect r = gui_last_rect(ui);
 
     if (memcmp(&places[index], &r, sizeof(r)))
@@ -293,7 +306,7 @@ static void appearance(struct gui_ui *ui) {
             gui_settings_changed();
         }
         snprintf(label, sizeof(label), "wallpaper %s", wallpapers[i].name);
-        report(ui, 16 + i, label);
+        report(ui, 32 + i, label);
     }
 }
 
@@ -374,6 +387,92 @@ static void keyboard(struct gui_ui *ui) {
     gui_label(ui, "Try it here:");
     gui_textbox(ui, "##try", try_typing, sizeof(try_typing));
     report(ui, 14, "try");
+    gui_separator(ui);
+    gui_heading(ui, "Mouse");
+    gui_label(ui, "How fast the pointer goes, as the mouse moves it at 5:");
+    if (gui_slider(ui, "##mouse", &settings.mouse_speed, 1, 10)) {
+        snprintf(what, sizeof(what), "mouse speed %d", settings.mouse_speed);
+        save(what);
+    }
+    report(ui, 15, "mouse");
+}
+
+// The volume of everything, set on the mixer and kept as wm keeps it, which wm
+// takes up when told the settings changed.
+static void sound(struct gui_ui *ui) {
+    int mixer = open("/dev/mixer", O_RDONLY), volume = 100, muted = 0;
+    bool mute;
+    FILE *f;
+
+    if (mixer < 0) {
+        gui_label(ui, "There's no sound card.");
+        return;
+    }
+    ioctl(mixer, MIXER_GET_VOLUME, &volume);
+    ioctl(mixer, MIXER_GET_MUTE, &muted);
+    mute = muted;
+    gui_label(ui, "How loud everything plays:");
+
+    bool changed = gui_slider(ui, "##volume", &volume, 0, 100);
+
+    report(ui, 16, "volume");
+    changed |= gui_checkbox(ui, "Mute", &mute);
+    report(ui, 17, "mute");
+    if (changed) {
+        muted = mute;
+        ioctl(mixer, MIXER_SET_VOLUME, &volume);
+        ioctl(mixer, MIXER_SET_MUTE, &muted);
+        if ((f = fopen(VOLUME_FILE, "w"))) {
+            fprintf(f, "%d%s\n", volume, muted ? " muted" : "");
+            fclose(f);
+        }
+        printf("settings: volume %d%s\n", volume, muted ? ", muted" : "");
+        gui_settings_changed();
+    }
+    close(mixer);
+    gui_separator(ui);
+    if (gui_button(ui, "Play a test sound") && fork() == 0) {
+        execl(APPS_DIR "/player", "player", TEST_SOUND, (char *)NULL);
+        _exit(127);
+    }
+    report(ui, 18, "test sound");
+}
+
+// Which app opens each kind of file, from Files, the desktop and notifications.
+static void default_apps(struct gui_ui *ui) {
+    gui_label(ui, "What opens each kind of file:");
+    for (int kind = 0; kind < GUI_KINDS; kind++) {
+        int at = 0;
+        char label[48];
+
+        for (int i = 0; i < app_count; i++)
+            at = strcmp(apps[i], settings.apps[kind]) ? at : i;
+        snprintf(label, sizeof(label), "%s##app%d", kind_names[kind], kind);
+        if (gui_dropdown(ui, label, apps, app_count, &at)) {
+            char what[64];
+
+            snprintf(settings.apps[kind], sizeof(settings.apps[kind]), "%s", apps[at]);
+            snprintf(what, sizeof(what), "app %s %s", gui_kinds[kind], apps[at]);
+            save(what);
+        }
+        report(ui, 19 + kind, gui_kinds[kind]);
+    }
+}
+
+static void load_apps(void) {
+    DIR *dir = opendir(APPS_DIR);
+    struct dirent *d;
+
+    while (dir && (d = readdir(dir)) && app_count < MAX_APPS) {
+        if (d->d_name[0] != '.') {
+            snprintf(app_names[app_count], sizeof(app_names[0]), "%s", d->d_name);
+            apps[app_count] = app_names[app_count];
+            app_count++;
+        }
+    }
+    if (dir)
+        closedir(dir);
+    qsort(apps, app_count, sizeof(*apps), compare);
 }
 
 // Asks whether to keep the new resolution, above whichever tab is showing.
@@ -397,6 +496,9 @@ static void keep_strip(struct gui_ui *ui) {
 static void frame(struct gui_ui *ui) {
     int was = tab;
 
+    while (waitpid(-1, NULL, WNOHANG) > 0)
+        ; // a test sound that's finished
+
     gui_ui_begin(ui);
     gui_tabs(ui, tabs, TABS, &tab, NULL);
     if (keep_left)
@@ -411,25 +513,29 @@ static void frame(struct gui_ui *ui) {
         display(ui);
     else if (tab == KEYBOARD)
         keyboard(ui);
+    else if (tab == SOUND)
+        sound(ui);
+    else if (tab == APPS)
+        default_apps(ui);
     else
         date_and_time(ui);
     gui_ui_end(ui);
     fflush(stdout);
 }
 
-// Settings for the desktop: its theme, shadows, wallpaper, resolution, key repeat, clock
-// and time zone.
+// Settings for the desktop: its theme, shadows, wallpaper, resolution, key repeat, mouse
+// speed, clock, time zone, volume and the apps that open each kind of file.
 int main(int argc, char **argv) {
     help_option(argc, argv, "usage: settings\n"
-                            "Opens a window to change the theme, shadows, wallpaper, resolution, key repeat, clock and\n"
-                            "time zone.\n");
+                            "Opens a window to change the theme, shadows, wallpaper, resolution, key repeat, mouse\n"
+                            "speed, clock, time zone, volume and the apps that open each kind of file.\n");
     if (!gui_connect()) {
         dprintf(STDERR_FILENO, "settings: wm isn't running\n");
         return 1;
     }
 
     FILE *name = fopen(NAME_FILE, "r");
-    struct gui_window *window = gui_create_window("Settings", 480, 540);
+    struct gui_window *window = gui_create_window("Settings", 680, 540);
     struct gui_ui ui;
     struct gui_message e;
 
@@ -446,6 +552,7 @@ int main(int argc, char **argv) {
     qsort(zones, zone_count, sizeof(*zones), compare);
     filter();
     load_wallpapers();
+    load_apps();
     gui_ui_init(&ui, window);
     frame(&ui);
     while (gui_next_event(&e) && e.type != GUI_CLOSE) {

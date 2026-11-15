@@ -1,5 +1,7 @@
+#include <dirent.h>
 #include <gui.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -15,11 +17,30 @@
 #define KEY_MINUS 0x0C
 #define KEY_0 0x0B
 #define KEY_1 0x02
+#define KEY_R 0x13
+#define KEY_L 0x26
+#define KEY_Q 0x10
+#define MAX_PICTURES 512
+
+static const char *const help[] = {
+    "Left, Right   The picture before or after",
+    "Home, End     The first or last picture",
+    "+, -          Zoom in and out",
+    "0, 1          Fit to the window, actual size",
+    "Wheel         Zoom where the mouse is",
+    "Drag          Move about a zoomed picture",
+    "R, L          Turn right or left",
+    "Ctrl+C        Copy the picture",
+    "Escape        Close",
+    "F1            This help",
+};
+static bool help_shown;
 
 static struct gui_window *window;
 static uint32_t background, text_colour; // from the theme
 static struct gui_image image, fitted; // as it is, and as it's shown fitted to the window
 static char title[GUI_TITLE_MAX] = "Viewer";
+static char shown_path[GUI_PATH_MAX]; // the file shown, for the pictures beside it
 
 // Zoomed, the image is shown zoom times its size, with the point centre_x,
 // centre_y of it in the middle of the window, as far as it'll go. Otherwise it's
@@ -84,19 +105,35 @@ static void draw_zoomed(struct gui_canvas *c) {
     }
 }
 
+// The keys, in a box over the middle.
+static void draw_help(struct gui_canvas *c) {
+    int lines = sizeof(help) / sizeof(*help), w = 46 * GUI_CHAR_WIDTH + 32, h = lines * GUI_CHAR_HEIGHT + 32;
+    int x = (c->width - w) / 2, y = (c->height - h) / 2;
+
+    gui_fill(c, x, y, w, h, 0x2B303B);
+    for (int i = 0; i < lines; i++)
+        gui_text(c, x + 16, y + 16 + i * GUI_CHAR_HEIGHT, help[i], 0xE6E8EE, 1);
+}
+
+static void show(struct gui_canvas *c) {
+    if (help_shown)
+        draw_help(c);
+    gui_show(window);
+}
+
 static void draw(void) {
     struct gui_canvas *c = &window->canvas;
     int w = image.width, h = image.height;
 
     gui_fill(c, 0, 0, c->width, c->height, background);
     if (!image.pixels) {
-        gui_text(c, 16, 16, "No image: open one from Files.", text_colour, 1);
-        gui_show(window);
+        gui_text(c, 16, 16, "No image: open one from Files. F1 for help.", text_colour, 1);
+        show(c);
         return;
     }
     if (zoom) {
         draw_zoomed(c);
-        gui_show(window);
+        show(c);
         return;
     }
     if (w > c->width || h > c->height) {
@@ -124,7 +161,7 @@ static void draw(void) {
                      CHECK < shown->height - cy ? CHECK : shown->height - cy, (cx / CHECK + cy / CHECK) % 2 ? CHECK_DARK : CHECK_LIGHT);
     }
     gui_draw_image(c, x, y, shown);
-    gui_show(window);
+    show(c);
 }
 
 // Zooms to a new size, or back to fitting the window with 0, keeping the point of
@@ -155,6 +192,9 @@ static void zoom_to(double to, int x, int y) {
     draw();
 }
 
+static void step(int by, bool to_end);
+static void turn(bool right);
+
 static void key(const struct key_event *k) {
     int middle_x = window->canvas.width / 2, middle_y = window->canvas.height / 2;
     double now = zoom ? zoom : image.pixels ? fitted_zoom() : 1;
@@ -167,6 +207,18 @@ static void key(const struct key_event *k) {
         zoom_to(0, middle_x, middle_y);
     else if (k->code == KEY_1)
         zoom_to(1, middle_x, middle_y);
+    else if (k->code == KEY_RIGHT || k->code == KEY_PAGE_DOWN || k->code == KEY_SPACE)
+        step(1, false);
+    else if (k->code == KEY_LEFT || k->code == KEY_PAGE_UP || k->code == KEY_BACKSPACE)
+        step(-1, false);
+    else if (k->code == KEY_HOME || k->code == KEY_END)
+        step(k->code == KEY_HOME ? 1 : -1, true);
+    else if ((k->code == KEY_R || k->code == KEY_L) && !(k->modifiers & KEY_MOD_CTRL))
+        turn(k->code == KEY_R);
+    else if (k->code == KEY_F1) {
+        help_shown = !help_shown;
+        draw();
+    }
     else if ((k->modifiers & KEY_MOD_CTRL) && (k->text == 'c' || k->text == ('c' & 0x1F)) && image.pixels) {
         struct gui_canvas all = {image.pixels, image.width, image.height, image.width};
 
@@ -190,23 +242,124 @@ static void mouse(const struct gui_message *e) {
     drag_y = e->y;
 }
 
+static int by_name(const void *a, const void *b) {
+    return strcmp(*(char *const *)a, *(char *const *)b);
+}
+
+// The pictures in the folder of the one shown, by name, to be freed, and which of
+// them that is, in *at.
+static int pictures_beside(char ***names, int *at) {
+    char folder[GUI_PATH_MAX], *slash;
+    const char *name;
+    struct dirent *d;
+    DIR *dir;
+    int count = 0;
+
+    snprintf(folder, sizeof(folder), "%s", shown_path);
+    slash = strrchr(folder, '/');
+    name = slash ? shown_path + (slash - folder) + 1 : shown_path;
+    if (slash)
+        *slash = '\0';
+    if (!(dir = opendir(slash ? (folder[0] ? folder : "/") : ".")) || !(*names = malloc(MAX_PICTURES * sizeof(char *)))) {
+        if (dir)
+            closedir(dir);
+        return 0;
+    }
+    while (count < MAX_PICTURES && (d = readdir(dir))) {
+        if (d->d_name[0] != '.' && gui_file_icon(d->d_name, false) == gui_icon("image"))
+            (*names)[count++] = strdup(d->d_name);
+    }
+    closedir(dir);
+    qsort(*names, count, sizeof(char *), by_name);
+    *at = -1;
+    for (int i = 0; i < count; i++) {
+        if ((*names)[i] && !strcmp((*names)[i], name))
+            *at = i;
+    }
+    return count;
+}
+
+static void set_title(void) {
+    char **names;
+    int at, count = shown_path[0] ? pictures_beside(&names, &at) : 0;
+    const char *name = strrchr(shown_path, '/');
+    char place[32] = "";
+
+    if (count > 1 && at >= 0)
+        snprintf(place, sizeof(place), " %d of %d", at + 1, count);
+    snprintf(title, sizeof(title), "%s (%dx%d)%s - Viewer", name ? name + 1 : shown_path, image.width, image.height,
+             place);
+    for (int i = 0; i < count; i++)
+        free(names[i]);
+    if (count)
+        free(names);
+    if (window)
+        gui_set_title(window, title);
+}
+
 // Shows a file in place of what was shown, with its name and size in the title.
-static void show_file(const char *path) {
-    const char *name = strrchr(path, '/');
+static bool show_file(const char *path) {
     struct gui_image loaded;
 
     if (!gui_image_load(path, &loaded)) {
         printf("viewer: %s: %s\n", path, gui_image_error());
-        return;
+        return false;
     }
     gui_image_free(&image);
     gui_image_free(&fitted);
     image = loaded;
     zoom = 0;
-    snprintf(title, sizeof(title), "%s (%dx%d) - Viewer", name ? name + 1 : path, image.width, image.height);
+    snprintf(shown_path, sizeof(shown_path), "%s", path);
     printf("viewer: showing %s %dx%d\n", path, image.width, image.height);
-    if (window)
-        gui_set_title(window, title);
+    set_title();
+    return true;
+}
+
+// Goes by along the pictures in the folder, or to the first or last, skipping any
+// that won't load.
+static void step(int by, bool to_end) {
+    char **names, path[GUI_PATH_MAX];
+    int at, count = shown_path[0] ? pictures_beside(&names, &at) : 0;
+    char *slash = strrchr(shown_path, '/');
+    int folder = slash ? (int)(slash - shown_path) : -1;
+
+    if (to_end)
+        at = by < 0 ? count : -1;
+    for (int i = at + by, tries = 0; count && tries < count && i >= 0 && i < count; i += by, tries++) {
+        snprintf(path, sizeof(path), "%.*s%s%s", folder < 0 ? 0 : folder, shown_path, folder < 0 ? "" : "/", names[i]);
+        if (i != at && show_file(path)) {
+            draw();
+            break;
+        }
+    }
+    for (int i = 0; i < count; i++)
+        free(names[i]);
+    if (count)
+        free(names);
+}
+
+// Turns the picture a quarter right, or left.
+static void turn(bool right) {
+    struct gui_image turned = {malloc((size_t)image.width * image.height * sizeof(uint32_t)), image.height, image.width};
+
+    if (!image.pixels || !turned.pixels) {
+        free(turned.pixels);
+        return;
+    }
+    for (int y = 0; y < image.height; y++) {
+        for (int x = 0; x < image.width; x++) {
+            int tx = right ? image.height - 1 - y : y, ty = right ? x : image.width - 1 - x;
+
+            turned.pixels[(long)ty * turned.width + tx] = image.pixels[(long)y * image.width + x];
+        }
+    }
+    gui_image_free(&image);
+    gui_image_free(&fitted);
+    image = turned;
+    zoom = 0;
+    printf("viewer: turned %s %dx%d\n", right ? "right" : "left", image.width, image.height);
+    set_title();
+    draw();
 }
 
 static void use_theme(void) {
@@ -253,7 +406,13 @@ int main(int argc, char **argv) {
             use_theme();
             draw();
         }
-        if (e.type == GUI_KEY && e.key.pressed && e.key.code == KEY_ESCAPE)
+        if (e.type == GUI_KEY && e.key.pressed && e.key.code == KEY_ESCAPE && help_shown) {
+            help_shown = false;
+            draw();
+            continue;
+        }
+        if (e.type == GUI_KEY && e.key.pressed
+            && (e.key.code == KEY_ESCAPE || (e.key.code == KEY_Q && (e.key.modifiers & KEY_MOD_CTRL))))
             break;
         if (e.type == GUI_KEY && e.key.pressed)
             key(&e.key);

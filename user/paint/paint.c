@@ -19,10 +19,23 @@
 #define WHEEL_STEP 48
 #define KEY_EQUALS 0x0D
 #define KEY_MINUS 0x0C
+#define WORDS "##words"
+
+static const char *const help = "Ctrl+N, O, S  New, open, save\n"
+                                "Ctrl+Z, Y     Undo and redo\n"
+                                "Ctrl+C, X, V  Copy, cut and paste: what's\n"
+                                "              selected, or all of it\n"
+                                "Delete        Clear what's selected\n"
+                                "Ctrl+A        Select all of it\n"
+                                "Enter, Esc    Put down what's selected\n"
+                                "Ctrl+=, -, 0  Zoom in, out, actual size\n"
+                                "Wheel         Scroll\n"
+                                "Ctrl+Q        Quit\n"
+                                "F1            This help";
 
 // Pictures drawn with the mouse, saved and opened as PNG files.
-enum tool { PENCIL, LINE, BOX, OVAL, FILL, ERASER, PICKER, TOOLS };
-static const char *const tool_names[] = {"Pencil", "Line", "Box", "Oval", "Fill", "Eraser", "Picker"};
+enum tool { PENCIL, LINE, BOX, OVAL, FILL, ERASER, PICKER, SELECT, TEXT, TOOLS };
+static const char *const tool_names[] = {"Pencil", "Line", "Box", "Oval", "Fill", "Eraser", "Picker", "Select", "Text"};
 static const uint32_t palette[] = {
     0x000000, 0x5A5F6B, 0xA0A6B2, 0xFFFFFF, 0xE5484D, 0xF2994A, 0xF2C94C, 0x6FCF97,
     0x27AE60, 0x56CCF2, 0x2F80ED, 0x3D63DD, 0x9B51E0, 0xEB5FA8, 0x8B5A2B, 0x1E2430,
@@ -32,8 +45,20 @@ static const uint32_t palette[] = {
 static struct gui_window *window;
 static struct gui_file_picker picker;
 static struct gui_canvas picture, preview; // the picture, and a copy with the shape being drawn
-static struct gui_canvas undo[UNDO];
-static int undo_count;
+static struct gui_canvas undo[UNDO], redo[UNDO];
+static int undo_count, redo_count;
+
+// What's selected, a rectangle of the picture, which is lifted off it into
+// floating to be moved about, and put down again when another tool's used.
+static struct gui_rect selection;
+static struct gui_canvas floating;
+static bool selecting, moving;
+static int grab_x, grab_y;
+
+// Words being typed, to go on the picture at text_x, text_y.
+static bool typing, typing_focus;
+static int text_x, text_y;
+static char words[128];
 
 // The picture's shown zoom times its size, scrolled by scroll_x and scroll_y of
 // those pixels, in view, with bars to scroll it when it doesn't fit.
@@ -46,12 +71,28 @@ static int dragging_bar = -1, bar_grab;
 static enum tool tool;
 static uint32_t colour;
 static int size = 3;
+static bool filled;
 static char path[GUI_PATH_MAX], status[GUI_PATH_MAX + 64];
-static bool modified, closing, quitting;
+static bool modified, quitting;
+
+// New, Open and closing ask first when there are changes that aren't saved.
+static enum { NOTHING, NEW, OPEN, CLOSE } asking, after_save;
 
 // A stroke under way: where it started, and where the mouse was last.
 static bool drawing;
 static int start_x, start_y, last_x, last_y;
+
+static void forget(struct gui_canvas *list, int *count) {
+    for (; *count > 0; --*count)
+        free(list[*count - 1].pixels);
+}
+
+static void drop_selection(void) {
+    free(floating.pixels);
+    floating = (struct gui_canvas){0};
+    selection = (struct gui_rect){0};
+    selecting = moving = false;
+}
 
 static bool new_picture(int width, int height) {
     uint32_t *pixels = malloc((size_t)width * height * sizeof(uint32_t));
@@ -61,8 +102,9 @@ static bool new_picture(int width, int height) {
     free(picture.pixels);
     picture = (struct gui_canvas){pixels, width, height, width};
     gui_fill(&picture, 0, 0, width, height, WHITE);
-    for (; undo_count > 0; undo_count--)
-        free(undo[undo_count - 1].pixels);
+    forget(undo, &undo_count);
+    forget(redo, &redo_count);
+    drop_selection();
     scroll_x = scroll_y = 0;
     return true;
 }
@@ -85,41 +127,113 @@ static void set_modified(bool now) {
         modified = now;
         show_title();
     }
-    closing = false;
 }
 
-// Keeps the picture as it is, and its size, to go back to.
-static void save_undo(void) {
+// A copy of the picture as it is, and its size, kept in a list of UNDO at most.
+static void keep(struct gui_canvas *list, int *count) {
     size_t bytes = (size_t)picture.width * picture.height * sizeof(uint32_t);
     uint32_t *copy = malloc(bytes);
 
     if (!copy)
         return;
     memcpy(copy, picture.pixels, bytes);
-    if (undo_count == UNDO) {
-        free(undo[0].pixels);
-        memmove(undo, undo + 1, (UNDO - 1) * sizeof(*undo));
-        undo_count--;
+    if (*count == UNDO) {
+        free(list[0].pixels);
+        memmove(list, list + 1, (UNDO - 1) * sizeof(*list));
+        --*count;
     }
-    undo[undo_count++] = (struct gui_canvas){copy, picture.width, picture.height, picture.width};
+    list[(*count)++] = (struct gui_canvas){copy, picture.width, picture.height, picture.width};
+}
+
+// Before a change: what it was, to go back to, and nothing to redo.
+static void save_undo(void) {
+    keep(undo, &undo_count);
+    forget(redo, &redo_count);
+}
+
+// Puts back the last of from, keeping the picture as it is in to.
+static bool restore(struct gui_canvas *from, int *from_count, struct gui_canvas *to, int *to_count) {
+    if (!*from_count)
+        return false;
+    drop_selection();
+    keep(to, to_count);
+    free(picture.pixels);
+    picture = from[--*from_count];
+    set_modified(true);
+    return true;
 }
 
 static void undo_last(void) {
-    if (!undo_count)
+    if (restore(undo, &undo_count, redo, &redo_count))
+        printf("paint: undone\n");
+}
+
+static void redo_last(void) {
+    if (restore(redo, &redo_count, undo, &undo_count))
+        printf("paint: redone\n");
+}
+
+// What's lifted goes down where it is.
+static void put_down(void) {
+    if (floating.pixels)
+        gui_copy(&picture, selection.x, selection.y, &floating, 0, 0, floating.width, floating.height);
+    drop_selection();
+}
+
+// Lifts what's selected off the picture, leaving white behind.
+static void lift(void) {
+    struct gui_rect r = selection;
+    uint32_t *pixels = malloc((size_t)r.width * r.height * sizeof(uint32_t));
+
+    if (!pixels)
         return;
-    free(picture.pixels);
-    picture = undo[--undo_count];
+    save_undo();
+    floating = (struct gui_canvas){pixels, r.width, r.height, r.width};
+    gui_copy(&floating, 0, 0, &picture, r.x, r.y, r.width, r.height);
+    gui_fill(&picture, r.x, r.y, r.width, r.height, WHITE);
     set_modified(true);
-    printf("paint: undone\n");
 }
 
+static void select_all(void) {
+    put_down();
+    selection = (struct gui_rect){0, 0, picture.width, picture.height};
+    tool = SELECT;
+    printf("paint: selected 0 0 %d %d\n", picture.width, picture.height);
+}
+
+// What's selected, or all of it.
 static void copy_picture(void) {
-    if (gui_clipboard_set_image(&picture))
-        printf("paint: copied %dx%d\n", picture.width, picture.height);
+    struct gui_rect r = selection;
+    struct gui_canvas part = floating.pixels ? floating
+                           : r.width       ? (struct gui_canvas){picture.pixels + (long)r.y * picture.stride + r.x, r.width,
+                                                           r.height, picture.stride}
+                                           : picture;
+
+    if (gui_clipboard_set_image(&part))
+        printf("paint: copied %dx%d\n", part.width, part.height);
 }
 
-// A picture from the clipboard goes at the top left, making the picture bigger if
-// it's smaller.
+static void clear_selection(void) {
+    if (!selection.width)
+        return;
+    if (!floating.pixels) {
+        save_undo();
+        gui_fill(&picture, selection.x, selection.y, selection.width, selection.height, WHITE);
+    }
+    drop_selection();
+    set_modified(true);
+    printf("paint: cleared\n");
+}
+
+static void cut_picture(void) {
+    if (!selection.width)
+        select_all();
+    copy_picture();
+    clear_selection();
+}
+
+// A picture from the clipboard is lifted over the top left of what's in sight, to
+// be moved about, making the picture bigger first if it's smaller.
 static void paste_picture(void) {
     struct gui_image pasted;
 
@@ -127,22 +241,34 @@ static void paste_picture(void) {
         snprintf(status, sizeof(status), "There's no picture to paste");
         return;
     }
+    put_down();
 
     int width = pasted.width > picture.width ? pasted.width : picture.width;
     int height = pasted.height > picture.height ? pasted.height : picture.height;
     uint32_t *pixels = width <= MAX_SIZE && height <= MAX_SIZE ? malloc((size_t)width * height * sizeof(uint32_t)) : NULL;
+    uint32_t *lifted = malloc((size_t)pasted.width * pasted.height * sizeof(uint32_t));
 
-    if (pixels) {
+    if (pixels && lifted) {
         struct gui_canvas bigger = {pixels, width, height, width};
+        bool grew = width > picture.width || height > picture.height;
+        int x = grew ? 0 : (int)(scroll_x / zooms[zoom_index]), y = grew ? 0 : (int)(scroll_y / zooms[zoom_index]);
 
         save_undo();
         gui_fill(&bigger, 0, 0, width, height, WHITE);
         gui_copy(&bigger, 0, 0, &picture, 0, 0, picture.width, picture.height);
-        gui_draw_image(&bigger, 0, 0, &pasted);
         free(picture.pixels);
         picture = bigger;
+        floating = (struct gui_canvas){lifted, pasted.width, pasted.height, pasted.width};
+        gui_fill(&floating, 0, 0, pasted.width, pasted.height, WHITE);
+        gui_draw_image(&floating, 0, 0, &pasted);
+        x = x + pasted.width > width ? width - pasted.width : x;
+        y = y + pasted.height > height ? height - pasted.height : y;
+        selection = (struct gui_rect){x, y, pasted.width, pasted.height};
         set_modified(true);
         printf("paint: pasted %dx%d\n", pasted.width, pasted.height);
+    } else {
+        free(pixels);
+        free(lifted);
     }
     gui_image_free(&pasted);
 }
@@ -197,7 +323,14 @@ static void save_file(const char *to) {
 }
 
 static void pick(bool saving) {
-    gui_picker_open(&picker, "/", saving ? (path[0] ? file_name() : "picture.png") : "", saving);
+    char folder[GUI_PATH_MAX];
+    const char *home = getenv("HOME");
+
+    if (path[0])
+        snprintf(folder, sizeof(folder), "%.*s", strrchr(path, '/') > path ? (int)(strrchr(path, '/') - path) : 1, path);
+    else
+        snprintf(folder, sizeof(folder), "%s/Pictures", home ? home : "");
+    gui_picker_open(&picker, folder, saving ? (path[0] ? file_name() : "picture.png") : "", saving);
     gui_post(&(struct gui_message){.type = GUI_REDRAW});
 }
 
@@ -241,6 +374,8 @@ static void line(struct gui_canvas *c, int x0, int y0, int x1, int y1, uint32_t 
 }
 
 static void box(struct gui_canvas *c, int x0, int y0, int x1, int y1, uint32_t with) {
+    if (filled)
+        gui_fill(c, x0 < x1 ? x0 : x1, y0 < y1 ? y0 : y1, abs(x1 - x0) + 1, abs(y1 - y0) + 1, with);
     line(c, x0, y0, x1, y0, with);
     line(c, x1, y0, x1, y1, with);
     line(c, x1, y1, x0, y1, with);
@@ -250,6 +385,12 @@ static void box(struct gui_canvas *c, int x0, int y0, int x1, int y1, uint32_t w
 static void oval(struct gui_canvas *c, int x0, int y0, int x1, int y1, uint32_t with) {
     double cx = (x0 + x1) / 2.0, cy = (y0 + y1) / 2.0, rx = abs(x1 - x0) / 2.0, ry = abs(y1 - y0) / 2.0;
     int steps = 8 + (int)(2 * (rx + ry)), px = (int)(cx + rx), py = (int)cy;
+
+    for (int y = (int)ceil(cy - ry); filled && ry > 0 && y <= cy + ry; y++) {
+        double half = rx * sqrt(1 - ((y - cy) / ry) * ((y - cy) / ry));
+
+        gui_fill(c, (int)lround(cx - half), y, (int)lround(2 * half) + 1, 1, with);
+    }
 
     for (int i = 1; i <= steps; i++) {
         double a = 2 * M_PI * i / steps;
@@ -317,6 +458,10 @@ static void shape(struct gui_canvas *c, int x, int y) {
         oval(c, start_x, start_y, x, y, colour);
 }
 
+static size_t bytes_of(const struct gui_canvas *c) {
+    return (size_t)c->width * c->height * sizeof(uint32_t);
+}
+
 // Says where something is when it moves, for tests.
 static void report(int index, const char *what, struct gui_rect r) {
     static struct gui_rect places[TOOLS + 2];
@@ -344,11 +489,83 @@ static int picture_y(int y) {
     return (int)floor((y - view.y + scroll_y) / zooms[zoom_index]);
 }
 
+static int clamp(int v, int low, int high) {
+    return v < low ? low : v > high ? high : v;
+}
+
+// Selecting drags out a rectangle, and dragging what's selected lifts and moves it.
+static void use_select(struct gui_ui *ui, int x, int y, bool on) {
+    if (ui->mouse_pressed && on && !ui->mouse_in_popup) {
+        if (selection.width && inside(selection, x, y)) {
+            if (!floating.pixels)
+                lift();
+            moving = true;
+            grab_x = x - selection.x;
+            grab_y = y - selection.y;
+        } else {
+            put_down();
+            selecting = true;
+            start_x = x;
+            start_y = y;
+        }
+    }
+    if (selecting) {
+        int cx = clamp(x, 0, picture.width - 1), cy = clamp(y, 0, picture.height - 1);
+
+        selection = (struct gui_rect){start_x < cx ? start_x : cx, start_y < cy ? start_y : cy, abs(cx - start_x) + 1,
+                                      abs(cy - start_y) + 1};
+    }
+    if (moving) {
+        selection.x = x - grab_x;
+        selection.y = y - grab_y;
+    }
+    if (!ui->mouse_down && selecting) {
+        selecting = false;
+        if (selection.width < 2 && selection.height < 2)
+            selection = (struct gui_rect){0};
+        else
+            printf("paint: selected %d %d %d %d\n", selection.x, selection.y, selection.width, selection.height);
+    }
+    if (!ui->mouse_down && moving) {
+        moving = false;
+        printf("paint: moved to %d %d\n", selection.x, selection.y);
+    }
+}
+
+static int text_scale(void) {
+    return 1 + size / 8;
+}
+
+static void put_words(void) {
+    if (words[0]) {
+        save_undo();
+        gui_text(&picture, text_x, text_y, words, colour, text_scale());
+        set_modified(true);
+        printf("paint: wrote %s at %d %d\n", words, text_x, text_y);
+    }
+    typing = false;
+    words[0] = '\0';
+}
+
 // The mouse on the picture uses the tool.
 static void use_tool(struct gui_ui *ui) {
     int x = picture_x(ui->mouse_x), y = picture_y(ui->mouse_y);
     bool on = x >= 0 && y >= 0 && x < picture.width && y < picture.height && inside(view, ui->mouse_x, ui->mouse_y);
 
+    if (tool == SELECT) {
+        use_select(ui, x, y, on);
+        return;
+    }
+    if (ui->mouse_pressed && on && !ui->mouse_in_popup && tool == TEXT) {
+        put_words();
+        put_down();
+        typing = typing_focus = true;
+        text_x = x;
+        text_y = y;
+        return;
+    }
+    if (ui->mouse_pressed && on && !ui->mouse_in_popup && selection.width)
+        put_down();
     if (ui->mouse_pressed && on && !ui->mouse_in_popup) {
         if (tool == PICKER) {
             choose_colour(picture.pixels[(long)y * picture.stride + x]);
@@ -458,46 +675,142 @@ static void show_picture(struct gui_ui *ui, struct gui_rect area) {
                              shown_height < view.height ? shown_height : view.height});
     if (dragging_bar < 0)
         use_tool(ui);
-    if (drawing && tool != PENCIL && tool != ERASER) {
+
+    // A shape being drawn, what's lifted and words being typed show on a copy.
+    bool over = (drawing && tool != PENCIL && tool != ERASER) || floating.pixels || (typing && words[0]);
+
+    if (over) {
         size_t bytes = (size_t)picture.width * picture.height * sizeof(uint32_t);
 
         if (preview.width != picture.width || preview.height != picture.height) {
             free(preview.pixels);
             preview = (struct gui_canvas){malloc(bytes), picture.width, picture.height, picture.width};
         }
-        if (preview.pixels) {
-            memcpy(preview.pixels, picture.pixels, bytes);
+        over = preview.pixels;
+    }
+    if (over) {
+        memcpy(preview.pixels, picture.pixels, bytes_of(&picture));
+        if (drawing)
             shape(&preview, picture_x(ui->mouse_x), picture_y(ui->mouse_y));
-            draw_zoomed(&preview);
-            return;
+        if (floating.pixels)
+            gui_copy(&preview, selection.x, selection.y, &floating, 0, 0, floating.width, floating.height);
+        if (typing)
+            gui_text(&preview, text_x, text_y, words, colour, text_scale());
+    }
+    draw_zoomed(over ? &preview : &picture);
+
+    // What's selected has a dashed border.
+    if (selection.width) {
+        struct gui_canvas *c = &window->canvas;
+        int x0 = view.x + zoomed(selection.x) - scroll_x - 1, y0 = view.y + zoomed(selection.y) - scroll_y - 1;
+        int x1 = view.x + zoomed(selection.x + selection.width) - scroll_x, y1 = view.y + zoomed(selection.y + selection.height) - scroll_y;
+        struct gui_canvas clip = {c->pixels + (long)view.y * c->stride + view.x, view.width, view.height, c->stride};
+
+        for (int x = x0; x <= x1; x++) {
+            uint32_t dash = (x / 4) % 2 ? WHITE : 0;
+
+            gui_fill(&clip, x - view.x, y0 - view.y, 1, 1, dash);
+            gui_fill(&clip, x - view.x, y1 - view.y, 1, 1, dash);
+        }
+        for (int y = y0; y <= y1; y++) {
+            uint32_t dash = (y / 4) % 2 ? WHITE : 0;
+
+            gui_fill(&clip, x0 - view.x, y - view.y, 1, 1, dash);
+            gui_fill(&clip, x1 - view.x, y - view.y, 1, 1, dash);
         }
     }
-    draw_zoomed(&picture);
+}
+
+static void new_file(void) {
+    if (new_picture(WIDTH, HEIGHT)) {
+        path[0] = '\0';
+        modified = true;
+        set_modified(false);
+        printf("paint: new picture\n");
+    }
+}
+
+// Does what was asked for, or asks first if there are changes to lose.
+static void go_ahead(int action) {
+    if (modified) {
+        asking = action;
+        printf("paint: asking about changes\n");
+        return;
+    }
+    asking = NOTHING;
+    if (action == NEW)
+        new_file();
+    else if (action == OPEN)
+        pick(false);
+    else if (action == CLOSE)
+        quitting = true;
+}
+
+static void answer(int button) {
+    int action = asking;
+
+    asking = NOTHING;
+    if (button == 1 && path[0]) {
+        save_file(path);
+        if (!modified)
+            go_ahead(action);
+    } else if (button == 1) {
+        after_save = action;
+        pick(true);
+    } else if (button == 2) {
+        modified = false;
+        go_ahead(action);
+    }
+}
+
+static void choose_tool(int to) {
+    if (tool == SELECT && to != SELECT)
+        put_down();
+    if (typing)
+        put_words();
+    tool = to;
+    printf("paint: tool %s\n", tool_names[to]);
 }
 
 static void painting(struct gui_ui *ui) {
+    static const char *const buttons[] = {"Save", "Don't save", "Cancel"};
+    int button;
+
+    if (asking && (button = gui_dialog(ui, "Save the changes to the picture?\nThey're lost if you don't.", buttons, 3)))
+        answer(button);
+    else if (!asking)
+        gui_help(ui, help);
     gui_menu_bar(ui);
     if (gui_menu(ui, "File")) {
-        if (gui_menu_item(ui, "New") && new_picture(WIDTH, HEIGHT)) {
-            path[0] = '\0';
-            modified = true;
-            set_modified(false);
-        }
+        if (gui_menu_item(ui, "New"))
+            go_ahead(NEW);
         if (gui_menu_item(ui, "Open..."))
-            pick(false);
+            go_ahead(OPEN);
         if (gui_menu_item(ui, "Save"))
             save();
         if (gui_menu_item(ui, "Save as..."))
             pick(true);
+        gui_menu_separator(ui);
+        if (gui_menu_item(ui, "Quit"))
+            go_ahead(CLOSE);
         gui_menu_end(ui);
     }
     if (gui_menu(ui, "Edit")) {
         if (gui_menu_item(ui, "Undo"))
             undo_last();
+        if (gui_menu_item(ui, "Redo"))
+            redo_last();
+        gui_menu_separator(ui);
+        if (gui_menu_item(ui, "Cut"))
+            cut_picture();
         if (gui_menu_item(ui, "Copy"))
             copy_picture();
         if (gui_menu_item(ui, "Paste"))
             paste_picture();
+        if (gui_menu_item(ui, "Clear"))
+            clear_selection();
+        if (gui_menu_item(ui, "Select all"))
+            select_all();
         gui_menu_end(ui);
     }
     if (gui_menu(ui, "View")) {
@@ -509,30 +822,49 @@ static void painting(struct gui_ui *ui) {
             zoom_by(0);
         gui_menu_end(ui);
     }
+    if (gui_menu(ui, "Help")) {
+        if (gui_menu_item(ui, "Keyboard shortcuts"))
+            gui_help_open(ui);
+        gui_menu_end(ui);
+    }
     for (int i = 0; i < ui->key_count; i++) {
         const struct key_event *k = &ui->keys[i];
 
-        if ((k->modifiers & KEY_MOD_CTRL) && (k->code == KEY_EQUALS || k->code == KEY_MINUS))
-            zoom_by(k->code == KEY_EQUALS ? 1 : -1);
+        if ((k->modifiers & KEY_MOD_CTRL) && (k->code == KEY_EQUALS || k->code == KEY_MINUS || k->code == 0x0B))
+            zoom_by(k->code == KEY_EQUALS ? 1 : k->code == KEY_MINUS ? -1 : 0);
     }
-    if (gui_shortcut(ui, 'z'))
+
+    // While typing words, the keys are theirs.
+    bool keys = !typing;
+
+    if (keys && gui_shortcut(ui, 'z'))
         undo_last();
-    if (gui_shortcut(ui, 'c'))
+    if (keys && (gui_shortcut(ui, 'y') || gui_shortcut(ui, 'Z')))
+        redo_last();
+    if (keys && gui_shortcut(ui, 'c'))
         copy_picture();
-    if (gui_shortcut(ui, 'v'))
+    if (keys && gui_shortcut(ui, 'x'))
+        cut_picture();
+    if (keys && gui_shortcut(ui, 'v'))
         paste_picture();
+    if (keys && gui_shortcut(ui, 'a'))
+        select_all();
+    if (keys && gui_key(ui, KEY_DELETE))
+        clear_selection();
+    if (keys && (gui_key(ui, KEY_ENTER) || gui_key(ui, KEY_ESCAPE)) && selection.width)
+        put_down();
     if (gui_shortcut(ui, 's'))
         save();
     if (gui_shortcut(ui, 'o'))
-        pick(false);
+        go_ahead(OPEN);
+    if (gui_shortcut(ui, 'n'))
+        go_ahead(NEW);
 
     for (int i = 0; i < TOOLS; i++) {
         if (i)
             gui_same_line(ui);
-        if (gui_button(ui, tool_names[i])) {
-            tool = i;
-            printf("paint: tool %s\n", tool_names[i]);
-        }
+        if (gui_button(ui, tool_names[i]))
+            choose_tool(i);
         report(i, tool_names[i], gui_last_rect(ui));
         if (tool == (enum tool)i) {
             struct gui_rect r = gui_last_rect(ui);
@@ -561,7 +893,20 @@ static void painting(struct gui_ui *ui) {
             gui_fill(&window->canvas, r.x, r.y + r.height + 2, r.width, 3, ACCENT);
     }
     gui_same_line(ui);
-    gui_label(ui, "%s", status);
+    gui_checkbox(ui, "Filled", &filled);
+    gui_same_line(ui);
+    if (typing) {
+        if (typing_focus)
+            gui_set_focus(ui, WORDS, words);
+        typing_focus = false;
+        gui_textbox(ui, WORDS, words, sizeof(words));
+        if (gui_key(ui, KEY_ENTER))
+            put_words();
+        else if (gui_key(ui, KEY_ESCAPE))
+            typing = false;
+    } else {
+        gui_label(ui, "%s", status);
+    }
 
     struct gui_rect last = gui_last_rect(ui);
 
@@ -581,6 +926,10 @@ static void frame(struct gui_ui *ui) {
             save_file(picker.path);
         else if (result == GUI_PICKED)
             open_file(picker.path);
+        if (result == GUI_PICKED && saving && !modified && after_save)
+            go_ahead(after_save);
+        if (result)
+            after_save = NOTHING;
         if (result)
             gui_post(&(struct gui_message){.type = GUI_REDRAW});
     }
@@ -615,11 +964,8 @@ int main(int argc, char **argv) {
 
         if (opening)
             open_file(dropped);
-        if (e.type == GUI_CLOSE) {
-            quitting = !modified || closing;
-            closing = true;
-            snprintf(status, sizeof(status), "Not saved: close again to lose it");
-        }
+        if (e.type == GUI_CLOSE)
+            go_ahead(CLOSE);
         if (gui_ui_event(&ui, &e) || opening || e.type == GUI_CLOSE)
             frame(&ui);
     }

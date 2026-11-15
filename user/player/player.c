@@ -1,6 +1,7 @@
 #include <audio.h>
 #include <audio_types.h>
 #include <dirent.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <gui.h>
 #include <pthread.h>
@@ -17,6 +18,7 @@
 #define PLAYLIST "##playlist"
 #define POSITION "##position"
 #define VOLUME "Volume##volume"
+#define NOW_PLAYING "/tmp/now-playing" // for wm's sound panel
 
 // What the window and the thread that plays share, under lock. The window asks
 // for things, and the thread says how it's going.
@@ -39,6 +41,24 @@ static struct {
 static char tracks[MAX_TRACKS][GUI_PATH_MAX];
 static const char *names[MAX_TRACKS];
 static int track_count, current = -1, selected;
+static bool shuffle;
+static enum { REPEAT_OFF, REPEAT_ALL, REPEAT_ONE } repeat;
+static const char *const repeat_names[] = {"Repeat: off", "Repeat: all", "Repeat: one"};
+
+// Says what's playing, for the sound panel, or that nothing is.
+static void tell_wm(bool paused) {
+    FILE *f;
+
+    if (current < 0) {
+        unlink(NOW_PLAYING);
+    } else if ((f = fopen(NOW_PLAYING, "w"))) {
+        fprintf(f, "%s %s\n", paused ? "Paused:" : "Playing:", names[current]);
+        fclose(f);
+    } else {
+        printf("player: can't write %s: %s\n", NOW_PLAYING, strerror(errno));
+    }
+}
+
 static struct gui_window *window;
 static struct gui_file_picker picker;
 
@@ -87,6 +107,8 @@ static void play(const char *path, unsigned ask) {
     pthread_mutex_lock(&lock);
     if (!f || fd < 0) {
         snprintf(shared.error, sizeof(shared.error), "Can't play it: %s", f ? "there's no sound card" : audio_error());
+        printf("player: %s\n", shared.error);
+        fflush(stdout);
         shared.finished = true;
         pthread_mutex_unlock(&lock);
         if (f)
@@ -212,6 +234,20 @@ static void choose(int track) {
         snprintf(title, sizeof(title), "%s - Player", names[track]);
         gui_set_title(window, title);
     }
+    tell_wm(false);
+}
+
+// The track after this one: any other at random when shuffling, round to the
+// first after the last when repeating all, or -1 at the end.
+static int next_track(void) {
+    if (shuffle && track_count > 1) {
+        int next = rand() % (track_count - 1);
+
+        return next >= current ? next + 1 : next;
+    }
+    if (current + 1 < track_count)
+        return current + 1;
+    return repeat == REPEAT_ALL && track_count ? 0 : -1;
 }
 
 static void add_track(const char *path) {
@@ -285,6 +321,7 @@ static void toggle_pause(void) {
     pthread_mutex_lock(&lock);
     shared.paused = !shared.paused;
     printf("player: %s\n", shared.paused ? "paused" : "playing again");
+    tell_wm(shared.paused);
     pthread_cond_broadcast(&changed);
     pthread_mutex_unlock(&lock);
 }
@@ -364,8 +401,8 @@ static void frame(struct gui_ui *ui) {
         choose(-1);
     report(ui, "stop");
     gui_same_line(ui);
-    if (gui_button(ui, "Next") && current + 1 < track_count)
-        choose(current + 1);
+    if (gui_button(ui, "Next") && next_track() >= 0)
+        choose(next_track());
     report(ui, "next");
     gui_same_line(ui);
     if (gui_button(ui, "Open...")) {
@@ -379,6 +416,16 @@ static void frame(struct gui_ui *ui) {
         ui->again = true;
     }
     report(ui, "open");
+    if (gui_checkbox(ui, "Shuffle", &shuffle))
+        printf("player: shuffle %s\n", shuffle ? "on" : "off");
+    report(ui, "shuffle");
+    gui_same_line(ui);
+    if (gui_button_sized(ui, repeat_names[repeat], 12 * GUI_CHAR_WIDTH + 14, 0)) {
+        repeat = (repeat + 1) % 3;
+        printf("player: %s\n", repeat_names[repeat]);
+    }
+    report(ui, "repeat");
+    gui_same_line(ui);
     if (gui_slider(ui, VOLUME, &volume, 0, 100)) {
         pthread_mutex_lock(&lock);
         shared.volume = volume;
@@ -416,15 +463,20 @@ static void next_if_finished(void) {
     if (!finished)
         return;
     printf("player: finished %s\n", names[current]);
-    if (current + 1 < track_count) {
-        choose(current + 1);
-        gui_notify(window, "Now playing", names[current]);
+
+    int next = repeat == REPEAT_ONE ? current : next_track();
+
+    if (next >= 0) {
+        choose(next);
+        if (next != current || repeat != REPEAT_ONE)
+            gui_notify(window, "Now playing", names[current]);
     } else {
         pthread_mutex_lock(&lock);
         shared.path[0] = '\0';
         shared.asked++;
         pthread_mutex_unlock(&lock);
         current = -1;
+        tell_wm(false);
     }
 }
 
@@ -462,6 +514,7 @@ int main(int argc, char **argv) {
     frame(&ui);
     printf("player: ready\n");
     fflush(stdout);
+    srand((unsigned)getpid());
     while (gui_next_event(&e) && e.type != GUI_CLOSE) {
         if (e.type == GUI_TIMER)
             next_if_finished();
@@ -478,6 +531,8 @@ int main(int argc, char **argv) {
         if (gui_ui_event(&ui, &e))
             frame(&ui);
     }
+    current = -1;
+    tell_wm(false);
     gui_destroy_window(window);
     return 0;
 }

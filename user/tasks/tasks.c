@@ -11,6 +11,8 @@
 #define FILE_MAX 2048
 #define ROW_MAX 96
 #define UPDATE_MS 1500
+#define GRAPH_HEIGHT 60
+#define SAMPLES 120 // of the CPU and memory, a minute's worth at most shown
 
 // What's running, how busy each is, and how much memory each has, updated every
 // UPDATE_MS, with buttons to end one.
@@ -22,12 +24,18 @@ struct process {
 
 static struct process processes[MAX_PROCESSES], last[MAX_PROCESSES];
 static int count, last_count, selected = -1, selected_pid = -1, sort;
+static bool reversed, confirming;
+static int cpu_samples[SAMPLES], memory_samples[SAMPLES], samples;
 static long ticks, idle, cpus;
 static int cpu_percent;
 static long memory_total, memory_used;
 static char rows[MAX_PROCESSES][ROW_MAX], status[96];
 static const char *row_pointers[MAX_PROCESSES];
 static const char *const sorts[] = {"CPU", "Memory", "Name", "PID"};
+
+// The columns, as wide as the rows' text, which sort by them when clicked.
+static const char *const headers[] = {"PID", "Name", "CPU", "Memory"};
+static const int header_sorts[] = {3, 2, 0, 1}, header_widths[] = {56, 224, 64, 88};
 
 static bool read_text(const char *path, char *out, size_t size) {
     int fd = open(path, O_RDONLY);
@@ -66,7 +74,8 @@ static int compare(const void *left, const void *right) {
            : sort == 2 ? strcmp(a->name, b->name)
                        : 0;
 
-    return by ? by : a->pid - b->pid;
+    by = by ? by : a->pid - b->pid;
+    return reversed ? -by : by;
 }
 
 static void read_system(long *elapsed) {
@@ -86,6 +95,13 @@ static void read_system(long *elapsed) {
         memory_total = atol(field(text, "MemTotal"));
         memory_used = memory_total - atol(field(text, "MemFree"));
     }
+    if (samples == SAMPLES) {
+        memmove(cpu_samples, cpu_samples + 1, (SAMPLES - 1) * sizeof(int));
+        memmove(memory_samples, memory_samples + 1, (SAMPLES - 1) * sizeof(int));
+        samples--;
+    }
+    cpu_samples[samples] = cpu_percent;
+    memory_samples[samples++] = memory_total ? (int)(memory_used * 100 / memory_total) : 0;
 }
 
 static void format_size(long kb, char out[16]) {
@@ -163,7 +179,7 @@ static void end(bool force) {
 }
 
 static void report(struct gui_ui *ui, int index, const char *what) {
-    static struct gui_rect places[4];
+    static struct gui_rect places[8];
     struct gui_rect r = gui_last_rect(ui);
 
     if (memcmp(&places[index], &r, sizeof(r)))
@@ -171,30 +187,82 @@ static void report(struct gui_ui *ui, int index, const char *what) {
     places[index] = r;
 }
 
+// The CPU, in the accent colour, and memory, in green, over the last SAMPLES updates.
+static void graph(struct gui_ui *ui) {
+    struct gui_settings settings;
+    struct gui_rect r = gui_space(ui, 0, GRAPH_HEIGHT);
+    struct gui_canvas *c = &ui->window->canvas;
+    int step = r.width / SAMPLES > 0 ? r.width / SAMPLES : 1;
+
+    gui_settings_load(&settings);
+    gui_fill(c, r.x, r.y, r.width, r.height, settings.light ? 0xFFFFFF : 0x181B21);
+    for (int i = 1; i < 4; i++)
+        gui_fill(c, r.x, r.y + r.height * i / 4, r.width, 1, settings.light ? 0xE2E5EB : 0x2B303B);
+    for (int i = 0; i < samples; i++) {
+        int x = r.x + r.width - (samples - i) * step;
+        int cpu = cpu_samples[i] * (r.height - 2) / 100, memory = memory_samples[i] * (r.height - 2) / 100;
+
+        if (x < r.x)
+            continue;
+        gui_fill(c, x, r.y + r.height - 1 - cpu, step, cpu + 1, 0x3D63DD);
+        gui_fill(c, x, r.y + r.height - 2 - memory, step, 2, 0x27AE60);
+    }
+}
+
+static void sort_by(int by) {
+    reversed = sort == by && !reversed;
+    sort = by;
+    printf("tasks: sort by %s%s\n", sorts[sort], reversed ? ", reversed" : "");
+    update();
+}
+
 static void frame(struct gui_ui *ui) {
-    char total[16], used[16];
+    static const char *const buttons[] = {"End task", "Cancel"};
+    char total[16], used[16], question[128];
 
     gui_ui_begin(ui);
+    if (confirming && selected >= 0) {
+        snprintf(question, sizeof(question), "End %s, process %d?\nWhat it hasn't saved is lost.", processes[selected].name,
+                 processes[selected].pid);
+
+        int button = gui_dialog(ui, question, buttons, 2);
+
+        if (button == 1)
+            end(false);
+        confirming = !button;
+    }
     format_size(memory_used, used);
     format_size(memory_total, total);
     gui_label(ui, "CPU %d%%    Memory %s of %s    %d processes", cpu_percent, used, total, count);
-    if (gui_button(ui, "End task") || gui_key(ui, KEY_DELETE))
-        end(false);
+    graph(ui);
+    if ((gui_button(ui, "End task") || gui_key(ui, KEY_DELETE)) && selected >= 0) {
+        confirming = true;
+        printf("tasks: asking to end %d\n", processes[selected].pid);
+        ui->again = true;
+    }
     report(ui, 0, "end");
     gui_same_line(ui);
     if (gui_button(ui, "Force end"))
         end(true);
     report(ui, 1, "force");
-    gui_same_line(ui);
-    if (gui_dropdown(ui, "Sort by", sorts, 4, &sort)) {
-        printf("tasks: sort by %s\n", sorts[sort]);
-        update();
-    }
-    report(ui, 3, "sort");
-    if (status[0])
+    if (status[0]) {
+        gui_same_line(ui);
         gui_label(ui, "%s", status);
-    gui_label(ui, "   PID  %-28s   CPU    Memory", "Name"); // over the list's padding
-    if (gui_list(ui, "##processes", row_pointers, count, &selected, 0) && selected >= 0) {
+    }
+
+    // The headers, over the list's columns.
+    for (int i = 0; i < 4; i++) {
+        char label[32];
+
+        snprintf(label, sizeof(label), "%s%s", headers[i],
+                 sort == header_sorts[i] ? (reversed ? " ^" : " v") : "");
+        if (i)
+            gui_same_line(ui);
+        if (gui_button_sized(ui, label, header_widths[i], 0))
+            sort_by(header_sorts[i]);
+        report(ui, 4 + i, headers[i]);
+    }
+    if (gui_list(ui, "##processes", row_pointers, count, &selected, 0) && selected >= 0 && !confirming) {
         selected_pid = processes[selected].pid;
         printf("tasks: selected %d %s\n", selected_pid, processes[selected].name);
     }
@@ -224,7 +292,7 @@ int main(int argc, char **argv) {
     frame(&ui);
     gui_timer_start(UPDATE_MS, true);
     while (gui_next_event(&e) && e.type != GUI_CLOSE) {
-        if (e.type == GUI_TIMER)
+        if (e.type == GUI_TIMER && !confirming)
             update();
         if (gui_ui_event(&ui, &e) || e.type == GUI_TIMER)
             frame(&ui);

@@ -131,7 +131,7 @@ try:
 
     # The resolution: picked from the list, 1280x800 fifth, then applied. Windows
     # stay where they were, as they fit.
-    tab('Appearance'); tab('Display')
+    tab('Sound'); tab('Apps'); tab('Appearance'); tab('Display')
     at = v.mark()
     mouse.click(*middle('resolution')); time.sleep(0.3)
     v.key('up'); v.key('up'); v.key('up'); v.key('ret'); time.sleep(0.5)

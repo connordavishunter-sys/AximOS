@@ -151,6 +151,8 @@ static void show_cursor(struct gui_ui *ui) {
     }
 }
 
+static bool ctrl_key(const struct key_event *k, char letter);
+
 bool gui_ui_event(struct gui_ui *ui, const struct gui_message *e) {
     switch (e->type) {
     case GUI_MOUSE_MOVE:
@@ -180,6 +182,11 @@ bool gui_ui_event(struct gui_ui *ui, const struct gui_message *e) {
             ui->wheel += e->wheel;
         return true;
     case GUI_KEY:
+        // Ctrl+Q quits every program, as closing its window does.
+        if (e->key.pressed && ctrl_key(&e->key, 'q') && !(e->key.modifiers & KEY_MOD_SHIFT)) {
+            gui_post(&(struct gui_message){.type = GUI_CLOSE, .window = ui->window->id});
+            return false;
+        }
         if (e->key.pressed && ui->key_count < GUI_UI_MAX_KEYS)
             ui->keys[ui->key_count++] = e->key;
         if (e->key.pressed)
@@ -227,7 +234,9 @@ void gui_ui_begin(struct gui_ui *ui) {
     ui->next_count = 0;
     ui->next_wheel_owner = 0;
     ui->next_menu_count = 0;
-    ui->popup_drawn = false;
+    ui->tab_owner = ui->next_tab_owner;
+    ui->next_tab_owner = 0;
+    ui->popup_drawn = ui->dimmed = false;
 
     // An open popup has the mouse when it's over it. A click anywhere else, or
     // Escape, closes it, and does nothing more, but a right-click can open another.
@@ -259,8 +268,8 @@ void gui_ui_begin(struct gui_ui *ui) {
     for (int i = 0; i < ui->key_count && ui->order_count; i++) {
         int at = -1;
 
-        if (ui->keys[i].code != KEY_TAB || (ui->keys[i].modifiers & KEY_MOD_CTRL))
-            continue; // Ctrl+Tab is for tabs
+        if (ui->keys[i].code != KEY_TAB || (ui->keys[i].modifiers & KEY_MOD_CTRL) || (ui->tab_owner && ui->focus == ui->tab_owner))
+            continue; // Ctrl+Tab is for tabs, and code takes Tab to indent
         for (int j = 0; j < ui->order_count; j++) {
             if (ui->order[j] == ui->focus)
                 at = j;
@@ -274,6 +283,16 @@ void gui_ui_begin(struct gui_ui *ui) {
 }
 
 void gui_ui_end(struct gui_ui *ui) {
+    // A dialog dims what's under it.
+    for (int y = 0; ui->dimmed && y < ui->window->canvas.height; y++) {
+        uint32_t *p = ui->window->canvas.pixels + (long)y * ui->window->canvas.stride;
+
+        for (int x = 0; x < ui->window->canvas.width; x++)
+            p[x] = (p[x] >> 1) & 0x7F7F7F;
+    }
+    if (!ui->dimmed)
+        ui->dialog_shown = false;
+
     // The popup goes back over whatever was drawn on it after.
     if (ui->popup_pixels) {
         struct gui_rect r = ui->popup_rect;
@@ -506,6 +525,10 @@ void gui_display(struct gui_ui *ui, const char *s, int height) {
 
     fill(ui, r.x, r.y, r.width, r.height, PANEL);
     text(ui, r.x + r.width - PADDING * 2 - gui_text_width(s, 2), r.y + (r.height - 2 * GUI_CHAR_HEIGHT) / 2, s, TEXT, 2);
+}
+
+struct gui_rect gui_space(struct gui_ui *ui, int width, int height) {
+    return place(ui, width ? width : room(ui), height);
 }
 
 int gui_room(const struct gui_ui *ui) {
@@ -1078,18 +1101,6 @@ static void push_clip(struct gui_ui *ui, struct gui_rect r, struct gui_rect *was
     ui->layout.clip = intersect(ui->layout.clip, r);
 }
 
-// Which line and column a point in text is at, for clicks.
-static size_t index_at(const char *s, int line, int column) {
-    size_t at = 0;
-
-    for (; line > 0 && s[line_end(s, at)]; line--)
-        at = line_end(s, at) + 1;
-
-    size_t end = line_end(s, at);
-
-    return at + (column < 0 ? 0 : (size_t)column < end - at ? (size_t)column : end - at);
-}
-
 // Part of a line of code, in runs of a colour each.
 static void draw_code(struct gui_ui *ui, int x, int y, const char *s, const uint8_t *kinds, int length) {
     char run[256];
@@ -1109,72 +1120,274 @@ void gui_select_text(struct gui_ui *ui, const char *label, size_t from, size_t t
 }
 
 bool gui_textarea(struct gui_ui *ui, const char *label, char *s, size_t size, int lines) {
-    return gui_code_area(ui, label, s, size, lines, NULL);
+    return gui_code_area(ui, label, s, size, lines, NULL, 0);
 }
 
-bool gui_code_area(struct gui_ui *ui, const char *label, char *s, size_t size, int lines, gui_highlighter *highlight) {
+// The rows text is shown in: a line each, or with wrapping, as many as each line
+// needs to fit in fits columns, broken after a space where there is one.
+struct row {
+    size_t start, length;
+};
+
+static int rows_of(const char *s, bool wrap, int fits, struct row **rows, int *capacity) {
+    int count = 0;
+
+    for (size_t at = 0;;) {
+        size_t end = line_end(s, at), from = at;
+
+        do {
+            size_t to = end;
+
+            if (wrap && fits > 0 && end - from > (size_t)fits) {
+                to = from + fits;
+                for (size_t i = to; i > from + 1; i--) {
+                    if (s[i - 1] == ' ') {
+                        to = i;
+                        break;
+                    }
+                }
+            }
+            if (count == *capacity) {
+                int more = *capacity ? 2 * *capacity : 256;
+                struct row *bigger = realloc(*rows, more * sizeof(**rows));
+
+                if (!bigger)
+                    return count;
+                *rows = bigger;
+                *capacity = more;
+            }
+            (*rows)[count++] = (struct row){from, to - from};
+            from = to;
+        } while (from < end);
+        if (!s[end])
+            return count;
+        at = end + 1;
+    }
+}
+
+// The row at is shown in: the last that starts at or before it.
+static int row_at(const struct row *rows, int count, size_t at) {
+    int low = 0, high = count - 1;
+
+    while (low < high) {
+        int middle = (low + high + 1) / 2;
+
+        if (rows[middle].start <= at)
+            low = middle;
+        else
+            high = middle - 1;
+    }
+    return low;
+}
+
+// A change made in one go, which undo takes back in one.
+static void begin_change(struct editing *e) {
+    history = history_of(e->s);
+    remember(e, false);
+}
+
+static void end_change(struct editing *e) {
+    history->hash = hash_of(e->s);
+}
+
+// Puts n of c at, if they fit, returning how many went in.
+static size_t put_at(struct editing *e, size_t at, const char *c, size_t n) {
+    size_t len = strlen(e->s);
+
+    n = len + n < e->size ? n : e->size - 1 - len;
+    memmove(e->s + at + n, e->s + at, len - at + 1);
+    memcpy(e->s + at, c, n);
+    return n;
+}
+
+// Tab and Shift+Tab indent and unindent the lines selected, by 4 spaces, or with
+// nothing across lines selected, Tab goes to the next multiple of 4.
+static bool indent(struct editing *e, bool out) {
+    size_t low, high;
+
+    selected_range(e, &low, &high);
+    if (!out && !memchr(e->s + low, '\n', high - low)) {
+        size_t column = low - line_start(e->s, low);
+
+        begin_change(e);
+        delete_selection(e);
+        *e->at = *e->anchor = *e->at + put_at(e, *e->at, "    ", 4 - column % 4);
+        end_change(e);
+        return true;
+    }
+
+    size_t first = line_start(e->s, low), last = high > low && e->s[high - 1] == '\n' ? high - 1 : high;
+    bool changed = false;
+
+    begin_change(e);
+    for (size_t at = first; at <= last;) {
+        size_t n = 0;
+
+        if (out) {
+            while (n < 4 && e->s[at + n] == ' ')
+                n++;
+            memmove(e->s + at, e->s + at + n, strlen(e->s + at + n) + 1);
+            last -= n;
+        } else if (e->s[at] != '\n' && e->s[at]) {
+            n = put_at(e, at, "    ", 4);
+            last += n;
+        }
+        changed |= n > 0;
+        at = line_end(e->s, at);
+        if (!e->s[at])
+            break;
+        at++;
+    }
+    *e->anchor = first;
+    *e->at = line_end(e->s, last);
+    end_change(e);
+    return changed;
+}
+
+// Enter starts the new line as far in as the one it's from, and further after a {.
+static bool new_line(struct editing *e) {
+    char spaces[128];
+    size_t start, n = 0;
+
+    begin_change(e);
+    delete_selection(e);
+    start = line_start(e->s, *e->at);
+    while (n < sizeof(spaces) - 5 && start + n < *e->at && (e->s[start + n] == ' ' || e->s[start + n] == '\t'))
+        n++;
+    memcpy(spaces + 1, e->s + start, n);
+    spaces[0] = '\n';
+    n++;
+    if (*e->at > start && e->s[*e->at - 1] == '{') {
+        memcpy(spaces + n, "    ", 4);
+        n += 4;
+    }
+    *e->at = *e->anchor = *e->at + put_at(e, *e->at, spaces, n);
+    end_change(e);
+    return true;
+}
+
+// Keys that work by rows rather than lines, or with flags: Up and Down, Page Up and
+// Page Down, Tab, and Enter. Returns whether it took the key, and sets *changed.
+static bool code_key(const struct key_event *k, struct editing *e, int flags, const struct row *rows, int count,
+                     int page, bool *changed) {
+    bool shift = k->modifiers & KEY_MOD_SHIFT, ctrl = k->modifiers & (KEY_MOD_CTRL | KEY_MOD_ALT);
+    int by = k->code == KEY_UP ? -1 : k->code == KEY_DOWN ? 1 : k->code == KEY_PAGE_UP ? -page
+           : k->code == KEY_PAGE_DOWN                    ? page : 0;
+
+    *changed = false;
+    if (ctrl)
+        return false;
+    if (by && ((flags & GUI_CODE_WRAP) || page == -by || page == by)) {
+        int row = row_at(rows, count, *e->at), to = row + by;
+        size_t column = *e->at - rows[row].start;
+
+        to = to < 0 ? 0 : to >= count ? count - 1 : to;
+        if (to == row)
+            *e->at = by < 0 ? 0 : strlen(e->s);
+        else
+            *e->at = rows[to].start + column_in(column, rows[to].length);
+        if (!shift)
+            *e->anchor = *e->at;
+        stop_typing(e->s);
+        return true;
+    }
+    if (!(flags & GUI_CODE_INDENT))
+        return false;
+    if (k->code == KEY_TAB)
+        return *changed = indent(e, shift), true;
+    if (k->code == KEY_ENTER)
+        return *changed = new_line(e), true;
+    return false;
+}
+
+static int digits(int n) {
+    int d = 1;
+
+    while (n >= 10) {
+        n /= 10;
+        d++;
+    }
+    return d;
+}
+
+bool gui_code_area(struct gui_ui *ui, const char *label, char *s, size_t size, int lines, gui_highlighter *highlight,
+                   int flags) {
     static uint8_t *kinds;
     static size_t kinds_size;
+    static struct row *rows;
+    static int capacity;
     uint32_t id = id_of(label);
     struct gui_scroll *scroll = scroll_of(ui, id);
     struct gui_rect frame, was;
     struct editing e = {s, size, &ui->text_cursor, &ui->text_anchor, true, false};
-    bool changed = false, moved = ui->reveal == id; // selected by gui_select_text
+    bool changed = false, moved = ui->reveal == id, wrap = flags & GUI_CODE_WRAP; // moved by gui_select_text
     int line_count = 1;
 
     framed(ui, label, lines > 0 ? lines * GUI_CHAR_HEIGHT + 2 * PADDING : height_left(ui, FRAME_HEIGHT), &frame);
     for (const char *p = s; *p; p++)
         line_count += *p == '\n';
-    scroll->content = line_count * GUI_CHAR_HEIGHT + 2 * PADDING;
     interact(ui, id, frame);
 
     bool focused = focusable(ui, id);
 
+    if (flags & GUI_CODE_INDENT)
+        ui->next_tab_owner = id;
     fill(ui, frame.x, frame.y, frame.width, frame.height, ui->hot == id || focused ? FRAME_HOT : FRAME);
 
+    // The scroll bar shows when the rows don't fit, which with wrapping depends on
+    // how wide they are, so that's as of last frame.
+    int gutter = flags & GUI_CODE_LINE_NUMBERS ? (digits(line_count) < 3 ? 3 : digits(line_count)) * GUI_CHAR_WIDTH + 12 : 0;
     struct gui_rect inner = scrolling(ui, id, scroll, frame);
-    int fits = (inner.width - 2 * PADDING) / GUI_CHAR_WIDTH;
+    int left = inner.x + gutter + PADDING, fits = (inner.width - gutter - 2 * PADDING) / GUI_CHAR_WIDTH;
+    int count = rows_of(s, wrap, fits, &rows, &capacity), page = inner.height / GUI_CHAR_HEIGHT - 1;
 
+    page = page < 1 ? 1 : page;
     if (over(ui, inner))
         ui->cursor = GUI_CURSOR_TEXT;
     own_cursor(ui, id, strlen(s));
 
     // Long lines scroll sideways, all together, to keep the cursor in sight.
-    size_t column = ui->text_cursor - line_start(s, ui->text_cursor);
-    int first = focused && (int)column >= fits ? (int)column - fits + 1 : 0;
+    int row = row_at(rows, count, ui->text_cursor);
+    size_t column = ui->text_cursor - rows[row].start;
+    int first = !wrap && focused && (int)column >= fits ? (int)column - fits + 1 : 0;
 
     // Dragging past the top or bottom scrolls, as the cursor goes out of sight.
-    int line = (ui->mouse_y - inner.y - PADDING + scroll->offset) / GUI_CHAR_HEIGHT;
+    int under = (ui->mouse_y - inner.y - PADDING + scroll->offset + GUI_CHAR_HEIGHT * 2) / GUI_CHAR_HEIGHT - 2;
 
-    if (ui->mouse_y < inner.y + PADDING)
-        line = (ui->mouse_y - inner.y - PADDING + scroll->offset - GUI_CHAR_HEIGHT + 1) / GUI_CHAR_HEIGHT;
-    if (!(ui->mouse_pressed && !over(ui, inner)))
-        moved = click_text(ui, id, &e,
-                           index_at(s, line, first + (ui->mouse_x - inner.x - PADDING + GUI_CHAR_WIDTH / 2) / GUI_CHAR_WIDTH));
+    under = under < 0 ? 0 : under >= count ? count - 1 : under;
+    if (!(ui->mouse_pressed && !over(ui, inner))) {
+        long at = first + (ui->mouse_x - left + GUI_CHAR_WIDTH / 2) / GUI_CHAR_WIDTH;
+
+        moved = click_text(ui, id, &e, rows[under].start + column_in(at < 0 ? 0 : at, rows[under].length)) || moved;
+    }
     for (int i = 0; focused && i < ui->key_count; i++) {
-        changed |= edit(&ui->keys[i], &e);
+        bool did;
+
+        if (code_key(&ui->keys[i], &e, flags, rows, count, page, &did))
+            changed |= did;
+        else
+            changed |= did = edit(&ui->keys[i], &e);
+        if (did)
+            count = rows_of(s, wrap, fits, &rows, &capacity);
         moved = true;
     }
-
-    // And down, when it moves with the keyboard.
-    int cursor_line = 0;
-
-    for (size_t i = 0; i < ui->text_cursor; i++)
-        cursor_line += s[i] == '\n';
+    scroll->content = count * GUI_CHAR_HEIGHT + 2 * PADDING;
     if (changed) {
         line_count = 1;
         for (const char *p = s; *p; p++)
             line_count += *p == '\n';
-        scroll->content = line_count * GUI_CHAR_HEIGHT + 2 * PADDING;
     }
+
+    // And down, when it moves with the keyboard.
+    row = row_at(rows, count, ui->text_cursor);
+    column = ui->text_cursor - rows[row].start;
     if (moved) {
-        int top = cursor_line * GUI_CHAR_HEIGHT, bottom = top + GUI_CHAR_HEIGHT + 2 * PADDING;
+        int top = row * GUI_CHAR_HEIGHT, bottom = top + GUI_CHAR_HEIGHT + 2 * PADDING;
 
         scroll->offset = top < scroll->offset ? top : bottom > scroll->offset + inner.height ? bottom - inner.height
                                                                                               : scroll->offset;
         clamp_scroll(scroll, inner.height);
-        column = ui->text_cursor - line_start(s, ui->text_cursor);
-        first = (int)column >= fits ? (int)column - fits + 1 : 0;
+        first = !wrap && (int)column >= fits ? (int)column - fits + 1 : 0;
     }
 
     if (highlight && strlen(s) + 1 > kinds_size) {
@@ -1188,34 +1401,50 @@ bool gui_code_area(struct gui_ui *ui, const char *label, char *s, size_t size, i
         highlight(s, kinds);
 
     push_clip(ui, inner, &was);
-    size_t at = 0;
+    if (gutter)
+        fill(ui, inner.x, inner.y, gutter, inner.height, PANEL);
 
-    for (int line = 0; line < line_count; line++) {
-        int y = inner.y + PADDING + line * GUI_CHAR_HEIGHT - scroll->offset;
-        size_t end = line_end(s, at);
+    int top = scroll->offset / GUI_CHAR_HEIGHT, line = 1;
 
-        bool seen = y + GUI_CHAR_HEIGHT > inner.y && y < inner.y + inner.height;
+    for (int r = 0; r < top && r < count; r++)
+        line += r + 1 < count && rows[r + 1].start > rows[r].start + rows[r].length;
+    for (int r = top; r < count; r++) {
+        int y = inner.y + PADDING + r * GUI_CHAR_HEIGHT - scroll->offset;
+        const struct row *w = &rows[r];
+        bool ends_line = r + 1 == count || rows[r + 1].start > w->start + w->length;
+
+        if (y >= inner.y + inner.height)
+            break;
+        if (gutter && (r == 0 || rows[r - 1].start + rows[r - 1].length < w->start)) {
+            char number[16];
+
+            snprintf(number, sizeof(number), "%d", line);
+            text(ui, inner.x + gutter - 6 - gui_text_width(number, 1), y, number, r == row ? TEXT : DIM_TEXT, 1);
+        }
 
         // A selected line break shows as a space at the end of its line.
-        if (seen && focused && (int)(end - at) + 1 > first)
-            draw_selection(ui, &e, inner.x + PADDING, y, at + first, end - at + 1 - first);
-        int length = (int)(end - at) - first < fits ? (int)(end - at) - first : fits;
+        int shown = (int)w->length + ends_line;
 
-        if (seen && length > 0 && highlight)
-            draw_code(ui, inner.x + PADDING, y, s + at + first, kinds + at + first, length);
-        else if (seen && length > 0)
-            draw_fitted(ui, inner.x + PADDING, y, fits * GUI_CHAR_WIDTH, s + at + first, length, TEXT);
-        at = end + 1;
+        if (focused && shown > first)
+            draw_selection(ui, &e, left, y, w->start + first, shown - first);
+
+        int length = (int)w->length - first < fits ? (int)w->length - first : fits;
+
+        if (length > 0 && highlight)
+            draw_code(ui, left, y, s + w->start + first, kinds + w->start + first, length);
+        else if (length > 0)
+            draw_fitted(ui, left, y, fits * GUI_CHAR_WIDTH, s + w->start + first, length, TEXT);
+        line += ends_line;
     }
     if (focused) {
-        int x = inner.x + PADDING + ((int)column - first) * GUI_CHAR_WIDTH;
-        int y = inner.y + PADDING + cursor_line * GUI_CHAR_HEIGHT - scroll->offset;
+        int x = left + ((int)column - first) * GUI_CHAR_WIDTH;
+        int y = inner.y + PADDING + row * GUI_CHAR_HEIGHT - scroll->offset;
 
         ui->text_drawn = true;
         if (!ui->cursor_hidden)
             fill(ui, x, y - 1, 1, GUI_CHAR_HEIGHT + 2, TEXT);
     } else if (!*s) {
-        text(ui, inner.x + PADDING, inner.y + PADDING, "...", DIM_TEXT, 1);
+        text(ui, left, inner.y + PADDING, "...", DIM_TEXT, 1);
     }
     ui->layout.clip = was;
     if (focused)
@@ -1411,7 +1640,7 @@ int gui_list_icons(struct gui_ui *ui, const char *label, const char *const *item
             moved = false;
         activated |= code == KEY_ENTER && count;
     }
-    *selected = *selected >= count ? count - 1 : *selected < 0 ? 0 : *selected;
+    *selected = *selected >= count ? count - 1 : *selected < -1 || (*selected == -1 && moved) ? 0 : *selected;
 
     fill(ui, frame.x, frame.y, frame.width, frame.height, PANEL);
 
@@ -1653,16 +1882,126 @@ bool gui_context_menu(struct gui_ui *ui, const char *label, struct gui_rect area
     return true;
 }
 
+// A box over the middle of the window, which takes the mouse and the keyboard from
+// everything after it in the frame, and leaves the rest dimmed.
+int gui_dialog(struct gui_ui *ui, const char *message, const char *const *buttons, int count) {
+    struct gui_rect all = whole(ui);
+    int lines = 1, widest = 0, row = 0, buttons_width = 0, result = 0;
+
+    for (const char *p = message; *p; p++, row++) {
+        if (*p == '\n') {
+            lines++;
+            row = -1;
+        }
+        widest = row + 1 > widest ? row + 1 : widest;
+    }
+    for (int i = 0; i < count; i++)
+        buttons_width += (shown_length(buttons[i]) * GUI_CHAR_WIDTH + 24 > 80 ? shown_length(buttons[i]) * GUI_CHAR_WIDTH + 24 : 80) + SPACING;
+
+    int width = widest * GUI_CHAR_WIDTH > buttons_width ? widest * GUI_CHAR_WIDTH : buttons_width;
+    struct gui_rect r = {0, 0, width + 2 * 20 < 320 ? 320 : width + 2 * 20, lines * GUI_CHAR_HEIGHT + 2 * 20 + FRAME_HEIGHT + 16};
+
+    r.x = (all.width - r.width) / 2;
+    r.y = (all.height - r.height) / 2;
+    r.y = r.y < 0 ? 0 : r.y;
+
+    // Left and Right, or Tab, move between the buttons, Enter presses the one chosen,
+    // and Escape the last.
+    if (!ui->dialog_shown)
+        ui->dialog_choice = 0;
+    for (int i = 0; i < ui->key_count; i++) {
+        uint16_t code = ui->keys[i].code;
+        bool back = code == KEY_LEFT || (code == KEY_TAB && (ui->keys[i].modifiers & KEY_MOD_SHIFT));
+
+        if (code == KEY_LEFT || code == KEY_RIGHT || code == KEY_TAB)
+            ui->dialog_choice = (ui->dialog_choice + (back ? count - 1 : 1)) % count;
+        else if (code == KEY_ENTER || code == KEY_SPACE)
+            result = ui->dialog_choice + 1;
+        else if (code == KEY_ESCAPE)
+            result = count;
+    }
+
+    struct gui_rect was = ui->layout.clip;
+
+    ui->layout.clip = all;
+    ui->popup = 0;
+    fill(ui, r.x, r.y, r.width, r.height, POPUP);
+    draw_border(ui, r, SEPARATOR);
+
+    const char *line = message;
+
+    for (int i = 0; i < lines; i++) {
+        const char *end = strchr(line, '\n');
+        int length = end ? (int)(end - line) : (int)strlen(line);
+
+        draw_fitted(ui, r.x + 20, r.y + 20 + i * GUI_CHAR_HEIGHT, r.width - 40, line, length, TEXT);
+        line += length + 1;
+    }
+
+    int x = r.x + r.width - 20 + SPACING, y = r.y + r.height - 20 - FRAME_HEIGHT;
+
+    for (int i = count - 1; i >= 0; i--) {
+        int label_width = shown_length(buttons[i]) * GUI_CHAR_WIDTH;
+        int w = label_width + 24 > 80 ? label_width + 24 : 80;
+        struct gui_rect b = {x -= w + SPACING, y, w, FRAME_HEIGHT};
+        bool is_over = contains(b, ui->mouse_x, ui->mouse_y);
+
+        if (is_over && ui->mouse_pressed)
+            ui->dialog_choice = i;
+        if (is_over && ui->mouse_released && ui->dialog_choice == i)
+            result = i + 1;
+        fill(ui, b.x, b.y, b.width, b.height, i == ui->dialog_choice ? ACCENT : is_over ? FRAME_HOT : FRAME);
+        draw_label(ui, b.x + (w - label_width) / 2, b.y + PADDING, buttons[i], i == ui->dialog_choice ? ON_ACCENT : TEXT);
+    }
+    ui->layout.clip = was;
+
+    // Kept, to go back over what comes after, and everything else is left without input.
+    free(ui->popup_pixels);
+    ui->popup_rect = intersect(r, all);
+    ui->popup_pixels = malloc((size_t)ui->popup_rect.width * ui->popup_rect.height * sizeof(uint32_t));
+    for (int i = 0; ui->popup_pixels && i < ui->popup_rect.height; i++)
+        memcpy(ui->popup_pixels + (long)i * ui->popup_rect.width,
+               ui->window->canvas.pixels + (long)(ui->popup_rect.y + i) * ui->window->canvas.stride + ui->popup_rect.x,
+               ui->popup_rect.width * sizeof(uint32_t));
+    ui->dialog_shown = ui->dimmed = true;
+    ui->mouse_in_popup = true;
+    ui->mouse_pressed = ui->mouse_released = ui->right_pressed = false;
+    ui->key_count = ui->menu_key_count = 0;
+    ui->wheel = 0;
+    ui->again |= result != 0;
+    if (result)
+        ui->dialog_shown = false;
+    return result;
+}
+
+// F1, or gui_help_open, shows the help in a dialog until it's closed.
+bool gui_help(struct gui_ui *ui, const char *help) {
+    static const char *const close[] = {"Close"};
+
+    if (gui_key(ui, KEY_F1))
+        ui->help_open = !ui->help_open;
+    if (ui->help_open && gui_dialog(ui, help, close, 1))
+        ui->help_open = false;
+    return ui->help_open;
+}
+
+void gui_help_open(struct gui_ui *ui) {
+    ui->help_open = true;
+    ui->again = true;
+}
+
 int gui_tabs(struct gui_ui *ui, const char *const *names, int count, int *active, int *closing) {
     int width = whole(ui).width, plus = closing ? FRAME_HEIGHT : 0, result = 0;
     int tab = count ? (width - 8 - (closing ? 4 + plus : 0)) / count : TAB_WIDTH;
     uint32_t id = id_of("##tabs");
 
+    int top = ui->layout.y - MARGIN; // under a menu bar, if there's one
+
     tab = tab < TAB_WIDTH ? tab : TAB_WIDTH;
-    fill(ui, 0, 0, width, TAB_BAR, FRAME);
-    fill(ui, 0, TAB_BAR, width, 1, SEPARATOR);
+    fill(ui, 0, top, width, TAB_BAR, FRAME);
+    fill(ui, 0, top + TAB_BAR, width, 1, SEPARATOR);
     for (int i = 0; i < count; i++) {
-        struct gui_rect r = {4 + i * tab, 4, tab - 2, TAB_BAR - 4};
+        struct gui_rect r = {4 + i * tab, top + 4, tab - 2, TAB_BAR - 4};
         struct gui_rect x = {r.x + r.width - TAB_CLOSE - 4, r.y + (r.height - TAB_CLOSE) / 2, closing ? TAB_CLOSE : 0,
                              TAB_CLOSE};
         bool on_close = closing && over(ui, x), on_tab = over(ui, r) && !on_close;
@@ -1692,7 +2031,7 @@ int gui_tabs(struct gui_ui *ui, const char *const *names, int count, int *active
             text(ui, x.x + (TAB_CLOSE - GUI_CHAR_WIDTH) / 2, x.y, "x", on_close ? TEXT : DIM_TEXT, 1);
     }
 
-    struct gui_rect add = {4 + count * tab + 2, 4 + (TAB_BAR - plus) / 2, plus, plus - 4};
+    struct gui_rect add = {4 + count * tab + 2, top + 4 + (TAB_BAR - plus) / 2, plus, plus - 4};
 
     if (closing && interact(ui, id, add))
         result = GUI_TABS_NEW;
@@ -1715,9 +2054,30 @@ int gui_tabs(struct gui_ui *ui, const char *const *names, int count, int *active
         *closing = *active;
         result = GUI_TABS_CLOSE;
     }
-    ui->layout.y = TAB_BAR + 1 + MARGIN;
+    ui->layout.y = top + TAB_BAR + 1 + MARGIN;
     ui->again |= result != 0; // what's under the tabs is another folder now
     return result;
+}
+
+void gui_column_begin(struct gui_ui *ui, int width) {
+    int x, y;
+
+    next_spot(ui, &x, &y);
+    ui->column_saved = ui->layout;
+    ui->column_top = y;
+    ui->layout.left = ui->layout.x = ui->layout.line_end = x;
+    ui->layout.right = x + width;
+    ui->layout.y = y;
+    ui->layout.line_height = 0;
+    ui->layout.same_line = false;
+}
+
+void gui_column_end(struct gui_ui *ui) {
+    int width = ui->layout.right - ui->layout.left, bottom = ui->layout.y + ui->layout.line_height;
+
+    ui->layout = ui->column_saved;
+    place(ui, width, bottom - ui->column_top);
+    ui->layout.same_line = true;
 }
 
 void gui_scroll_begin(struct gui_ui *ui, const char *label, int height) {
