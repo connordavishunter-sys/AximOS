@@ -66,6 +66,17 @@ try:
     w, h, px = v.screenshot()
     check('takes them away', px(*under) == DESKTOP, hex(px(*under)))
 
+    # Text is smoothed, with shades between the clock's colour and the taskbar's,
+    # until Smooth text is turned off.
+    shades = lambda px: len({px(x, y) for x in range(1220, 1270) for y in range(778, 794)})
+    check('smooth text to start with', shades(px) > 4, shades(px))
+    at = v.mark()
+    mouse.click(*middle('smooth', 6))
+    check('turning smooth text off', v.wait('settings: text sharp', 5, at), v.text(at))
+    mouse.to(1270, 700); time.sleep(0.5)
+    w, h, px = v.screenshot()
+    check('leaves the clock in two colours', shades(px) == 2, shades(px))
+
     # The light theme, which widgets, open beside it, takes up at once.
     check('dark to start with', px(85, 300) == DARK_BACKGROUND, hex(px(85, 300)))
     at = v.mark()
@@ -154,7 +165,7 @@ try:
     v.key('meta_l-shift-q'); time.sleep(1)
     o = v.run('cat /system/etc/gui.conf /system/etc/timezone /system/etc/wallpaper; date +%Z')
     check('the settings are saved', all(s in o for s in ('theme light', 'shadows off', 'clock 12', 'resolution 1024x768',
-                                                         'repeat 500 0')),
+                                                         'repeat 500 0', 'text sharp')),
           o)
     check('and the time zone', 'Asia/Tokyo' in o and 'JST' in o, o)
     check('and the wallpaper', '/system/share/wallpapers/ocean.jpg' in o, o)

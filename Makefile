@@ -138,6 +138,11 @@ $(BUILD)/user/libgui_pic/%.o: user/libgui/%.c
 	@mkdir -p $(@D)
 	$(CC) $(filter-out -fno-pic -fno-pie,$(USER_CFLAGS)) -fPIC -c $< -o $@
 
+$(BUILD)/user/libgui_pic/font.o: ports/dist/stb_truetype.h
+$(BUILD)/user/libgui_pic/font.o: USER_CFLAGS += -isystem ports/dist
+ports/dist/stb_truetype.h: ports/build.sh
+	ports/build.sh stb
+
 $(LIBGUI_SO): $(LIBGUI_SO_OBJS) $(LIBC_SO)
 	$(LD) -m elf_x86_64 -nostdlib -shared --hash-style=sysv -soname libgui.so -z noexecstack $^ -o $@
 

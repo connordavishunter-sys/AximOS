@@ -1,3 +1,4 @@
+#include "font.h"
 #include <gui.h>
 #include <stdio.h>
 #include <string.h>
@@ -9,6 +10,7 @@
 //     clock 24
 //     resolution 1280x800
 //     repeat 500 30
+//     text smooth
 //
 // Anything missing or not understood is left as it is by default.
 
@@ -34,9 +36,12 @@ void gui_settings_load(struct gui_settings *s) {
             s->width = width, s->height = height;
         else if (sscanf(line, "repeat %d %d", &width, &height) == 2 && width >= 0 && height >= 0)
             s->repeat_delay = width, s->repeat_rate = height;
+        else if (sscanf(line, "text %31s", value) == 1)
+            s->sharp_text = !strcmp(value, "sharp");
     }
     if (f)
         fclose(f);
+    font_smooth = !s->sharp_text;
 }
 
 bool gui_settings_save(const struct gui_settings *s) {
@@ -48,7 +53,7 @@ bool gui_settings_save(const struct gui_settings *s) {
             s->clock_12_hour ? "12" : "24");
     if (s->width)
         fprintf(f, "resolution %dx%d\n", s->width, s->height);
-    fprintf(f, "repeat %d %d\n", s->repeat_delay, s->repeat_rate);
+    fprintf(f, "repeat %d %d\ntext %s\n", s->repeat_delay, s->repeat_rate, s->sharp_text ? "sharp" : "smooth");
     return fclose(f) == 0;
 }
 

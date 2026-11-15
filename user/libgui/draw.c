@@ -1,3 +1,4 @@
+#include "font.h"
 #include <font8x16.h>
 #include <gui.h>
 #include <string.h>
@@ -56,6 +57,9 @@ void gui_copy(struct gui_canvas *canvas, int x, int y, const struct gui_canvas *
 // Each glyph that's on the canvas, and of it only the rows and columns that are,
 // pixel by pixel when it isn't scaled.
 void gui_text(struct gui_canvas *canvas, int x, int y, const char *text, uint32_t color, int scale) {
+    if (font_text(canvas, x, y, text, color, scale))
+        return;
+
     int width = GUI_CHAR_WIDTH * scale, height = GUI_CHAR_HEIGHT * scale;
     int first_row = y < 0 ? -y / scale : 0;
     int last_row = (canvas->height - y + scale - 1) / scale;

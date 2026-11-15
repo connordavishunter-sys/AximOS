@@ -37,6 +37,10 @@ mkdir -p "$root/build/ports" "$root/ports/dist"
 cd "$root/build/ports"
 
 case $1 in
+stb) # only stb_truetype, which libgui includes
+	fetch https://raw.githubusercontent.com/nothings/stb/9600522de53973336fa033a289858a4354cbb04c stb_truetype.h \
+		428cfe93520f2aed5e413a220b0db5bba5b17e2ebe5a64e4a8efa9eeeb67ec5f
+	;;
 mbedtls)
 	fetch https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-3.6.7 mbedtls-3.6.7.tar.bz2 \
 		a7e8bcbec0e6f761b4af24f25677626b35f762f68eef79c08677a363212d11f6

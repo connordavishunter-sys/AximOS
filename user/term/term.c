@@ -1,5 +1,4 @@
 #include <errno.h>
-#include <font8x16.h>
 #include <gui.h>
 #include <poll.h>
 #include <pty.h>
@@ -311,14 +310,8 @@ static void draw_cell(int r, int c) {
         fg = bg;
         bg = swap;
     }
-    // Cells are always inside the window, so each row of the glyph goes straight in.
-    for (int line = 0; line < CELL_HEIGHT; line++) {
-        uint32_t *p = window->canvas.pixels + (long)(y + line) * window->canvas.stride + x;
-        uint8_t bits = font8x16[(uint8_t)cell.c & 0x7F][line];
-
-        for (int bit = 0; bit < CELL_WIDTH; bit++)
-            p[bit] = bits & 0x80 >> bit ? fg : bg;
-    }
+    gui_fill(&window->canvas, x, y, CELL_WIDTH, CELL_HEIGHT, bg);
+    gui_text(&window->canvas, x, y, (char[]){(char)(cell.c & 0x7F), '\0'}, fg, 1);
     if (cursor && !focused) {
         gui_fill(&window->canvas, x, y, CELL_WIDTH, 1, fg);
         gui_fill(&window->canvas, x, y + CELL_HEIGHT - 1, CELL_WIDTH, 1, fg);

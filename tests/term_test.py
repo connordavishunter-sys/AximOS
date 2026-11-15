@@ -52,7 +52,7 @@ def shown(lines, want):
 v = VM(disk=img)
 try:
     check('prompt at boot', v.wait('/$ ', 30), v.text())
-    v.run('echo none > /system/etc/wallpaper; rm -f /system/etc/gui.conf') # the plain colour and default theme, to look for
+    v.run('echo none > /system/etc/wallpaper; echo text sharp > /system/etc/gui.conf') # the plain colour, default theme and bitmap font, to look for
     o = v.run('ls /dev'); check('/dev/ptmx exists', 'ptmx' in o, o)
     program_checks(v, 'pty', 'pty: ', 30)
 

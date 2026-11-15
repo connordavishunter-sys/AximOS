@@ -269,6 +269,14 @@ static void appearance(struct gui_ui *ui) {
     if (gui_checkbox(ui, "Window shadows", &settings.shadows))
         save(settings.shadows ? "shadows on" : "shadows off");
     report(ui, 1, "shadows");
+
+    bool smooth = !settings.sharp_text;
+
+    if (gui_checkbox(ui, "Smooth text", &smooth)) {
+        settings.sharp_text = !smooth;
+        save(smooth ? "text smooth" : "text sharp");
+    }
+    report(ui, 10, "smooth");
     gui_separator(ui);
     gui_label(ui, "Wallpaper");
     for (int i = 0; i < wallpaper_count; i++) {

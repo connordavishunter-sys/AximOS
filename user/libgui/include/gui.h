@@ -170,6 +170,7 @@ struct gui_settings {
     int width, height;  // the screen's resolution, or 0 to leave it as it started
     int repeat_delay;   // milliseconds a key's held before it repeats
     int repeat_rate;    // times a second it repeats then, or 0 for never
+    bool sharp_text;    // the bitmap font, rather than text smoothed from a TrueType one
 };
 
 void gui_settings_load(struct gui_settings *settings);
