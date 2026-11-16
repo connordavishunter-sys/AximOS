@@ -7,7 +7,7 @@ int program_callback(int x) {
 }
 
 int main(void) {
-    void *plugin = dlopen("/tmp/plugin.so", RTLD_NOW);
+    void *plugin = dlopen("/home/plugin.so", RTLD_NOW);
     int (*run)(int) = plugin ? (int (*)(int))dlsym(plugin, "plugin_run") : NULL;
 
     printf("%s static dlopen calls back into the program\n", run && run(1) == 30 ? "ok" : "FAIL");

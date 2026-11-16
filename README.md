@@ -15,7 +15,8 @@ with the dash shell.
 - Virtual memory: demand-paged stacks, `mmap`, shared memory, and read-only ELF segments
   shared between processes
 - Dynamically linked programs: `libc.so` is also the dynamic linker
-- Filesystems: FAT32 (read and write) on the disk, ISO 9660 on the boot CD, `/proc` and `/dev`
+- Filesystems: FAT32 (read and write) on the disk, ISO 9660 on the boot CD, tmpfs on `/tmp`
+  (kept in memory, empty each boot), `/proc` and `/dev`
 - Drives over AHCI (SATA) and legacy IDE
 - Networking on an Intel e1000: ARP, IPv4, ICMP, UDP, TCP, DHCP and DNS, through BSD sockets
 - Intel HDA sound, with a mixer for several programs at once

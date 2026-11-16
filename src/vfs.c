@@ -6,6 +6,7 @@
 #include <procfs.h>
 #include <serial.h>
 #include <string.h>
+#include <tmpfs.h>
 #include <vfs.h>
 
 #define MAX_MOUNTS 16
@@ -80,6 +81,12 @@ static int dev_readdir(void *volume, const struct vfs_node *node, uint64_t *curs
 }
 
 static struct vfs_mount proc_mount = {.device = "proc", .ops = &procfs_ops};
+static struct vfs_mount tmp_mount = {.device = "tmpfs", .ops = &tmpfs_ops};
+
+// Whether a path is a directory or under it: /proc for /proc/1 but not /process.
+static bool under(const char *path, const char *dir, size_t len) {
+    return memcmp(path, dir, len) == 0 && (path[len] == '/' || path[len] == '\0');
+}
 
 static const struct vfs_ops dev_ops = {.type = "devfs", .readdir = dev_readdir};
 static struct vfs_mount dev_mount = {.device = "devfs", .ops = &dev_ops};
@@ -251,10 +258,12 @@ int vfs_lookup(const char *cwd, const char *path, struct vfs_node *node) {
     struct vfs_mount *mount = root_mount;
     const char *rest = full + 1;
 
-    if (memcmp(full, "/proc", 5) == 0 && (full[5] == '/' || full[5] == '\0')) {
-        mount = &proc_mount;
-        rest = full[5] ? full + 6 : full + 5;
-    } else if (memcmp(full, "/dev", 4) == 0 && (full[4] == '/' || full[4] == '\0')) {
+    if (under(full, "/proc", 5) || under(full, "/tmp", 4)) {
+        size_t len = full[1] == 'p' ? 5 : 4;
+
+        mount = full[1] == 'p' ? &proc_mount : &tmp_mount;
+        rest = full[len] ? full + len + 1 : full + len;
+    } else if (under(full, "/dev", 4)) {
         if (full[4] == '\0') {
             *node = (struct vfs_node){.mount = &dev_mount, .is_dir = true};
             return VFS_OK;
@@ -344,6 +353,14 @@ size_t vfs_list_mounts(char *out, size_t size) {
             memcpy(out + used, parts[p], len);
             used += len;
         }
+    }
+
+    const char *tmp = "tmpfs /tmp tmpfs\n";
+    size_t len = strlen(tmp);
+
+    if (used + len < size) {
+        memcpy(out + used, tmp, len);
+        used += len;
     }
     return used;
 }
@@ -470,7 +487,8 @@ int vfs_remove(const struct vfs_node *node) {
 
 void vfs_fill_stat(const struct vfs_node *node, struct stat *out) {
     *out = (struct stat){
-        .st_dev = node->mount == &dev_mount ? MAX_MOUNTS + 1 : node->mount == &proc_mount ? MAX_MOUNTS + 2 : (uint64_t)(node->mount - mounts) + 1,
+        .st_dev = node->mount == &dev_mount ? MAX_MOUNTS + 1 : node->mount == &proc_mount ? MAX_MOUNTS + 2
+                : node->mount == &tmp_mount ? MAX_MOUNTS + 3 : (uint64_t)(node->mount - mounts) + 1,
         .st_ino = (uint64_t)node->entry_lba << 16 | node->entry_pos,
         .st_mode = (node->is_dir ? S_IFDIR : vfs_device_of(node) != VFS_DEVICE_NONE ? S_IFCHR : S_IFREG) | 0777,
         .st_nlink = 1,

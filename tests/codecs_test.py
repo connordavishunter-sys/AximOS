@@ -45,18 +45,18 @@ with wave.open(source, 'wb') as w:
     w.writeframes((np.stack([left, right], 1) * 32767).astype('<i2').tobytes())
 
 img = disk_copy('codecs')
-put(img, source, '/tmp/source.wav')
+put(img, source, '/home/source.wav')
 for kind in KINDS:
     ffmpeg('-i', source, *ENCODE[kind], f'{WORK}/theirs.{kind}')
-    put(img, f'{WORK}/theirs.{kind}', f'/tmp/theirs.{kind}')
+    put(img, f'{WORK}/theirs.{kind}', f'/home/theirs.{kind}')
 
 v = VM(disk=img)
 try:
     check('prompt at boot', v.wait('/$ ', 30), v.text())
     for kind in KINDS:
         at = v.mark()
-        v.type(f'convert -i /tmp/theirs.{kind} && convert /tmp/theirs.{kind} /tmp/read.{kind}.wav && '
-               f'convert -s 1.5 /tmp/theirs.{kind} /tmp/seek.{kind}.wav && convert /tmp/source.wav /tmp/ours.{kind}; '
+        v.type(f'convert -i /home/theirs.{kind} && convert /home/theirs.{kind} /home/read.{kind}.wav && '
+               f'convert -s 1.5 /home/theirs.{kind} /home/seek.{kind}.wav && convert /home/source.wav /home/ours.{kind}; '
                f'echo done-$?\n')
         check(f'{kind}: converts', v.wait('done-0', 120, at), v.text(at))
         o = v.text(at)
@@ -66,9 +66,9 @@ finally:
     v.close()
 
 for kind in KINDS:
-    get(img, f'/tmp/read.{kind}.wav', f'{WORK}/read.{kind}.wav')
-    get(img, f'/tmp/seek.{kind}.wav', f'{WORK}/seek.{kind}.wav')
-    get(img, f'/tmp/ours.{kind}', f'{WORK}/ours.{kind}')
+    get(img, f'/home/read.{kind}.wav', f'{WORK}/read.{kind}.wav')
+    get(img, f'/home/seek.{kind}.wav', f'{WORK}/seek.{kind}.wav')
+    get(img, f'/home/ours.{kind}', f'{WORK}/ours.{kind}')
     ffmpeg('-i', f'{WORK}/theirs.{kind}', f'{WORK}/reference.{kind}.wav')
     rate, reference = samples(f'{WORK}/reference.{kind}.wav')
     _, read = samples(f'{WORK}/read.{kind}.wav')

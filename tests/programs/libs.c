@@ -58,7 +58,7 @@ int main(int argc, char **argv) {
     optind = 1;
     check("getopt and optind", getopt(3, args, "x") == 'x' && getopt(3, args, "x") == -1 && optind == 2);
 
-    void *plugin = dlopen("/tmp/plugin.so", RTLD_NOW);
+    void *plugin = dlopen("/home/plugin.so", RTLD_NOW);
     int (*run)(int) = plugin ? (int (*)(int))dlsym(plugin, "plugin_run") : NULL;
 
     check("dlopen calls back into the program", run && run(4) == 50);

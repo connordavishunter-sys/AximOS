@@ -46,15 +46,15 @@ host = subprocess.run(['sh', '-c', script], cwd=host_dir, capture_output=True, t
                       env=dict(os.environ, LC_ALL='C')).stdout
 
 img = disk_copy('utils')
-put(img, guest_dir, '/tmp/c')
+put(img, guest_dir, '/home/c')
 open(WORK + '/t.sh', 'w').write(script)
-put(img, WORK + '/t.sh', '/tmp/t.sh')
+put(img, WORK + '/t.sh', '/home/t.sh')
 v = VM(disk=img)
 check('prompt at boot', v.wait('/$ ', 30), v.text())
-v.type('cd /tmp/c; dash /tmp/t.sh > /tmp/out 2>/dev/null; shutdown\n')
+v.type('cd /home/c; dash /home/t.sh > /home/out 2>/dev/null; shutdown\n')
 check('script finishes and powers off', v.exited(240), v.text()[-300:])
 v.close()
-get(img, '/tmp/out', WORK + '/out')
+get(img, '/home/out', WORK + '/out')
 
 ours, theirs = by_case(open(WORK + '/out', errors='replace').read()), by_case(host)
 for i, c in enumerate(cases):

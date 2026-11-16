@@ -20,9 +20,10 @@ static void show(const char *path, const char *mount_point) {
     uint64_t used = total - free;
     int percent = total ? (int)(used * 100 / total) : 0;
 
+    // tmpfs is in memory, with no device.
     static char device[32];
-    strcpy(device, "/dev/");
-    strcpy(&device[5], fs.f_device);
+    strcpy(device, strcmp(fs.f_type, "tmpfs") ? "/dev/" : "");
+    strcat(device, fs.f_device);
 
     printf("%-12s %-8s ", device, fs.f_type);
     print_size(total, COLUMN_WIDTH);
@@ -41,6 +42,7 @@ int main(int argc, char **argv) {
            "Available", "Use%", "Mounted on");
 
     show("/", "/");
+    show("/tmp", "/tmp");
 
     DIR *dev = opendir("/dev");
     if (!dev) {
