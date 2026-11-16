@@ -54,7 +54,7 @@ try:
 
     v.pointer(200, 70, 1); v.pointer(350, 170); v.pointer(500, 270); v.pointer(500, 270, 0)
     w, h, px = v.screenshot()
-    check('dragging the title bar moves the window', px(300, 65) == DESKTOP and px(600, 265) == FOCUSED,
+    check('dragging the title bar moves the window', px(300, 65) == DESKTOP and abs((px(600, 265) & 255) - (FOCUSED & 255)) < 48,
           f'{px(300, 65):x} {px(600, 265):x}')
 finally:
     v.close()

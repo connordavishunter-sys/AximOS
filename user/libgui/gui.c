@@ -257,6 +257,10 @@ void gui_set_cursor(struct gui_window *window, enum gui_cursor cursor) {
     gui_send(connection, &(struct gui_message){.type = GUI_CURSOR, .window = window->id, .x = cursor});
 }
 
+void gui_set_translucent(struct gui_window *window, bool on) {
+    gui_send(connection, &(struct gui_message){.type = GUI_TRANSLUCENT, .window = window->id, .x = on});
+}
+
 // Sends a message with data in new shared memory, which wm maps and removes.
 static bool send_shared(struct gui_message message, const void *data, size_t length) {
     message.width = (int32_t)length;

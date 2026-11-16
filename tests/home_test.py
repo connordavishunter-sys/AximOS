@@ -9,11 +9,11 @@ MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'Augus
           'November', 'December']
 # Desktop icons go down from the top left in cells 88 by 72, 8 in.
 cell = lambda i: (8 + 42, 8 + i * 72 + 34)
-# The clock, 5 letters wide, ends 12 from the right. Its calendar is 248 by 208 on
-# the taskbar, its right edge under the clock's, with the next month's arrow, 24
+# The clock, 5 letters wide, ends 12 from the right. Its calendar is 248 by 208,
+# floating 8 above the taskbar, 32 tall, and 8 from the right edge, with the next month's arrow, 24
 # square, 8 in from its top right corner and 6 down.
-CLOCK = (1280 - 12 - 20, 800 - 14)
-PANEL = (1280 - 2 - 248, 800 - 28 - 208)
+CLOCK = (1280 - 8 - 12 - 20, 800 - 14)
+PANEL = (1280 - 10 - 248, 800 - 8 - 32 - 8 - 208)
 NEXT = (PANEL[0] + 248 - 8 - 12, PANEL[1] + 6 + 12)
 
 v = VM(vmmouse=True)

@@ -28,6 +28,16 @@ LIBGUI_SO := $(BUILD)/user/libgui.so
 LIBGUI_SO_OBJS := $(patsubst user/libgui/%.c,$(BUILD)/user/libgui_pic/%.o,$(wildcard user/libgui/*.c))
 GUI_APPS := guidemo term fbdemo widgets editor files viewer settings player calculator tasks paint snake
 
+# The start menu shows the folders in /system/bin/gui as they are, so the apps are
+# put in these, or at the top for those in none of them.
+APP_FOLDERS := Accessories Games Multimedia System Demos
+APPS_Accessories := calculator editor paint viewer
+APPS_Games := snake
+APPS_Multimedia := player
+APPS_System := settings tasks
+APPS_Demos := guidemo fbdemo widgets
+app_dir = $(foreach f,$(APP_FOLDERS),$(if $(filter $(1),$(APPS_$(f))),$(f)/))
+
 # /system/lib/libaudio.so reads and writes sound files, through a library for each
 # kind, which it loads when one's first opened. Those wrap libraries from elsewhere,
 # built as archives by ports/build.sh, and Vorbis and Opus share libogg.so.
@@ -212,10 +222,11 @@ $(BUILD)/user/fetch/fetch.o: USER_CFLAGS += -I$(MBEDTLS)/include -DMBEDTLS_CONFI
 $(BUILD)/user/fetch/fetch.o: | $(MBEDTLS_LIBS)
 $(BUILD)/user/fetch.elf: $(MBEDTLS_LIBS) $(shell $(CC) -print-libgcc-file-name)
 
-# login hashes passwords with mbedtls's SHA-256.
-$(BUILD)/user/login/login.o: USER_CFLAGS += -I$(MBEDTLS)/include -DMBEDTLS_CONFIG_FILE='"$(CURDIR)/ports/mbedtls_config.h"'
-$(BUILD)/user/login/login.o: | $(MBEDTLS_LIBS)
+# login hashes passwords with mbedtls's SHA-256, and ttylogin checks them the same way.
+$(BUILD)/user/login/account.o: USER_CFLAGS += -I$(MBEDTLS)/include -DMBEDTLS_CONFIG_FILE='"$(CURDIR)/ports/mbedtls_config.h"'
+$(BUILD)/user/login/account.o: | $(MBEDTLS_LIBS)
 $(BUILD)/user/login.elf: $(MBEDTLS)/library/libmbedcrypto.a
+$(BUILD)/user/ttylogin.elf: $(BUILD)/user/login/account.o $(MBEDTLS)/library/libmbedcrypto.a
 
 $(MBEDTLS_LIBS) &: $(LIBC) $(CRT0) ports/build.sh ports/aximos-cc ports/mbedtls_config.h
 	ports/build.sh mbedtls
@@ -233,14 +244,15 @@ $(DISK): $(PROGRAM_ELFS) $(LIBC_SO) $(LIBGUI_SO) $(LIBAUDIO_SO) $(LIBOGG_SO) $(C
 	rm -f $@
 	mkfs.fat -F 32 -C $@ $$(($(DISK_SIZE_MB) * 1024))
 	mcopy -s -i $@ rootfs/system ::/
-	mmd -i $@ ::/system/boot ::/system/bin ::/system/bin/gui ::/system/lib ::/tmp ::/home ::/home/Desktop ::/home/Documents ::/home/Pictures
+	mmd -i $@ ::/system/boot ::/system/bin ::/system/bin/gui $(APP_FOLDERS:%=::/system/bin/gui/%) ::/system/lib ::/tmp \
+		::/trash ::/home ::/home/Desktop ::/home/Documents ::/home/Pictures
 	mcopy -s -i $@ $(ZONES) ::/system/share/
 	$(call install_stripped,$(LIBC_SO),/system/lib/libc.so)
 	$(call install_stripped,$(LIBGUI_SO),/system/lib/libgui.so)
 	for l in $(LIBAUDIO_SO) $(LIBOGG_SO) $(CODEC_SOS); do $(call install_stripped,$$l,/system/lib/$$(basename $$l)); done
 	$(call install_stripped,$(BUILD)/user/init.elf,/system/boot/init)
 	for p in $(filter-out init $(GUI_APPS),$(PROGRAMS)); do $(call install_stripped,$(BUILD)/user/$$p.elf,/system/bin/$$p); done
-	for p in $(GUI_APPS); do $(call install_stripped,$(BUILD)/user/$$p.elf,/system/bin/gui/$$p); done
+	$(foreach p,$(GUI_APPS),$(call install_stripped,$(BUILD)/user/$(p).elf,/system/bin/gui/$(strip $(call app_dir,$(p)))$(p)) &&) true
 	$(call install_stripped,$(DASH),/system/bin/dash)
 	rm $(BUILD)/stripped
 

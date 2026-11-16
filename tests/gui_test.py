@@ -5,6 +5,8 @@ from vm import VM, check, finish
 
 DESKTOP, FOCUSED, PAPER, INK, TERMINAL = 0x1E2430, 0x3D63DD, 0xF4F1EA, 0x26282E, 0x161A22
 TASKBAR, TASKBAR_BUTTON, TASKBAR_MINIMIZED = 0x141821, 0x2E3646, 0x1D222C
+# Title bars and the taskbar show a little of what's under them.
+near = lambda a, b: all(abs((a >> s & 255) - (b >> s & 255)) < 48 for s in (0, 8, 16))
 
 
 def count(px, x0, y0, x1, y1, color):
@@ -27,7 +29,7 @@ try:
     # The first window's contents start at 80, 84, under a title bar from y = 60.
     w, h, px = v.screenshot()
     check('desktop', px(5, 5) == DESKTOP and px(w - 5, h // 2) == DESKTOP, hex(px(5, 5)))
-    check('focused title bar', px(300, 65) == FOCUSED, hex(px(300, 65)))
+    check('focused title bar', near(px(300, 65), FOCUSED), hex(px(300, 65)))
     check('window contents', px(300, 240) == PAPER, hex(px(300, 240)))
     check('window text', count(px, 100, 110, 400, 128, INK) > 300, count(px, 100, 110, 400, 128, INK))
 
@@ -44,7 +46,7 @@ try:
     # Dragging the title bar by 300, 200 moves the window.
     v.mouse(0, -130, 1); v.mouse(300, 200); v.mouse(buttons=0)
     w, h, px = v.screenshot()
-    check('drag moves the window', px(300, 65) == DESKTOP and px(600, 265) == FOCUSED,
+    check('drag moves the window', px(300, 65) == DESKTOP and near(px(600, 265), FOCUSED),
           f'{px(300, 65):x} {px(600, 265):x}')
 
     # A terminal takes the focus, and Super+Q closes it.
@@ -53,13 +55,13 @@ try:
     check('Super+Enter opens a terminal, taking the focus', v.wait('guidemo: focus 0', 10, at), v.text(at))
     time.sleep(1)
     w, h, px = v.screenshot()
-    check('the terminal opens on top', px(600, 265) == TERMINAL, hex(px(600, 265)))
+    check('the terminal opens on top, a little see-through', near(px(600, 265), TERMINAL), hex(px(600, 265)))
     at = v.mark()
     v.key('meta_l-q')
     check('Super+Q closes the focused window, and focus goes back', v.wait('guidemo: focus 1', 5, at), v.text(at))
     time.sleep(0.5)
     w, h, px = v.screenshot()
-    check('the title bar shows the focus again', px(600, 265) == FOCUSED, hex(px(600, 265)))
+    check('the title bar shows the focus again', near(px(600, 265), FOCUSED), hex(px(600, 265)))
 
     # The close button is at the right of the title bar, now from 720, 264, and the
     # cursor is at 500, 270 after the drag.
@@ -106,10 +108,10 @@ try:
     mouse = Pointer(v)
 
     w, h, px = v.screenshot()
-    bar = h - 28
-    check('taskbar', px(2, bar + 2) == TASKBAR and px(8, bar + 6) == TASKBAR_BUTTON, hex(px(2, bar + 2)))
-    check('taskbar button for the focused window', px(240, bar + 6) == FOCUSED, hex(px(240, bar + 6)))
-    check('clock', count(px, w - 60, bar + 10, w - 10, bar + 18, 0xFFFFFF) > 20, 'no clock')
+    bar = h - 8 - 32 # floating 8 above the bottom
+    check('taskbar', near(px(10, bar + 2), TASKBAR) and px(16, bar + 6) == TASKBAR_BUTTON, hex(px(10, bar + 2)))
+    check('taskbar button for the focused window', px(248, bar + 6) == FOCUSED, hex(px(248, bar + 6)))
+    check('clock', count(px, w - 68, bar + 10, w - 18, bar + 18, 0xFFFFFF) > 20, 'no clock')
 
     # The 360x200 contents end at 440, 284, and the frame's border just past them.
     at = v.mark()
@@ -132,21 +134,21 @@ try:
     check('dragging the top edge resizes', v.wait('guidemo: size 520 310', 5, at), v.text(at))
     time.sleep(0.5)
     w, h, px = v.screenshot()
-    check('and moves the window up', px(400, 32) == FOCUSED and px(300, 360) == PAPER,
+    check('and moves the window up', near(px(400, 32), FOCUSED) and px(300, 360) == PAPER,
           f'{px(400, 32):x} {px(300, 360):x}')
 
     # Maximize is the middle button, left of close.
     at = v.mark()
     mouse.click(528, 42)
-    check('maximize fills the desktop', v.wait('guidemo: size 1278 746', 5, at), v.text(at))
+    check('maximize fills the desktop', v.wait('guidemo: size 1278 726', 5, at), v.text(at))
     w, h, px = v.screenshot()
-    check('maximized', px(1200, 700) == PAPER and px(1200, bar + 2) == TASKBAR, hex(px(1200, 700)))
+    check('maximized', px(1200, 700) == PAPER and near(px(1200, bar + 2), TASKBAR), hex(px(1200, 700)))
     at = v.mark()
     v.key('meta_l-down')
     check('Super+Down goes back', v.wait('guidemo: size 520 310', 5, at), v.text(at))
     at = v.mark()
     v.key('meta_l-right')
-    check('Super+Right takes the right half', v.wait('guidemo: size 638 746', 5, at), v.text(at))
+    check('Super+Right takes the right half', v.wait('guidemo: size 638 726', 5, at), v.text(at))
     w, h, px = v.screenshot()
     check('on the right half', px(1000, 400) == PAPER and px(300, 400) == DESKTOP, hex(px(1000, 400)))
 
@@ -163,16 +165,17 @@ try:
     w, h, px = v.screenshot()
     check('shown again', px(1000, 400) == PAPER, hex(px(1000, 400)))
 
-    # The menu lists /system/bin/gui above the launcher, 24 pixels an app: calculator,
-    # editor, fbdemo, files, guidemo, paint, player, settings, snake, tasks, term,
-    # viewer, widgets. Then a line, Run..., Reboot and Shut down.
-    menu_top = bar - 16 * 24 - 9 - 8
+    # The menu lists /system/bin/gui above the launcher, 24 pixels an item: its
+    # folders, Accessories, Demos, Games, Multimedia and System, then the apps
+    # outside them, files and term. Then a line, Run..., Reboot and Shut down. It
+    # floats 8 above the taskbar.
+    menu_top = bar - 10 * 24 - 9 - 8 - 8
     mouse.click(36, bar + 14)
     time.sleep(0.5)
     w, h, px = v.screenshot()
     check('the launcher opens the menu', px(150, menu_top + 10) == FOCUSED, hex(px(150, menu_top + 10)))
     at = v.mark()
-    mouse.click(100, menu_top + 4 + 10 * 24 + 12)
+    mouse.click(100, menu_top + 4 + 6 * 24 + 12)
     check('clicking term in the menu opens a terminal', v.wait('guidemo: focus 0', 10, at), v.text(at))
     time.sleep(1)
     w, h, px = v.screenshot()

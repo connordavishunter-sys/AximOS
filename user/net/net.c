@@ -27,6 +27,8 @@ static int show(void) {
         perror("net");
         return 1;
     }
+    if (info.airplane)
+        printf("airplane mode, so nothing's sent or taken\n");
     if (!info.has_device)
         printf("no network card, only this machine can be reached\n");
     else

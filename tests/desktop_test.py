@@ -5,7 +5,7 @@ from PIL import Image
 from vm import VM, WORK, check, disk_copy, finish, get
 
 DESKTOP, ACCENT = 0x1E2430, 0x3D63DD
-TASKBAR_Y = 800 - 28
+TASKBAR_Y = 800 - 8 - 32
 # The calculator is the first window, its contents at 80, 84: a display, then
 # buttons 54 wide and 40 tall, 8 apart, under it.
 CALC_X, CALC_Y = 80, 84
@@ -99,8 +99,8 @@ try:
     time.sleep(0.5)
     w, h, px = v.screenshot()
     check('where it is', px(*inside) != DESKTOP, hex(px(*inside)))
-    check('with its box on the taskbar lit', px(76 + 20 + 2, TASKBAR_Y + 7) == ACCENT, hex(px(76 + 20 + 2, TASKBAR_Y + 7)))
-    click(76 + 8, TASKBAR_Y + 14)
+    check('with its box on the taskbar lit', px(8 + 76 + 20 + 2, TASKBAR_Y + 10) == ACCENT, hex(px(8 + 76 + 20 + 2, TASKBAR_Y + 10)))
+    click(8 + 76 + 8, TASKBAR_Y + 14)
     check('clicking the first box goes back', v.wait('wm: workspace 1', 5, at), v.text(at))
 
     # Snapping: a terminal dragged by its title to the left edge, then the top.

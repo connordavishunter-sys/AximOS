@@ -192,22 +192,44 @@ static void add_shell(void) {
     add_info("Shell", value);
 }
 
-// Each entry in the directory is a program.
-static void add_programs(void) {
-    DIR *dir = opendir("/system/bin");
+// Each file in a folder is a program, and so is each in the folders in it.
+static int count_programs(const char *path) {
+    DIR *dir = opendir(path);
     struct dirent *entry;
-    char value[32];
     int count = 0;
 
-    if (!dir)
-        return;
-    while ((entry = readdir(dir))) {
-        if (entry->d_type != DT_DIR)
-            count++;
+    while (dir && (entry = readdir(dir))) {
+        char inside[256];
+
+        if (entry->d_name[0] == '.')
+            continue;
+        snprintf(inside, sizeof(inside), "%s/%s", path, entry->d_name);
+        count += entry->d_type == DT_DIR ? count_programs(inside) : 1;
     }
-    closedir(dir);
-    snprintf(value, sizeof(value), "%d", count);
+    if (dir)
+        closedir(dir);
+    return count;
+}
+
+static void add_programs(void) {
+    char value[32];
+
+    snprintf(value, sizeof(value), "%d", count_programs("/system/bin"));
     add_info("Programs", value);
+}
+
+// Who's logged in: USER, or the account's name, as login keeps it.
+static const char *user_name(void) {
+    static char name[32] = "root";
+    FILE *f = fopen("/system/etc/account", "r");
+
+    if (getenv("USER"))
+        return getenv("USER");
+    if (f && fscanf(f, "%31s", name) != 1)
+        snprintf(name, sizeof(name), "root");
+    if (f)
+        fclose(f);
+    return name;
 }
 
 int main(int argc, char **argv) {
@@ -219,7 +241,7 @@ int main(int argc, char **argv) {
     char kernel[96];
 
     uname(&name);
-    snprintf(title, sizeof(title), ACCENT "%s@%s" RESET, getenv("USER") ? getenv("USER") : "root", name.nodename);
+    snprintf(title, sizeof(title), ACCENT "%s@%s" RESET, user_name(), name.nodename);
     snprintf(kernel, sizeof(kernel), "%s %s", name.sysname, name.machine);
     add_info("OS", kernel);
     add_info("Kernel", name.version);

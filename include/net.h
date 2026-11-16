@@ -44,6 +44,7 @@ void net_get_info(struct net_info *out);
 
 // Sets the configuration by hand. With an address of 0, goes back to asking DHCP.
 void net_configure(uint32_t address, uint32_t netmask, uint32_t gateway, uint32_t dns);
+void net_set_airplane(bool on);
 
 static inline uint16_t net_read16(const void *p) {
     const uint8_t *b = p;

@@ -13,21 +13,22 @@
 
 #define MAX_ENTRIES 1024
 #define MAX_TABS 8
-#define EDITOR "/system/bin/gui/editor"
-#define TERM "/system/bin/gui/term"
+#define MAX_APPS 32
 #define LIST "##entries"
 #define ADDRESS "##folder"
 #define ANSWER "##answer"
 #define SEARCH "Search##search"
 #define PLACES "##places"
+#define PLACE_COUNT 6
 #define SIDEBAR 120
-#define CUT "/tmp/files-cut" // the path on the clipboard, when it was cut, to move it
+#define CUT "/tmp/files-cut" // the paths on the clipboard, when they were cut, to move them
 #define KEY_F2 (KEY_F1 + 1)
 #define KEY_F5 (KEY_F1 + 4)
 #define DRAG_DISTANCE 6 // the mouse goes, held on an item, before it's dragged
 
+// In the trash, an entry's name is its random one there, and it shows the one it had.
 struct entry {
-    char name[NAME_MAX + 1];
+    char name[NAME_MAX + 1], shown[NAME_MAX + 1];
     bool folder;
     off_t size;
     time_t modified;
@@ -37,9 +38,13 @@ static const char *const help = "Enter         Open\n"
                                 "Backspace     Up a folder\n"
                                 "Ctrl+T, W     New tab, close the tab\n"
                                 "Ctrl+Tab      Next tab\n"
+                                "Ctrl+click    Choose another, or not\n"
+                                "Shift+click   Choose those up to it\n"
+                                "Ctrl+A        Choose everything\n"
                                 "Ctrl+C, X, V  Copy, cut, paste\n"
                                 "F2            Rename\n"
-                                "Delete        Delete\n"
+                                "Delete        Move to the trash\n"
+                                "Shift+Delete  Delete for good\n"
                                 "F5            Refresh\n"
                                 "Ctrl+F        Search this folder\n"
                                 "Ctrl+H        Show hidden files\n"
@@ -54,8 +59,8 @@ static bool show_hidden;
 static char search[NAME_MAX + 1];
 
 // The places down the side.
-static const char *const place_names[] = {"Home", "Desktop", "Documents", "Pictures", "Computer"};
-static char place_paths[5][PATH_MAX];
+static const char *const place_names[PLACE_COUNT] = {"Home", "Desktop", "Documents", "Pictures", "Computer", "Trash"};
+static char place_paths[PLACE_COUNT][PATH_MAX];
 
 // Each tab is a folder, and what was selected in it. The one shown is listed.
 struct tab {
@@ -70,6 +75,7 @@ static struct entry entries[MAX_ENTRIES];
 static char labels[MAX_ENTRIES][NAME_MAX + 2]; // names, with / after folders
 static const char *items[MAX_ENTRIES];
 static const struct gui_image *icons[MAX_ENTRIES];
+static bool marked[MAX_ENTRIES]; // those chosen, with the selected one
 static int count, selected;
 static char *folder = tabs[0].folder, typed[PATH_MAX], status[PATH_MAX + 64];
 static bool quitting;
@@ -89,10 +95,19 @@ static struct {
 static char dropped[PATH_MAX];
 static bool drop_copies;
 
-// What the strip under the address bar is asking, if anything.
-static enum { NOTHING, RENAMING, NEW_FOLDER, NEW_FILE, DELETING, PROPERTIES } asking;
+// What the strip under the address bar, or a dialog, is asking, if anything.
+static enum { NOTHING, RENAMING, NEW_FOLDER, NEW_FILE, OPENING_WITH, DELETING, EMPTYING, PROPERTIES } asking;
 static char answer[NAME_MAX + 1];
-static bool ask_focus; // the answer box, or the Delete button, gets the keyboard
+static bool ask_focus; // the answer box gets the keyboard
+
+// The apps, for Open with.
+static char app_names[MAX_APPS][32];
+static const char *apps[MAX_APPS];
+static int app_count, app_chosen;
+
+static bool in_trash(void) {
+    return !strcmp(folder, GUI_TRASH);
+}
 
 static void path_of(char *out, const char *name) {
     snprintf(out, PATH_MAX, "%s%s%s", folder, strcmp(folder, "/") ? "/" : "", name);
@@ -107,7 +122,7 @@ static int compare_entries(const void *a, const void *b) {
         return x->size < y->size ? 1 : -1;
     if (sort_by == BY_DATE && x->modified != y->modified)
         return x->modified < y->modified ? 1 : -1;
-    return strcmp(x->name, y->name);
+    return strcmp(x->shown, y->shown);
 }
 
 static bool has(const char *name, const char *part) {
@@ -122,21 +137,41 @@ static bool has(const char *name, const char *part) {
     return !*part;
 }
 
+static const struct entry *chosen(void) {
+    return count ? &entries[selected] : NULL;
+}
+
+// What's chosen, by index: those marked, or else the selected one.
+static int chosen_items(int out[MAX_ENTRIES]) {
+    int n = 0;
+
+    for (int i = 0; i < count; i++) {
+        if (marked[i])
+            out[n++] = i;
+    }
+    if (!n && count)
+        out[n++] = selected;
+    return n;
+}
+
 static void describe(void) {
-    const struct entry *e = &entries[selected];
+    const struct entry *e = chosen();
+    int picked[MAX_ENTRIES], n = chosen_items(picked);
 
     if (!count)
-        snprintf(status, sizeof(status), "%s is empty", folder);
+        snprintf(status, sizeof(status), "%s is empty", in_trash() ? "The trash" : folder);
+    else if (n > 1)
+        snprintf(status, sizeof(status), "%d items chosen", n);
     else if (e->folder)
-        snprintf(status, sizeof(status), "%s: folder", e->name);
+        snprintf(status, sizeof(status), "%s: folder", e->shown);
     else
-        snprintf(status, sizeof(status), "%s: %lld bytes", e->name, (long long)e->size);
+        snprintf(status, sizeof(status), "%s: %lld bytes", e->shown, (long long)e->size);
 }
 
 static void name_tab(struct tab *t) {
     const char *slash = strrchr(t->folder, '/');
 
-    snprintf(t->name, sizeof(t->name), "%s", slash && slash[1] ? slash + 1 : "/");
+    snprintf(t->name, sizeof(t->name), "%s", !strcmp(t->folder, GUI_TRASH) ? "Trash" : slash && slash[1] ? slash + 1 : "/");
 }
 
 static const struct gui_image *big_icon(const struct gui_image *icon) {
@@ -194,6 +229,16 @@ static void set_grid(bool on) {
     gui_post(&(struct gui_message){.type = GUI_REDRAW}); // with the button's new name
 }
 
+// What an entry shows: its own name, or in the trash, the one it had.
+static void name_shown(struct entry *e) {
+    char origin[GUI_PATH_MAX];
+
+    if (in_trash() && gui_trash_origin(e->name, origin))
+        snprintf(e->shown, sizeof(e->shown), "%s", strrchr(origin, '/') + 1);
+    else
+        snprintf(e->shown, sizeof(e->shown), "%s", e->name);
+}
+
 // Lists a folder, going there in this tab, and choosing the entry called select if there is one.
 static bool read_folder(const char *path, const char *select) {
     char went[PATH_MAX];
@@ -217,10 +262,12 @@ static bool read_folder(const char *path, const char *select) {
         char full[PATH_MAX];
         struct stat st;
 
-        if (!strcmp(d->d_name, ".") || !strcmp(d->d_name, "..") || (d->d_name[0] == '.' && !show_hidden)
-            || !has(d->d_name, search))
+        if (!strcmp(d->d_name, ".") || !strcmp(d->d_name, ".."))
             continue;
         snprintf(e->name, sizeof(e->name), "%s", d->d_name);
+        name_shown(e);
+        if ((e->shown[0] == '.' && !show_hidden) || !has(e->shown, search))
+            continue;
         path_of(full, e->name);
         e->folder = stat(full, &st) == 0 && S_ISDIR(st.st_mode);
         e->size = e->folder ? 0 : st.st_size;
@@ -233,15 +280,21 @@ static bool read_folder(const char *path, const char *select) {
     printf("files: in %s:", folder);
     selected = 0;
     for (int i = 0; i < count; i++) {
-        snprintf(labels[i], sizeof(labels[i]), "%s%s", entries[i].name, entries[i].folder ? "/" : "");
+        char path[PATH_MAX];
+
+        path_of(path, entries[i].name);
+        snprintf(labels[i], sizeof(labels[i]), "%s%s", entries[i].shown, entries[i].folder ? "/" : "");
         items[i] = labels[i];
-        icons[i] = strncmp(folder, "/system/bin", 11) || entries[i].folder ? gui_file_icon(entries[i].name, entries[i].folder)
-                                                                         : gui_icon("program");
+        icons[i] = entries[i].folder ? gui_file_icon(entries[i].shown, true)
+                 : gui_is_program(path) ? gui_icon("program")
+                                        : gui_file_icon(entries[i].shown, false);
         printf(" %s", labels[i]);
         if (select && !strcmp(entries[i].name, select))
             selected = i;
     }
     printf("\n");
+    memset(marked, 0, sizeof(marked));
+    marked[selected] = count > 0;
     snprintf(typed, sizeof(typed), "%s", folder);
     asking = NOTHING;
     describe();
@@ -318,34 +371,19 @@ static void start(const char *program, const char *argument, const char *in) {
     }
 }
 
-static const struct entry *chosen(void) {
-    return count ? &entries[selected] : NULL;
+static void start_app(const char *name, const char *argument, const char *in) {
+    char program[GUI_PATH_MAX];
+
+    if (gui_app_path(name, program))
+        start(program, argument, in);
 }
 
-static void open_with(const char *program) {
+static void open_in(const char *app) {
     char path[PATH_MAX];
 
     path_of(path, chosen()->name);
-    printf("files: opening %s\n", path);
-    start(program, path, NULL);
-}
-
-// Folders open here, pictures in the viewer, sounds in the player and other files
-// in the editor.
-static void open_selected(void) {
-    char path[PATH_MAX];
-
-    if (!chosen())
-        return;
-    path_of(path, chosen()->name);
-    if (chosen()->folder) {
-        read_folder(path, NULL);
-    } else {
-        char program[64];
-
-        snprintf(program, sizeof(program), "/system/bin/gui/%s", gui_app_for(path));
-        open_with(program);
-    }
+    printf("files: opening %s in %s\n", path, app);
+    start_app(app, path, NULL);
 }
 
 static void run_selected(void) {
@@ -356,10 +394,28 @@ static void run_selected(void) {
     start(path, NULL, NULL);
 }
 
+// Folders open here, programs run, and other files open in the app the settings
+// choose for their kind.
+static void open_selected(void) {
+    char path[PATH_MAX];
+
+    if (!chosen())
+        return;
+    path_of(path, chosen()->name);
+    if (chosen()->folder)
+        read_folder(path, NULL);
+    else if (gui_is_program(path))
+        run_selected();
+    else
+        open_in(gui_app_for(path));
+}
+
 static void ask(int what) {
     asking = what;
     ask_focus = true;
     snprintf(answer, sizeof(answer), "%s", what == RENAMING ? chosen()->name : "");
+    app_chosen = 0;
+    gui_post(&(struct gui_message){.type = GUI_REDRAW}); // with the strip or dialog asking
 }
 
 static void copy_path(void) {
@@ -370,84 +426,29 @@ static void copy_path(void) {
     snprintf(status, sizeof(status), "Copied %s", path);
 }
 
-// Puts the selected item on the clipboard, by its path, which pasting copies, or
-// moves when it was cut.
+// Puts what's chosen on the clipboard, by their paths, a line each, which pasting
+// copies, or moves when they were cut.
 static void copy_selected(bool cut) {
-    char path[PATH_MAX];
+    static char text[MAX_ENTRIES * 64];
+    int picked[MAX_ENTRIES], n = chosen_items(picked);
+    size_t used = 0;
     FILE *f;
 
-    path_of(path, chosen()->name);
-    if (!gui_clipboard_set(path, strlen(path)))
+    for (int i = 0; i < n && used < sizeof(text) - PATH_MAX; i++) {
+        path_of(text + used, entries[picked[i]].name);
+        used += strlen(text + used);
+        text[used++] = '\n';
+    }
+    text[used ? used - 1 : 0] = '\0';
+    if (!gui_clipboard_set(text, strlen(text)))
         return;
     unlink(CUT);
     if (cut && (f = fopen(CUT, "w"))) {
-        fputs(path, f);
+        fputs(text, f);
         fclose(f);
     }
-    snprintf(status, sizeof(status), "%s %s", cut ? "Cut" : "Copied", chosen()->name);
-    printf("files: %s %s\n", cut ? "cut" : "copied", path);
-}
-
-static bool copy_file(const char *from, const char *to, mode_t mode) {
-    char buffer[16384];
-    int in = open(from, O_RDONLY), out = in < 0 ? -1 : open(to, O_WRONLY | O_CREAT | O_EXCL, mode & 0777);
-    ssize_t n = 0;
-
-    while (out >= 0 && (n = read(in, buffer, sizeof(buffer))) > 0 && write(out, buffer, n) == n)
-        ;
-    if (in >= 0)
-        close(in);
-    return out >= 0 && close(out) == 0 && n == 0;
-}
-
-// Copies a file, or a folder and all in it.
-static bool copy_tree(const char *from, const char *to) {
-    struct stat st;
-    struct dirent *d;
-    DIR *dir;
-    bool ok = true;
-
-    if (stat(from, &st) < 0)
-        return false;
-    if (!S_ISDIR(st.st_mode))
-        return copy_file(from, to, st.st_mode);
-    if (mkdir(to, st.st_mode & 0777) < 0 || !(dir = opendir(from)))
-        return false;
-    while (ok && (d = readdir(dir))) {
-        char a[PATH_MAX], b[PATH_MAX];
-
-        if (!strcmp(d->d_name, ".") || !strcmp(d->d_name, ".."))
-            continue;
-        snprintf(a, sizeof(a), "%s/%s", from, d->d_name);
-        snprintf(b, sizeof(b), "%s/%s", to, d->d_name);
-        ok = copy_tree(a, b);
-    }
-    closedir(dir);
-    return ok;
-}
-
-static bool delete_tree(const char *path) {
-    struct stat st;
-    struct dirent *d;
-    DIR *dir;
-    bool ok = true;
-
-    if (lstat(path, &st) < 0)
-        return false;
-    if (!S_ISDIR(st.st_mode))
-        return unlink(path) == 0;
-    if (!(dir = opendir(path)))
-        return false;
-    while (ok && (d = readdir(dir))) {
-        char inside[PATH_MAX];
-
-        if (!strcmp(d->d_name, ".") || !strcmp(d->d_name, ".."))
-            continue;
-        snprintf(inside, sizeof(inside), "%s/%s", path, d->d_name);
-        ok = delete_tree(inside);
-    }
-    closedir(dir);
-    return ok && rmdir(path) == 0;
+    snprintf(status, sizeof(status), "%s %d item%s", cut ? "Cut" : "Copied", n, n == 1 ? "" : "s");
+    printf("files: %s %s\n", cut ? "cut" : "copied", text);
 }
 
 // A name in a folder that isn't taken: the same, or with (copy), (copy 2) and so on.
@@ -485,9 +486,9 @@ static const char *put(const char *from, const char *into, bool moving, const ch
     free_name(into, base, name);
     snprintf(to, sizeof(to), "%s%s%s", into, strcmp(into, "/") ? "/" : "", name);
     if (moving)
-        ok = rename(from, to) == 0 || (errno == EXDEV && copy_tree(from, to) && delete_tree(from));
+        ok = rename(from, to) == 0 || (errno == EXDEV && gui_copy_tree(from, to) && gui_delete_tree(from));
     else
-        ok = copy_tree(from, to);
+        ok = gui_copy_tree(from, to);
     if (!ok) {
         snprintf(status, sizeof(status), "Can't put %s in %s: %s", base, into, strerror(errno));
         return NULL;
@@ -497,33 +498,41 @@ static const char *put(const char *from, const char *into, bool moving, const ch
     return to;
 }
 
-// Copies what's on the clipboard here, or moves it if it was cut.
+// Copies what's on the clipboard here, a path a line, or moves it if it was cut.
 static void paste(void) {
-    char *from = gui_clipboard_get(NULL), cut[PATH_MAX] = "";
-    struct stat st;
+    static char cut[MAX_ENTRIES * 64], moved[MAX_ENTRIES * 64];
+    char *from = gui_clipboard_get(NULL), last[PATH_MAX] = "";
     FILE *f = fopen(CUT, "r");
-    const char *to;
+    size_t n = 0;
 
     if (f) {
-        if (!fgets(cut, sizeof(cut), f))
-            cut[0] = '\0';
+        n = fread(cut, 1, sizeof(cut) - 1, f);
         fclose(f);
     }
-    if (!from || from[0] != '/' || stat(from, &st) < 0) {
+    cut[n] = '\0';
+    if (!from || from[0] != '/') {
         snprintf(status, sizeof(status), "There's nothing to paste");
         free(from);
         return;
     }
 
     bool moving = !strcmp(cut, from);
+    size_t used = 0;
 
-    if ((to = put(from, folder, moving, moving ? "moved" : "pasted"))) {
-        if (moving) {
-            unlink(CUT);
-            gui_clipboard_set(to, strlen(to)); // where it is now, to paste copies of
+    for (char *line = strtok(from, "\n"); line; line = strtok(NULL, "\n")) {
+        const char *to;
+
+        if (access(line, F_OK) == 0 && (to = put(line, folder, moving, moving ? "moved" : "pasted"))) {
+            snprintf(last, sizeof(last), "%s", to);
+            used += snprintf(moved + used, sizeof(moved) - used, "%s%s", used ? "\n" : "", to);
+            used = used < sizeof(moved) ? used : sizeof(moved) - 1;
         }
-        read_folder(folder, strrchr(to, '/') + 1);
     }
+    if (moving) { // where they are now, to paste copies of
+        unlink(CUT);
+        gui_clipboard_set(moved, used);
+    }
+    read_folder(folder, last[0] ? strrchr(last, '/') + 1 : NULL);
     free(from);
 }
 
@@ -531,7 +540,6 @@ static void paste(void) {
 // it comes here, if it isn't here already. It's moved, or copied with Ctrl held.
 static void take_drop(struct gui_ui *ui) {
     char into[PATH_MAX], from_folder[PATH_MAX];
-    const char *to;
 
     snprintf(from_folder, sizeof(from_folder), "%.*s", (int)(strrchr(dropped, '/') - dropped), dropped);
     if (ui->drop_tab >= 0)
@@ -543,22 +551,40 @@ static void take_drop(struct gui_ui *ui) {
     if ((!strcmp(into, folder) && !strcmp(from_folder[0] ? from_folder : "/", folder) && !drop_copies)
         || !strcmp(into, dropped))
         printf("files: dropped %s where it was\n", dropped);
-    else if ((to = put(dropped, into, !drop_copies, drop_copies ? "copied" : "moved")))
+    else if (!strcmp(into, GUI_TRASH) ? gui_trash(dropped) : put(dropped, into, !drop_copies, drop_copies ? "copied" : "moved") != NULL)
         refresh();
     dropped[0] = '\0';
 }
 
-static void delete_selected(void) {
-    char path[PATH_MAX];
+// Moves what's chosen to the trash, or deletes it for good, or in the trash puts
+// it back where it was.
+enum { TRASH, DELETE, RESTORE };
+static void dispose(int how) {
+    int picked[MAX_ENTRIES], n = chosen_items(picked), done = 0;
 
-    path_of(path, chosen()->name);
-    if (!delete_tree(path)) {
-        snprintf(status, sizeof(status), "Can't delete %s: %s", chosen()->name, strerror(errno));
-        asking = NOTHING;
-        return;
+    for (int i = 0; i < n; i++) {
+        const struct entry *e = &entries[picked[i]];
+        char path[PATH_MAX], to[GUI_PATH_MAX];
+
+        path_of(path, e->name);
+
+        bool ok = how == TRASH     ? gui_trash(path)
+                : how == RESTORE ? gui_trash_restore(e->name, to)
+                : in_trash()     ? gui_trash_delete(e->name)
+                                 : gui_delete_tree(path);
+
+        if (!ok) {
+            snprintf(status, sizeof(status), "Can't %s %s: %s", how == RESTORE ? "restore" : "delete", e->shown,
+                     strerror(errno));
+            break;
+        }
+        printf("files: %s %s\n", how == TRASH ? "trashed" : how == RESTORE ? "restored" : "deleted",
+               how == RESTORE ? to : in_trash() ? e->shown : path);
+        done++;
     }
-    printf("files: deleted %s\n", path);
-    read_folder(folder, NULL);
+    asking = NOTHING;
+    if (done == n)
+        read_folder(folder, NULL);
 }
 
 // Does what the strip asked with the name it was given.
@@ -566,8 +592,10 @@ static void answered(void) {
     char path[PATH_MAX], from[PATH_MAX];
     int fd = -1;
 
-    if (asking == DELETING) {
-        delete_selected();
+    if (asking == OPENING_WITH) {
+        asking = NOTHING;
+        if (app_count)
+            open_in(apps[app_chosen]);
         return;
     }
     if (!answer[0] || strchr(answer, '/')) {
@@ -594,7 +622,7 @@ static void answered(void) {
 
 // Says where a widget is when that changes, for the tests to find it.
 static void report(struct gui_ui *ui, int index, const char *what) {
-    static struct gui_rect places[6];
+    static struct gui_rect places[9];
     struct gui_rect r = gui_last_rect(ui);
 
     if (memcmp(&places[index], &r, sizeof(r)))
@@ -650,17 +678,18 @@ static void sidebar(struct gui_ui *ui) {
     static const char *const sorts[] = {"By name", "By size", "By date"};
     int by = sort_by;
     bool hidden = show_hidden;
-    const struct gui_image *place_icons[5];
+    const struct gui_image *place_icons[PLACE_COUNT];
     int at = -1;
 
-    for (int i = 0; i < 5; i++) {
+    for (int i = 0; i < PLACE_COUNT; i++) {
         place_icons[i] = gui_file_icon("", true);
         if (!strcmp(place_paths[i], folder))
             at = i;
     }
     gui_column_begin(ui, SIDEBAR);
-    if (gui_list_icons(ui, PLACES, place_names, place_icons, 5, &at, 5) && at >= 0) {
+    if (gui_list_icons(ui, PLACES, place_names, place_icons, PLACE_COUNT, &at, PLACE_COUNT) && at >= 0) {
         remember();
+        mkdir(place_paths[at], 0755); // the trash, if nothing's been put there yet
         read_folder(place_paths[at], NULL);
     }
     if (gui_dropdown(ui, "##sort", sorts, 3, &by))
@@ -672,24 +701,31 @@ static void sidebar(struct gui_ui *ui) {
     gui_column_end(ui);
 }
 
-// Asks for a name under the address bar.
+// Asks for a name, or the app to open something with, under the address bar.
 static void asking_strip(struct gui_ui *ui) {
     static const char *const questions[] = {
-        [RENAMING] = "Rename to", [NEW_FOLDER] = "New folder", [NEW_FILE] = "New file",
+        [RENAMING] = "Rename to", [NEW_FOLDER] = "New folder", [NEW_FILE] = "New file", [OPENING_WITH] = "Open with",
     };
     bool yes, no;
 
     if (ask_focus)
-        gui_set_focus(ui, ANSWER, answer);
+        gui_set_focus(ui, asking == OPENING_WITH ? "##app" : ANSWER, answer);
     ask_focus = false;
     gui_label(ui, "%s:", questions[asking]);
     gui_same_line(ui);
-    yes = gui_button(ui, "OK");
+    yes = gui_button(ui, asking == OPENING_WITH ? "Open" : "OK");
+    report(ui, 8, "ok");
     gui_same_line(ui);
     no = gui_button(ui, "Cancel");
     gui_same_line(ui);
-    gui_textbox(ui, ANSWER, answer, sizeof(answer));
-    yes |= gui_focused(ui, ANSWER) && gui_key(ui, KEY_ENTER);
+    if (asking == OPENING_WITH) {
+        gui_dropdown(ui, "##app", apps, app_count, &app_chosen);
+        report(ui, 6, "app");
+        yes |= gui_focused(ui, "##app") && gui_key(ui, KEY_ENTER) && !ui->popup;
+    } else {
+        gui_textbox(ui, ANSWER, answer, sizeof(answer));
+        yes |= gui_focused(ui, ANSWER) && gui_key(ui, KEY_ENTER);
+    }
     if (no || gui_key(ui, KEY_ESCAPE))
         asking = NOTHING;
     else if (yes)
@@ -732,16 +768,17 @@ static void human_size(char *out, size_t n, off_t size) {
         snprintf(out, n, "%.1f MB (%lld bytes)", size / (1024.0 * 1024), (long long)size);
 }
 
-// What's known about the selected item, worked out once when it's asked for.
+// What's known about the selected item, worked out once when it's asked for. In
+// the trash, that's where it came from.
 static void describe_properties(char *out, size_t n) {
     const struct entry *e = chosen();
-    char path[PATH_MAX], size[64], when[32], kind[64];
+    char path[PATH_MAX], size[64], when[32], kind[64], from[GUI_PATH_MAX];
     struct stat st;
     int files = 0;
 
     path_of(path, e->name);
     if (stat(path, &st) < 0) {
-        snprintf(out, n, "Can't look at %s: %s", e->name, strerror(errno));
+        snprintf(out, n, "Can't look at %s: %s", e->shown, strerror(errno));
         return;
     }
     human_size(size, sizeof(size), e->folder ? size_of_tree(path, &files) : st.st_size);
@@ -749,45 +786,67 @@ static void describe_properties(char *out, size_t n) {
     if (e->folder)
         snprintf(kind, sizeof(kind), "Folder of %d files", files);
     else
-        snprintf(kind, sizeof(kind), "%s", icons[selected] == gui_icon("image")   ? "Picture"
+        snprintf(kind, sizeof(kind), "%s", gui_is_program(path)                 ? "Program"
+                                         : icons[selected] == gui_icon("image") ? "Picture"
                                          : icons[selected] == gui_icon("audio") ? "Sound"
-                                         : st.st_mode & 0111                    ? "Program"
                                                                                 : "File");
-    snprintf(out, n, "Name:      %s\nKind:      %s\nSize:      %s\nChanged:   %s\nIn:        %s\nMode:      %c%c%c%c%c%c%c%c%c",
-             e->name, kind, size, when, folder, st.st_mode & 0400 ? 'r' : '-', st.st_mode & 0200 ? 'w' : '-',
-             st.st_mode & 0100 ? 'x' : '-', st.st_mode & 040 ? 'r' : '-', st.st_mode & 020 ? 'w' : '-',
-             st.st_mode & 010 ? 'x' : '-', st.st_mode & 04 ? 'r' : '-', st.st_mode & 02 ? 'w' : '-',
-             st.st_mode & 01 ? 'x' : '-');
+    if (!in_trash() || !gui_trash_origin(e->name, from))
+        snprintf(from, sizeof(from), "%s", folder);
+    else
+        *strrchr(from, '/') = '\0';
+    snprintf(out, n, "Name:      %s\nKind:      %s\nSize:      %s\nChanged:   %s\n%s%s\nMode:      %c%c%c%c%c%c%c%c%c",
+             e->shown, kind, size, when, in_trash() ? "From:      " : "In:        ", from[0] ? from : "/",
+             st.st_mode & 0400 ? 'r' : '-', st.st_mode & 0200 ? 'w' : '-', st.st_mode & 0100 ? 'x' : '-',
+             st.st_mode & 040 ? 'r' : '-', st.st_mode & 020 ? 'w' : '-', st.st_mode & 010 ? 'x' : '-',
+             st.st_mode & 04 ? 'r' : '-', st.st_mode & 02 ? 'w' : '-', st.st_mode & 01 ? 'x' : '-');
     printf("files: properties of %s: %s\n", path, size);
 }
 
-// Deleting and properties are dialogs over the window.
+static bool dialog_open(void) {
+    return asking == DELETING || asking == EMPTYING || asking == PROPERTIES;
+}
+
+// Deleting for good, emptying the trash and properties are dialogs over the window.
 static void dialogs(struct gui_ui *ui) {
-    static const char *const delete_buttons[] = {"Delete", "Cancel"}, *const ok[] = {"OK"};
+    static const char *const delete_buttons[] = {"Delete", "Cancel"}, *const empty_buttons[] = {"Empty", "Cancel"},
+                             *const ok[] = {"OK"};
     static char text[PATH_MAX + 512];
     static int shown = NOTHING;
+    int picked[MAX_ENTRIES], n = chosen_items(picked);
 
-    if (asking != DELETING && asking != PROPERTIES) {
+    if (!dialog_open()) {
         shown = NOTHING;
         return;
     }
     if (shown != (int)asking && asking == PROPERTIES)
         describe_properties(text, sizeof(text));
+    else if (shown != (int)asking && asking == EMPTYING)
+        snprintf(text, sizeof(text), "Delete everything in the trash?\nIt can't be undone.");
+    else if (shown != (int)asking && n > 1)
+        snprintf(text, sizeof(text), "Delete these %d items for good?\nIt can't be undone.", n);
     else if (shown != (int)asking)
-        snprintf(text, sizeof(text), "Delete %s%s?\nIt can't be undone.", chosen()->name,
+        snprintf(text, sizeof(text), "Delete %s%s for good?\nIt can't be undone.", chosen()->shown,
                  chosen()->folder ? " and everything in it" : "");
+    if (shown != (int)asking)
+        printf("files: asking to %s\n", asking == EMPTYING ? "empty the trash" : asking == DELETING ? "delete" : "show properties");
     shown = asking;
 
-    int button = gui_dialog(ui, text, asking == DELETING ? delete_buttons : ok, asking == DELETING ? 2 : 1);
+    int button = asking == PROPERTIES ? gui_dialog(ui, text, ok, 1)
+                                      : gui_dialog(ui, text, asking == EMPTYING ? empty_buttons : delete_buttons, 2);
 
-    if (button == 1 && asking == DELETING)
-        delete_selected();
-    else if (button)
+    if (button == 1 && asking == DELETING) {
+        dispose(DELETE);
+    } else if (button == 1 && asking == EMPTYING) {
+        if (gui_trash_empty())
+            printf("files: emptied the trash\n");
+        read_folder(folder, NULL);
+    } else if (button) {
         asking = NOTHING;
+    }
 }
 
 // Right-clicking an item has what can be done with it, and anywhere else in the
-// list what can be done in the folder.
+// list what can be done in the folder. In the trash, things can be put back.
 static void context_menu(struct gui_ui *ui, struct gui_rect list) {
     if (!gui_context_menu(ui, "##menu", list))
         return;
@@ -795,16 +854,25 @@ static void context_menu(struct gui_ui *ui, struct gui_rect list) {
     const struct entry *e = ui->clicked_item >= 0 ? chosen() : NULL;
     char path[PATH_MAX];
 
-    if (e) {
+    if (e && in_trash()) {
+        if (gui_menu_item(ui, "Restore"))
+            dispose(RESTORE);
+        if (gui_menu_item(ui, "Delete for good"))
+            ask(DELETING);
+        gui_menu_separator(ui);
+        if (gui_menu_item(ui, "Properties"))
+            ask(PROPERTIES);
+    } else if (e) {
+        path_of(path, e->name);
         if (gui_menu_item(ui, "Open"))
             open_selected();
-        if (e->folder && gui_menu_item(ui, "Open in new tab")) {
-            path_of(path, e->name);
+        if (e->folder && gui_menu_item(ui, "Open in new tab"))
             new_tab(path);
-        }
         if (!e->folder && gui_menu_item(ui, "Open in Editor"))
-            open_with(EDITOR);
-        if (!e->folder && gui_menu_item(ui, "Run"))
+            open_in("editor");
+        if (!e->folder && gui_menu_item(ui, "Open with..."))
+            ask(OPENING_WITH);
+        if (!e->folder && gui_is_program(path) && gui_menu_item(ui, "Run"))
             run_selected();
         gui_menu_separator(ui);
         if (gui_menu_item(ui, "Cut"))
@@ -816,10 +884,15 @@ static void context_menu(struct gui_ui *ui, struct gui_rect list) {
         if (gui_menu_item(ui, "Rename"))
             ask(RENAMING);
         if (gui_menu_item(ui, "Delete"))
-            ask(DELETING);
+            dispose(TRASH);
         gui_menu_separator(ui);
         if (gui_menu_item(ui, "Properties"))
             ask(PROPERTIES);
+    } else if (in_trash()) {
+        if (gui_menu_item(ui, "Empty trash"))
+            ask(EMPTYING);
+        if (gui_menu_item(ui, "Refresh"))
+            refresh();
     } else {
         if (gui_menu_item(ui, "New folder"))
             ask(NEW_FOLDER);
@@ -829,28 +902,35 @@ static void context_menu(struct gui_ui *ui, struct gui_rect list) {
             paste();
         gui_menu_separator(ui);
         if (gui_menu_item(ui, "Open terminal here"))
-            start(TERM, NULL, folder);
+            start_app("term", NULL, folder);
         if (gui_menu_item(ui, "Refresh"))
             refresh();
     }
     gui_menu_end(ui);
 }
 
-// Keys for the list, while it has the keyboard.
+// Keys for the list, while it has the keyboard. Delete moves what's chosen to the
+// trash, and with Shift, or in the trash, deletes it for good, once that's agreed to.
 static void list_keys(struct gui_ui *ui) {
+    bool shift = false;
+
+    for (int i = 0; i < ui->key_count; i++)
+        shift |= ui->keys[i].code == KEY_DELETE && (ui->keys[i].modifiers & KEY_MOD_SHIFT);
     if (!gui_focused(ui, LIST) || asking)
         return;
     if (gui_key(ui, KEY_BACKSPACE))
         go_up();
     else if (gui_key(ui, KEY_F5))
         refresh();
-    else if (chosen() && gui_key(ui, KEY_F2))
+    else if (chosen() && gui_key(ui, KEY_F2) && !in_trash())
         ask(RENAMING);
-    else if (chosen() && gui_key(ui, KEY_DELETE))
+    else if (chosen() && gui_key(ui, KEY_DELETE) && (shift || in_trash()))
         ask(DELETING);
-    else if (chosen() && (gui_shortcut(ui, 'c') || gui_shortcut(ui, 'x')))
+    else if (chosen() && gui_key(ui, KEY_DELETE))
+        dispose(TRASH);
+    else if (chosen() && (gui_shortcut(ui, 'c') || gui_shortcut(ui, 'x')) && !in_trash())
         copy_selected(gui_shortcut(ui, 'x'));
-    else if (gui_shortcut(ui, 'v'))
+    else if (gui_shortcut(ui, 'v') && !in_trash())
         paste();
 }
 
@@ -882,7 +962,7 @@ static void frame(struct gui_ui *ui) {
     while (waitpid(-1, NULL, WNOHANG) > 0)
         ; // programs it started that have finished
     gui_ui_begin(ui);
-    if (asking == DELETING || asking == PROPERTIES)
+    if (dialog_open())
         dialogs(ui);
     else
         gui_help(ui, help);
@@ -897,11 +977,18 @@ static void frame(struct gui_ui *ui) {
     else if (result == GUI_TABS_CLOSE)
         close_tab(closing);
     address_bar(ui);
-    if (asking)
+    if (asking && !dialog_open())
         asking_strip(ui);
+    if (in_trash()) {
+        if (gui_button(ui, "Empty trash") && count)
+            ask(EMPTYING);
+        report(ui, 7, "empty");
+        gui_same_line(ui);
+    }
     gui_label(ui, "%s", status);
     sidebar(ui);
 
+    gui_list_marks(ui, marked);
     result = grid ? gui_grid(ui, LIST, items, pictures, count, &selected)
                   : gui_list_icons(ui, LIST, items, icons, count, &selected, 0);
 
@@ -911,9 +998,9 @@ static void frame(struct gui_ui *ui) {
     drag(ui, list);
     if (result == GUI_LIST_ACTIVATED)
         open_selected();
-    else if (result == GUI_LIST_CHANGED && (asking == RENAMING || asking == DELETING))
+    else if (result == GUI_LIST_CHANGED && (asking == RENAMING || asking == OPENING_WITH))
         asking = NOTHING; // they were about the one that was selected
-    if (result == GUI_LIST_CHANGED)
+    if (result)
         describe();
     if (ui->dropping && dropped[0])
         take_drop(ui);
@@ -923,10 +1010,25 @@ static void frame(struct gui_ui *ui) {
     fflush(stdout);
 }
 
+// Goes to the folder a file's in, with it selected, for the desktop to ask about it.
+static bool select_file(const char *path, int what) {
+    char in[PATH_MAX];
+    const char *slash = strrchr(path, '/');
+
+    if (!slash)
+        return false;
+    snprintf(in, sizeof(in), "%.*s", (int)(slash - path), path);
+    if (!read_folder(in[0] ? in : "/", slash + 1) || !count || strcmp(chosen()->name, slash + 1))
+        return false;
+    ask(what);
+    return true;
+}
+
 // A window showing what's in folders, in tabs, to go about them and open what's there.
 int main(int argc, char **argv) {
-    help_option(argc, argv, "usage: files [folder]\n"
-                            "Opens a window showing what's in the folder, or the home folder.\n");
+    help_option(argc, argv, "usage: files [folder | --rename file | --properties file]\n"
+                            "Opens a window showing what's in the folder, or the home folder, or asks\n"
+                            "for a file's new name or shows its properties.\n");
     if (!gui_connect()) {
         dprintf(STDERR_FILENO, "files: wm isn't running\n");
         return 1;
@@ -947,8 +1049,16 @@ int main(int argc, char **argv) {
     for (int i = 0; i < 4; i++)
         snprintf(place_paths[i], PATH_MAX, "%s%s%s", home ? home : "", i ? "/" : "", i ? place_names[i] : "");
     snprintf(place_paths[4], PATH_MAX, "/");
+    snprintf(place_paths[5], PATH_MAX, GUI_TRASH);
+    app_count = gui_app_names(app_names, MAX_APPS);
+    for (int i = 0; i < app_count; i++)
+        apps[i] = app_names[i];
 
-    if (!read_folder(argc > 1 ? argv[1] : home ? home : "/", NULL))
+    bool asked = argc > 2 && (!strcmp(argv[1], "--rename") || !strcmp(argv[1], "--properties"));
+
+    if (asked && !select_file(argv[2], !strcmp(argv[1], "--rename") ? RENAMING : PROPERTIES))
+        dprintf(STDERR_FILENO, "files: there's no %s\n", argv[2]);
+    else if (!asked && !read_folder(argc > 1 ? argv[1] : home ? home : "/", NULL))
         read_folder("/", NULL);
     gui_ui_init(&ui, window);
     frame(&ui);

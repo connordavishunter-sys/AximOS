@@ -6,10 +6,14 @@
 #include <unistd.h>
 
 #define SHELL_PATH "/system/bin/dash"
+#define TTYLOGIN_PATH "/system/bin/ttylogin"
 #define WM_PATH "/system/bin/wm"
 #define EXEC_FAILED 127
 
-static char *const env[] = {"PATH=/system/bin:/system/bin/gui", "HOME=/home", "SHELL=" SHELL_PATH, "PS1=$PWD$ ", NULL};
+// The apps are in /system/bin/gui and its folders, as the start menu shows them.
+static char *const env[] = {"PATH=/system/bin:/system/bin/gui:/system/bin/gui/Accessories:/system/bin/gui/Games:"
+                            "/system/bin/gui/Multimedia:/system/bin/gui/System:/system/bin/gui/Demos",
+                            "HOME=/home", "SHELL=" SHELL_PATH, "PS1=$PWD$ ", NULL};
 
 // Runs a program in its own group, with the terminal to go with it, which it waits
 // for otherwise, and collects any orphans until it's done.
@@ -34,7 +38,8 @@ static int run(const char *path, char *arg) {
     return status;
 }
 
-// Starts the desktop, behind its log-in screen, unless Shift is held, and keeps a shell running after it.
+// Starts the desktop, behind its log-in screen, unless Shift is held, and keeps a
+// shell running after it, behind ttylogin, which asks for the same account.
 int main(void) {
     int modifiers = 0;
 
@@ -43,7 +48,9 @@ int main(void) {
         printf("init: Shift is held, so starting the shell\n");
     else
         run(WM_PATH, "--login");
-    while (run(SHELL_PATH, NULL) != EXEC_FAILED)
+    while (run(TTYLOGIN_PATH, NULL) != EXEC_FAILED)
+        ;
+    while (run(SHELL_PATH, NULL) != EXEC_FAILED) // without ttylogin
         ;
     return 1;
 }

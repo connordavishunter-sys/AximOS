@@ -6,6 +6,9 @@ from vm import VM, check, finish
 
 DESKTOP, DARK_BACKGROUND, LIGHT_BACKGROUND, LIGHT_TASKBAR = 0x1E2430, 0x1E2129, 0xF3F4F7, 0xEDEFF3
 SETTINGS_X, SETTINGS_Y = 112, 116 # the second window's contents, after widgets'
+# The taskbar shows a little of what's under it, which for the light one over the
+# dark desktop is a good way from its own colour.
+near = lambda a, b: all(abs((a >> s & 255) - (b >> s & 255)) < 64 for s in (0, 8, 16))
 
 
 class Pointer:
@@ -68,7 +71,7 @@ try:
 
     # Text is smoothed, with shades between the clock's colour and the taskbar's,
     # until Smooth text is turned off.
-    shades = lambda px: len({px(x, y) for x in range(1220, 1270) for y in range(778, 794)})
+    shades = lambda px: len({px(x, y) for x in range(1212, 1262) for y in range(770, 786)})
     check('smooth text to start with', shades(px) > 4, shades(px))
     at = v.mark()
     mouse.click(*middle('smooth', 6))
@@ -86,7 +89,7 @@ try:
     w, h, px = v.screenshot()
     check('settings turns light', px(SETTINGS_X + 5, SETTINGS_Y + 300) == LIGHT_BACKGROUND,
           hex(px(SETTINGS_X + 5, SETTINGS_Y + 300)))
-    check('and so does the taskbar', px(700, 790) == LIGHT_TASKBAR, hex(px(700, 790)))
+    check('and so does the taskbar', near(px(700, 790), LIGHT_TASKBAR), hex(px(700, 790)))
     check('and the other program', px(85, 300) == LIGHT_BACKGROUND, hex(px(85, 300)))
 
     # Wallpapers, with a thumbnail of each, the default first.
@@ -113,13 +116,13 @@ try:
     tab('Date & time')
     mouse.to(1270, 700)
     w, h, px = v.screenshot()
-    before = count(px, 1200, 778, 1226, 792, 0x1E2129)
+    before = count(px, 1192, 770, 1218, 784, 0x1E2129)
     at = v.mark()
     mouse.click(*middle('clock')); v.key('down'); v.key('ret')
     check('choosing a 12 hour clock', v.wait('settings: clock 12', 5, at), v.text(at))
     mouse.to(1270, 700); time.sleep(0.5)
     w, h, px = v.screenshot()
-    after = count(px, 1200, 778, 1226, 792, 0x1E2129)
+    after = count(px, 1192, 770, 1218, 784, 0x1E2129)
     check('changes the clock on the taskbar', before == 0 and after > 10, (before, after))
 
     # The time zone, found by searching.
@@ -131,7 +134,7 @@ try:
 
     # The resolution: picked from the list, 1280x800 fifth, then applied. Windows
     # stay where they were, as they fit.
-    tab('Sound'); tab('Apps'); tab('Appearance'); tab('Display')
+    tab('Sound'); tab('Apps'); tab('Taskbar'); tab('Appearance'); tab('Display')
     at = v.mark()
     mouse.click(*middle('resolution')); time.sleep(0.3)
     v.key('up'); v.key('up'); v.key('up'); v.key('ret'); time.sleep(0.5)
@@ -142,7 +145,7 @@ try:
     time.sleep(1)
     w, h, px = v.screenshot()
     check('the screen is that size', (w, h) == (1024, 768), (w, h))
-    check('with the taskbar at the bottom', px(700, 758) == LIGHT_TASKBAR, hex(px(700, 758)))
+    check('with the taskbar at the bottom', near(px(700, 758), LIGHT_TASKBAR), hex(px(700, 758)))
     check('and settings where it was', px(SETTINGS_X + 5, SETTINGS_Y + 300) == LIGHT_BACKGROUND,
           hex(px(SETTINGS_X + 5, SETTINGS_Y + 300)))
     check('it asks whether to keep it', v.wait('settings: keep? 15', 5, at), v.text(at))
@@ -177,7 +180,7 @@ try:
     check('and used next time', v.wait('wm: running at 1024x768', 10, at), v.text(at))
     time.sleep(1)
     w, h, px = v.screenshot()
-    check('with the light taskbar', px(700, 758) == LIGHT_TASKBAR, hex(px(700, 758)))
+    check('with the light taskbar', near(px(700, 758), LIGHT_TASKBAR), hex(px(700, 758)))
     v.key('meta_l-shift-q'); time.sleep(1)
 
     # Starting at another size than the screen's draws only what fits it.

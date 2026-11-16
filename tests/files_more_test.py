@@ -1,5 +1,5 @@
 """Checks Files' places down the side, hidden files, sorting, searching, the
-properties of a file, deleting a folder with what's in it, and the viewer going
+properties of a file, moving a folder with what's in it to the trash, and the viewer going
 through a folder's pictures and turning them."""
 import re, time
 from vm import VM, check, finish
@@ -60,10 +60,7 @@ try:
 
     at = v.mark()
     click(X + lx + 60, Y + ly + 2 + 11); v.key('delete')
-    time.sleep(0.5)
-    check('deleting asks first', 'files: deleted' not in v.text(at), v.text(at))
-    v.key('ret')
-    check('and deletes a folder with what is in it', v.wait('files: deleted /tmp/m/full', 5, at), v.text(at))
+    check('Delete moves a folder with what is in it to the trash', v.wait('files: trashed /tmp/m/full', 5, at), v.text(at))
 
     # The places: Home first.
     at = v.mark()

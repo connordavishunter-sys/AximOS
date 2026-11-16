@@ -32,6 +32,8 @@
 #define BRIGHT 8
 #define DEFAULT_FOREGROUND 16
 #define DEFAULT_BACKGROUND 17
+// How see-through the background is, in its top byte, which wm reads: as much as title bars.
+#define SEE_THROUGH 0x38000000
 static uint32_t palette[18] = {
     0x000000, 0xCC3333, 0x33AA33, 0xCCAA33, 0x3366CC, 0xAA44AA, 0x33AAAA, 0xC0C0C0,
     0x666666, 0xFF6666, 0x66DD66, 0xFFDD66, 0x6699FF, 0xDD77DD, 0x66DDDD, 0xFFFFFF,
@@ -372,7 +374,7 @@ static void draw_scrollbar(void) {
 }
 
 static uint32_t panel_colour(void) {
-    return palette[DEFAULT_BACKGROUND] == 0x161A22 ? 0x2B303B : 0xE2E5EB;
+    return (palette[DEFAULT_BACKGROUND] & 0xFFFFFF) == 0x161A22 ? 0x2B303B : 0xE2E5EB;
 }
 
 static void box_text(int x, int y, const char *s, uint32_t colour) {
@@ -516,7 +518,7 @@ static void use_theme(void) {
 
     gui_settings_load(&settings);
     palette[DEFAULT_FOREGROUND] = settings.light ? 0x1E2129 : 0xD8DEE9;
-    palette[DEFAULT_BACKGROUND] = settings.light ? 0xFAFAFA : 0x161A22;
+    palette[DEFAULT_BACKGROUND] = SEE_THROUGH | (settings.light ? 0xFAFAFA : 0x161A22);
 }
 
 static void paint_background(void);
@@ -946,6 +948,7 @@ int main(int argc, char **argv) {
         return 1;
     }
     gui_set_cursor(window, GUI_CURSOR_TEXT);
+    gui_set_translucent(window, true);
     use_theme();
     layout();
 

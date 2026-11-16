@@ -1,17 +1,11 @@
+#include "account.h"
 #include <dirent.h>
 #include <gui.h>
-#include <mbedtls/sha256.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
-// The one account, as its name, a random salt and the password's hash, in hex.
-#define ACCOUNT "/system/etc/account"
-#define SALT 16
-#define HASH 32
-#define ROUNDS 50000 // of SHA-256, so guessing is slow
-#define NAME_SIZE 32
 #define MAX_WALLPAPERS 12
 #define THUMB_WIDTH 136
 #define THUMB_HEIGHT 85
@@ -26,11 +20,8 @@ static const char *const themes[] = {"Dark", "Light"};
 
 static enum page page;
 static struct gui_window *window;
-static char name[NAME_SIZE], password[128], again[128], message[96];
-static struct {
-    char name[NAME_SIZE];
-    uint8_t salt[SALT], hash[HASH];
-} account;
+static char name[ACCOUNT_NAME], password[128], again[128], message[96];
+static struct account account;
 static struct gui_settings settings;
 static struct {
     char path[GUI_PATH_MAX], name[32];
@@ -38,83 +29,6 @@ static struct {
 } wallpapers[MAX_WALLPAPERS];
 static int wallpaper_count;
 static char wallpaper[GUI_PATH_MAX];
-
-static void hash(const uint8_t salt[SALT], const char *secret, uint8_t out[HASH]) {
-    uint8_t round[HASH + SALT];
-    size_t length = strlen(secret);
-    uint8_t *first = malloc(SALT + length);
-
-    memcpy(first, salt, SALT);
-    memcpy(first + SALT, secret, length);
-    mbedtls_sha256(first, SALT + length, out, 0);
-    free(first);
-    memcpy(round + HASH, salt, SALT);
-    for (int i = 1; i < ROUNDS; i++) {
-        memcpy(round, out, HASH);
-        mbedtls_sha256(round, sizeof(round), out, 0);
-    }
-}
-
-static void to_hex(const uint8_t *bytes, int count, char *out) {
-    for (int i = 0; i < count; i++)
-        sprintf(out + 2 * i, "%02x", bytes[i]);
-}
-
-static bool from_hex(const char *hex, uint8_t *out, int count) {
-    for (int i = 0; i < count; i++) {
-        unsigned byte;
-
-        if (sscanf(hex + 2 * i, "%2x", &byte) != 1)
-            return false;
-        out[i] = (uint8_t)byte;
-    }
-    return strlen(hex) == (size_t)count * 2;
-}
-
-static bool load_account(void) {
-    FILE *f = fopen(ACCOUNT, "r");
-    char salt[2 * SALT + 1], digest[2 * HASH + 1];
-    bool ok = f && fscanf(f, "%31s %32s %64s", account.name, salt, digest) == 3 && from_hex(salt, account.salt, SALT)
-           && from_hex(digest, account.hash, HASH);
-
-    if (f)
-        fclose(f);
-    return ok;
-}
-
-static bool save_account(void) {
-    char salt[2 * SALT + 1], digest[2 * HASH + 1];
-    FILE *f;
-
-    snprintf(account.name, sizeof(account.name), "%s", name);
-    if (getentropy(account.salt, SALT) < 0)
-        return false;
-    hash(account.salt, password, account.hash);
-    to_hex(account.salt, SALT, salt);
-    to_hex(account.hash, HASH, digest);
-    if (!(f = fopen(ACCOUNT, "w")))
-        return false;
-    fprintf(f, "%s %s %s\n", account.name, salt, digest);
-    return fclose(f) == 0;
-}
-
-// Compares every byte, so how long it takes says nothing about how close it was.
-static bool password_right(void) {
-    uint8_t tried[HASH], differ = 0;
-
-    hash(account.salt, password, tried);
-    for (int i = 0; i < HASH; i++)
-        differ |= tried[i] ^ account.hash[i];
-    return !differ;
-}
-
-static bool name_ok(const char *s) {
-    for (const char *c = s; *c; c++) {
-        if (!(*c >= 'a' && *c <= 'z') && !(*c >= 'A' && *c <= 'Z') && !(*c >= '0' && *c <= '9') && !strchr("._-", *c))
-            return false;
-    }
-    return *s;
-}
 
 // The wallpapers that come with the system, the default first.
 static int compare_wallpapers(const void *a, const void *b) {
@@ -228,18 +142,18 @@ static bool create(struct gui_ui *ui) {
     if (!submit)
         return false;
 
-    const char *problem = !name_ok(name)        ? "A username is letters, digits, dots, dashes and underscores."
-                        : !password[0]          ? "Choose a password."
-                        : strcmp(password, again) ? "The passwords aren't the same."
-                                                  : NULL;
+    const char *problem = !account_name_ok(name) ? "A username is letters, digits, dots, dashes and underscores."
+                        : !password[0]           ? "Choose a password."
+                        : strcmp(password, again)  ? "The passwords aren't the same."
+                                                   : NULL;
 
-    if (!problem && !save_account())
+    if (!problem && !account_save(&account, name, password))
         problem = "Couldn't save the account.";
     if (problem) {
         snprintf(message, sizeof(message), "%s", problem);
         printf("login: %s\n", problem);
         password[0] = again[0] = '\0';
-        gui_set_focus(ui, name_ok(name) ? "##password" : "##name", name);
+        gui_set_focus(ui, account_name_ok(name) ? "##password" : "##name", name);
         return false;
     }
     printf("login: created %s\n", account.name);
@@ -267,7 +181,7 @@ static bool log_in(struct gui_ui *ui) {
         return false;
 
     // The name's checked after the password, so a wrong one takes as long.
-    bool right = password_right() && (page == LOCKED || !strcmp(name, account.name));
+    bool right = account_check(&account, password) && (page == LOCKED || !strcmp(name, account.name));
 
     password[0] = '\0';
     if (!right) {
@@ -308,7 +222,7 @@ int main(int argc, char **argv) {
     struct gui_message e;
     bool done = false;
 
-    page = !load_account() ? WELCOME : argc > 1 && !strcmp(argv[1], "--lock") ? LOCKED : LOG_IN;
+    page = !account_load(&account) ? WELCOME : argc > 1 && !strcmp(argv[1], "--lock") ? LOCKED : LOG_IN;
     if (page == WELCOME) {
         gui_settings_load(&settings);
         load_wallpapers();

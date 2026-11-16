@@ -64,3 +64,4 @@ struct servent *getservbyname(const char *name, const char *protocol);
 // goes back to asking DHCP.
 int net_info(struct net_info *out);
 int net_set(uint32_t address, uint32_t netmask, uint32_t gateway, uint32_t dns);
+int net_airplane(bool on); // sending and taking nothing while on

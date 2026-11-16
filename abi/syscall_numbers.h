@@ -79,6 +79,7 @@
 #define SYS_NET_SET 73   // net_set(address, netmask, gateway, dns): 0
 #define SYS_GETRANDOM 74 // getrandom(buf, len, flags): bytes written
 #define SYS_SETSID 75    // setsid(): the new session and group, which is the caller's pid
+#define SYS_NET_AIRPLANE 76 // net_airplane(on): 0
 
 #define O_RDONLY 0
 #define O_WRONLY 1

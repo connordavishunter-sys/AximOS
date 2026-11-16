@@ -42,15 +42,18 @@
 // out of 255, at SHADOW_ALPHA. Their strength, out of 256, fades over FADE_MS
 // between what's right for focused windows and the rest, and from nothing for
 // new windows, quickly at first and slowing to a stop.
-#define SHADOW 16
-#define SHADOW_DROP 4
-#define SHADOW_ALPHA 120
+#define SHADOW 8
+#define SHADOW_DROP 0
+#define SHADOW_ALPHA 80
 #define SHADOW_FOCUSED 256
 #define SHADOW_UNFOCUSED 140
 #define FADE_MS 240
 #define FRAME_MS 16
 
-#define TASKBAR_HEIGHT 28
+#define TASKBAR_HEIGHT 32
+#define BAR_ALPHA 200 // out of 256: the taskbar and title bars show a little of what's under them
+#define RADIUS 8      // of windows', menus' and panels' corners
+#define SMALL_RADIUS 4 // of buttons and highlights
 #define TASKBAR_BUTTON_WIDTH 160
 #define LAUNCHER_WIDTH 64
 
@@ -59,19 +62,16 @@
 #define MAX_ICONS 32
 #define ICON_SIZE 16
 
-// The wallpaper is this, unless /system/etc/wallpaper names another, or "none"
-// for the plain colour.
-#define MAX_APPS 32
 #define MENU_WIDTH 200
-#define ITEM_HEIGHT 24 // in the start menu and the Alt+Tab switcher
-#define MENU_GAP 9     // between the apps and Run and the power items
+#define ITEM_HEIGHT 24 // in menus and the Alt+Tab switcher
+#define MENU_GAP 9     // a line between items in a menu
 #define SWITCHER_WIDTH 360
 
 // Colours, from the theme the settings choose. What's on the focused title bar,
 // the red close button and the grey ones is white in both.
 struct theme {
     uint32_t desktop, hint, border, title_focused, title_unfocused, title_text_unfocused;
-    uint32_t taskbar, taskbar_line, taskbar_button, taskbar_minimized, text, dim_text;
+    uint32_t taskbar, taskbar_line, taskbar_button, taskbar_minimized, text, dim_text, on_accent;
 };
 
 static const struct theme dark = {
@@ -84,6 +84,7 @@ static const struct theme light = {
     .title_unfocused = 0xD9DDE5, .title_text_unfocused = 0x2B2F38, .taskbar = 0xEDEFF3, .taskbar_line = 0xC9CED8,
     .taskbar_button = 0xDCE0E8, .taskbar_minimized = 0xE8EBF0, .text = 0x1E2129, .dim_text = 0x7A8396,
 };
+static struct theme theme_now; // the one chosen, with the accent colour
 static const struct theme *theme = &dark;
 
 #define DESKTOP_COLOR (theme->desktop)
@@ -99,6 +100,7 @@ static const struct theme *theme = &dark;
 #define TASKBAR_TEXT (theme->text)
 #define TASKBAR_DIM_TEXT (theme->dim_text)
 #define TITLE_TEXT 0xFFFFFF
+#define ON_ACCENT (theme->on_accent) // text on the accent colour
 #define CLOSE_COLOR 0xE5484D
 #define BUTTON_COLOR 0x56607A
 
@@ -165,6 +167,7 @@ struct window {
     int shadow, fade_from, fade_to;
     long fade_start;
     bool bare; // the log-in screen's, with no frame, in the middle of the screen
+    bool translucent; // its pixels' top bytes say how see-through they are, 0 for not at all
     int workspace;
 };
 
@@ -183,6 +186,9 @@ static uint32_t next_id = 1;
 static struct window *focused;
 
 static uint8_t falloff[SHADOW + 1][SHADOW + 1];
+// Out of 256, how much of each pixel in a corner, from the corner, is inside a
+// window's rounded edge.
+static uint16_t coverage[RADIUS][RADIUS];
 static struct gui_settings settings;
 static struct gui_canvas wallpaper; // the screen's part of the scaled image, if there is one
 static struct gui_image wallpaper_image; // scaled to cover the screen
@@ -224,10 +230,28 @@ static int64_t login_due = -1, login_started; // when to start it again, if it s
 static char **commands; // to start once someone first logs in
 static int command_count;
 
-// The start menu, and what's highlighted in it.
-static bool menu_open;
-static char apps[MAX_APPS][GUI_TITLE_MAX];
-static int app_count, menu_choice;
+// Menus: the start menu, and those from right-clicking the desktop, an icon on
+// it, or the taskbar, with one item's submenu open at a time beside it.
+enum action { ACT_NONE, ACT_LINE, ACT_APP, ACT_FOLDER, ACT_RUN, ACT_LOCK, ACT_LOG_OUT, ACT_REBOOT, ACT_SHUT_DOWN,
+              ACT_OPEN, ACT_OPEN_WITH, ACT_OPEN_IN, ACT_RUN_FILE, ACT_CUT, ACT_COPY, ACT_COPY_PATH, ACT_RENAME,
+              ACT_DELETE, ACT_PROPERTIES, ACT_REFRESH, ACT_SHOW_ICONS, ACT_POSITION, ACT_TOP, ACT_BOTTOM, ACT_AUTOHIDE };
+#define MAX_ITEMS 40
+struct item {
+    char label[GUI_TITLE_MAX];
+    char arg[GUI_PATH_MAX]; // the app or folder it's for
+    const struct gui_image *icon;
+    int action;
+    bool check, checked; // a checkbox, and whether it's ticked
+};
+struct popup {
+    struct item items[MAX_ITEMS];
+    int count, choice;
+    struct rect r;
+};
+static struct popup popups[2];       // the menu and its submenu
+static int popup_depth, popup_focus; // how many are open, and which has the keyboard
+static bool start_open;              // whether the menu's the start menu
+static char popup_file[GUI_PATH_MAX]; // the desktop's icon a menu's about
 static bool super_down, super_alone; // Super pressed, and nothing else since
 
 // The Alt+Tab switcher, while Alt is held: which window it's on, counting from the top.
@@ -299,17 +323,42 @@ static struct rect button_of(const struct window *w, int index) {
                          w->y - TITLE_HEIGHT + gap, BUTTON_SIZE, BUTTON_SIZE};
 }
 
-// Where windows go: everything above the taskbar.
+// The taskbar goes along the top or the bottom of the screen. Hidden, it comes
+// back while the mouse is at that edge, or on it.
+static bool bar_shown = true;
+
+static bool bar_visible(void) {
+    return !settings.autohide || bar_shown;
+}
+
+// The taskbar and its flyouts float this far from the screen's edges, and from each other.
+#define GAP 8
+
+// Where windows go: everything but the taskbar and the gaps around it, unless it hides.
 static struct rect desktop(void) {
-    return (struct rect){0, 0, screen.width, screen.height - TASKBAR_HEIGHT};
+    int used = TASKBAR_HEIGHT + 2 * GAP;
+
+    if (settings.autohide)
+        return (struct rect){0, 0, screen.width, screen.height};
+    return (struct rect){0, settings.taskbar_top ? used : 0, screen.width, screen.height - used};
 }
 
 static struct rect taskbar(void) {
-    return (struct rect){0, screen.height - TASKBAR_HEIGHT, screen.width, TASKBAR_HEIGHT};
+    return (struct rect){GAP, settings.taskbar_top ? GAP : screen.height - GAP - TASKBAR_HEIGHT, screen.width - 2 * GAP,
+                         TASKBAR_HEIGHT};
+}
+
+// Where something height tall goes above or below the taskbar.
+static int beside_bar(int height) {
+    struct rect bar = taskbar();
+
+    return settings.taskbar_top ? bar.y + bar.height + GAP : bar.y - GAP - height;
 }
 
 static struct rect launcher(void) {
-    return (struct rect){4, taskbar().y + 4, LAUNCHER_WIDTH, TASKBAR_HEIGHT - 8};
+    struct rect bar = taskbar();
+
+    return (struct rect){bar.x + 4, bar.y + 4, LAUNCHER_WIDTH, TASKBAR_HEIGHT - 8};
 }
 
 static struct rect workspace_box(int index) {
@@ -322,53 +371,20 @@ static struct rect workspace_box(int index) {
 static struct rect snap_rect(enum snap to) {
     struct rect d = desktop();
 
-    return to == SNAP_LEFT    ? (struct rect){0, 0, d.width / 2, d.height}
-         : to == SNAP_RIGHT ? (struct rect){d.width / 2, 0, d.width / 2, d.height}
+    return to == SNAP_LEFT    ? (struct rect){0, d.y, d.width / 2, d.height}
+         : to == SNAP_RIGHT ? (struct rect){d.width / 2, d.y, d.width / 2, d.height}
                             : d;
 }
 
-// The menu's items are the apps, then these, with RUN_COMMAND's icon for Run.
-// Locking and logging out are only for a desktop someone logged in to.
-enum { ITEM_RUN, ITEM_LOCK, ITEM_LOG_OUT, ITEM_REBOOT, ITEM_SHUT_DOWN, EXTRA_ITEMS };
-static const char *const extra_items[] = {"Run...", "Lock", "Log out", "Reboot", "Shut down"};
-static const char *const extra_icons[] = {NULL, "lock", "logout", "reboot", "shutdown"}; // Run's is an app's
-
-static int extra_count(void) {
-    return login_mode ? EXTRA_ITEMS : EXTRA_ITEMS - 2;
-}
-
-// Which of the extra items the menu's index-th is.
-static int extra_item(int index) {
-    int i = index - app_count;
-
-    return login_mode || i == ITEM_RUN ? i : i + 2;
-}
-
-static int menu_items(void) {
-    return app_count + extra_count();
-}
-
-// Just above the launcher, as tall as its apps, with a line for "no apps" if there
-// are none.
-static struct rect menu(void) {
-    int height = ((app_count ? app_count : 1) + extra_count()) * ITEM_HEIGHT + MENU_GAP + 8;
-
-    return (struct rect){launcher().x, taskbar().y - height, MENU_WIDTH, height};
-}
-
-static struct rect menu_item(int index) {
-    struct rect m = menu();
-    int y = index < app_count ? index * ITEM_HEIGHT
-                              : ((app_count ? app_count : 1) + index - app_count) * ITEM_HEIGHT + MENU_GAP;
-
-    return (struct rect){m.x + 4, m.y + 4 + y, m.width - 8, ITEM_HEIGHT};
-}
+// What logging out, rebooting and shutting down wait for windows to close for.
+enum { ITEM_LOG_OUT, ITEM_REBOOT, ITEM_SHUT_DOWN };
 
 // In the middle of the desktop, with every window.
 static struct rect switcher(void) {
     int height = window_count * ITEM_HEIGHT + 8;
 
-    return (struct rect){(screen.width - SWITCHER_WIDTH) / 2, (desktop().height - height) / 2, SWITCHER_WIDTH, height};
+    return (struct rect){(screen.width - SWITCHER_WIDTH) / 2, desktop().y + (desktop().height - height) / 2, SWITCHER_WIDTH,
+                         height};
 }
 
 static struct window *switcher_window(int index) {
@@ -377,14 +393,6 @@ static struct window *switcher_window(int index) {
 
 static bool contains(struct rect r, int x, int y) {
     return x >= r.x && y >= r.y && x < r.x + r.width && y < r.y + r.height;
-}
-
-static int menu_item_at(int x, int y) {
-    for (int i = 0; i < menu_items(); i++) {
-        if (contains(menu_item(i), x, y))
-            return i;
-    }
-    return -1;
 }
 
 // Windows on the workspace shown, and while it's locked, only the log-in screen's,
@@ -397,12 +405,14 @@ static bool visible(const struct window *w) {
     return !w->minimized && on_workspace(w) && (!locked || w->client == session);
 }
 
-// Whether a window's frame hides all of a rectangle.
+// Whether a window hides all of a rectangle: its frame does, but for the title
+// bar, which shows a little of what's under it, and the rounded corners.
 static bool covers(const struct window *w, struct rect r) {
     struct rect f = frame_of(w);
+    int top = w->bare ? RADIUS : TITLE_HEIGHT + BORDER;
 
-    return visible(w) && r.x >= f.x && r.y >= f.y && r.x + r.width <= f.x + f.width
-        && r.y + r.height <= f.y + f.height;
+    return visible(w) && !w->translucent && r.x >= f.x && r.y >= f.y + top && r.x + r.width <= f.x + f.width
+        && r.y + r.height <= f.y + f.height - RADIUS;
 }
 
 static bool overlaps(struct rect a, struct rect b) {
@@ -516,14 +526,27 @@ static void draw_shadow(struct gui_canvas *c, const struct window *w, int ox, in
         int dy = y < s.y ? s.y - y : y >= s.y + s.height ? y - (s.y + s.height - 1) : 0;
         bool beside_frame = y >= f.y && y < f.y + f.height;
 
+        bool corner_row = y < f.y + RADIUS || y >= f.y + f.height - RADIUS;
+
         for (int x = x0; x < x1; x++) {
-            if (beside_frame && x >= f.x && x < f.x + f.width) {
-                x = f.x + f.width - 1; // the window covers this part
+            // The window covers this part, but for its rounded corners.
+            if (beside_frame && x >= f.x && x < f.x + f.width && (!corner_row || (x >= f.x + RADIUS && x < f.x + f.width - RADIUS))) {
+                x = corner_row ? f.x + f.width - RADIUS - 1 : f.x + f.width - 1;
                 continue;
             }
 
             int dx = x < s.x ? s.x - x : x >= s.x + s.width ? x - (s.x + s.width - 1) : 0;
-            uint32_t a = dx > SHADOW || dy > SHADOW ? 0 : falloff[dx][dy] * w->shadow >> 8, keep = 256 - a;
+            uint32_t a = dx > SHADOW || dy > SHADOW ? 0 : falloff[dx][dy] * w->shadow >> 8;
+
+            // In a rounded corner, only what's outside the curve has the shadow.
+            if (beside_frame && x >= f.x && x < f.x + f.width) {
+                int cx = x - f.x < f.x + f.width - 1 - x ? x - f.x : f.x + f.width - 1 - x;
+                int cy = y - f.y < f.y + f.height - 1 - y ? y - f.y : f.y + f.height - 1 - y;
+
+                a = a * (256 - coverage[cy][cx]) >> 8;
+            }
+
+            uint32_t keep = 256 - a;
             uint32_t p = row[x];
 
             // Red and blue together, then green, each kept by keep/256.
@@ -552,6 +575,93 @@ static const struct gui_image *app_icon(const char *name) {
     return app_icon(name);
 }
 
+static void make_coverage(void) {
+    for (int y = 0; y < RADIUS; y++) {
+        for (int x = 0; x < RADIUS; x++)
+            coverage[y][x] = gui_corner_coverage(x, y, RADIUS);
+    }
+}
+
+// A rectangle's corners, kept before it's drawn, or rounded after, on a canvas
+// that's the part of the screen from ox, oy.
+static void keep_corners(struct gui_canvas *c, struct rect r, int ox, int oy, uint32_t kept[4][GUI_MAX_RADIUS][GUI_MAX_RADIUS]) {
+    gui_keep_corners(c, r.x - ox, r.y - oy, r.width, r.height, RADIUS, kept);
+}
+
+static void round_corners(struct gui_canvas *c, struct rect r, int ox, int oy, uint32_t kept[4][GUI_MAX_RADIUS][GUI_MAX_RADIUS],
+                          uint32_t line) {
+    gui_round_corners(c, r.x - ox, r.y - oy, r.width, r.height, RADIUS, kept, line);
+}
+
+// A colour over what's there, alpha of it out of 256.
+static void blend_fill(struct gui_canvas *c, int x, int y, int width, int height, uint32_t color, int alpha) {
+    int x0 = x < 0 ? 0 : x, y0 = y < 0 ? 0 : y;
+    int x1 = x + width > c->width ? c->width : x + width, y1 = y + height > c->height ? c->height : y + height;
+
+    for (int row = y0; row < y1; row++) {
+        uint32_t *p = c->pixels + (long)row * c->stride;
+
+        for (int col = x0; col < x1; col++)
+            p[col] = gui_mix(p[col], color, alpha);
+    }
+}
+
+// See-through things blur what's under them by this much. Each blur reads that far
+// around it, so the screen's drawn this far around what changed, for a few of them
+// over each other: a submenu over a menu over a title bar.
+#define BLUR 4
+#define BLUR_MARGIN (4 * BLUR)
+
+// Part of a canvas, each pixel the average of those up to BLUR away, across then down.
+static void blur(struct gui_canvas *c, int x, int y, int width, int height) {
+    static uint32_t *across;
+    static size_t size;
+    int x0 = x < 0 ? 0 : x, x1 = x + width > c->width ? c->width : x + width;
+    int y0 = y < 0 ? 0 : y, y1 = y + height > c->height ? c->height : y + height;
+    int top = y0 - BLUR < 0 ? 0 : y0 - BLUR, bottom = y1 + BLUR > c->height ? c->height : y1 + BLUR;
+    int w = x1 - x0, taps = 2 * BLUR + 1;
+    size_t needed = (size_t)w * (bottom - top);
+
+    if (w <= 0 || y1 <= y0)
+        return;
+    if (needed > size) {
+        uint32_t *bigger = realloc(across, needed * sizeof(*across));
+
+        if (!bigger)
+            return;
+        across = bigger, size = needed;
+    }
+    for (int row = top; row < bottom; row++) {
+        const uint32_t *p = c->pixels + (long)row * c->stride;
+
+        for (int col = x0; col < x1; col++) {
+            uint32_t rb = 0, g = 0;
+
+            for (int k = -BLUR; k <= BLUR; k++) {
+                int at = col + k < 0 ? 0 : col + k >= c->width ? c->width - 1 : col + k;
+
+                rb += p[at] & 0xFF00FF, g += p[at] & 0x00FF00;
+            }
+            across[(long)(row - top) * w + col - x0] = ((rb >> 16) / taps) << 16 | ((rb & 0xFFFF) / taps) | ((g / taps) & 0x00FF00);
+        }
+    }
+    for (int row = y0; row < y1; row++) {
+        uint32_t *p = c->pixels + (long)row * c->stride;
+
+        for (int col = x0; col < x1; col++) {
+            uint32_t rb = 0, g = 0;
+
+            for (int k = -BLUR; k <= BLUR; k++) {
+                int at = row + k < top ? top : row + k >= bottom ? bottom - 1 : row + k;
+                uint32_t q = across[(long)(at - top) * w + col - x0];
+
+                rb += q & 0xFF00FF, g += q & 0x00FF00;
+            }
+            p[col] = ((rb >> 16) / taps) << 16 | ((rb & 0xFFFF) / taps) | ((g / taps) & 0x00FF00);
+        }
+    }
+}
+
 static void draw_icon(struct gui_canvas *c, const char *app, int x, int y, int ox, int oy) {
     const struct gui_image *icon = app_icon(app);
 
@@ -559,13 +669,49 @@ static void draw_icon(struct gui_canvas *c, const char *app, int x, int y, int o
         gui_draw_image(c, x - ox, y - oy, icon);
 }
 
+// A window's pixels. A see-through window's blur what's under them, and show it as
+// much as their top bytes say.
+static void draw_contents(struct gui_canvas *c, const struct window *w, int ox, int oy) {
+    int x = w->x - ox, y = w->y - oy;
+    int x0 = x < 0 ? 0 : x, x1 = x + w->canvas.width > c->width ? c->width : x + w->canvas.width;
+    int y0 = y < 0 ? 0 : y, y1 = y + w->canvas.height > c->height ? c->height : y + w->canvas.height;
+
+    if (!w->translucent) {
+        gui_copy(c, x, y, &w->canvas, 0, 0, w->canvas.width, w->canvas.height);
+        return;
+    }
+    blur(c, x, y, w->canvas.width, w->canvas.height);
+    for (int row = y0; row < y1; row++) {
+        const uint32_t *from = w->canvas.pixels + (long)(row - y) * w->canvas.stride - x;
+        uint32_t *to = c->pixels + (long)row * c->stride;
+
+        for (int col = x0; col < x1; col++) {
+            uint32_t p = from[col];
+
+            to[col] = p >> 24 ? gui_mix(p, to[col], p >> 24) : p;
+        }
+    }
+}
+
+// Windows have rounded corners, but for those maximized or tiled, which meet the
+// edges of the screen or each other.
+static bool rounded(const struct window *w) {
+    return !w->tiled;
+}
+
 static void draw_window(struct gui_canvas *c, const struct window *w, int ox, int oy) {
+    uint32_t kept[4][GUI_MAX_RADIUS][GUI_MAX_RADIUS];
+    struct rect frame = frame_of(w);
+
+    if (rounded(w))
+        keep_corners(c, frame, ox, oy, kept);
     if (w->bare) {
-        gui_copy(c, w->x - ox, w->y - oy, &w->canvas, 0, 0, w->canvas.width, w->canvas.height);
+        draw_contents(c, w, ox, oy);
+        round_corners(c, frame, ox, oy, kept, GUI_NONE);
         return;
     }
 
-    struct rect frame = frame_of(w), close = button_of(w, 0), maximize = button_of(w, 1), minimize = button_of(w, 2);
+    struct rect close = button_of(w, 0), maximize = button_of(w, 1), minimize = button_of(w, 2);
     uint32_t title_color = w == focused ? TITLE_FOCUSED : TITLE_UNFOCUSED;
     int text_y = w->y - TITLE_HEIGHT + (TITLE_HEIGHT - GUI_CHAR_HEIGHT) / 2 - oy;
 
@@ -574,21 +720,26 @@ static void draw_window(struct gui_canvas *c, const struct window *w, int ox, in
     gui_fill(c, frame.x - ox, frame.y + frame.height - BORDER - oy, frame.width, BORDER, BORDER_COLOR);
     gui_fill(c, frame.x - ox, frame.y - oy, BORDER, frame.height, BORDER_COLOR);
     gui_fill(c, frame.x + frame.width - BORDER - ox, frame.y - oy, BORDER, frame.height, BORDER_COLOR);
-    gui_fill(c, w->x - ox, w->y - TITLE_HEIGHT - oy, w->canvas.width, TITLE_HEIGHT, title_color);
+    blur(c, w->x - ox, w->y - TITLE_HEIGHT - oy, w->canvas.width, TITLE_HEIGHT);
+    blend_fill(c, w->x - ox, w->y - TITLE_HEIGHT - oy, w->canvas.width, TITLE_HEIGHT, title_color, BAR_ALPHA);
     draw_icon(c, w->app, w->x + 5, w->y - TITLE_HEIGHT + (TITLE_HEIGHT - ICON_SIZE) / 2, ox, oy);
-    gui_text(c, w->x + 10 + ICON_SIZE - ox, text_y, w->title, w == focused ? TITLE_TEXT : TITLE_TEXT_UNFOCUSED, 1);
 
-    // A title too long for the bar goes under the buttons.
-    gui_fill(c, minimize.x - 4 - ox, w->y - TITLE_HEIGHT - oy, w->x + w->canvas.width - minimize.x + 4, TITLE_HEIGHT,
-             title_color);
-    gui_fill(c, close.x - ox, close.y - oy, BUTTON_SIZE, BUTTON_SIZE, CLOSE_COLOR);
+    // A title too long for the bar stops short of the buttons.
+    struct gui_canvas title = *c;
+    int right = minimize.x - 4 - ox;
+
+    title.width = right < 0 ? 0 : right < c->width ? right : c->width;
+    gui_text(&title, w->x + 10 + ICON_SIZE - ox, text_y, w->title, w == focused ? ON_ACCENT : TITLE_TEXT_UNFOCUSED, 1);
+    gui_fill_rounded(c, close.x - ox, close.y - oy, BUTTON_SIZE, BUTTON_SIZE, SMALL_RADIUS, CLOSE_COLOR);
     gui_text(c, close.x + (BUTTON_SIZE - GUI_CHAR_WIDTH) / 2 - ox, text_y, "x", TITLE_TEXT, 1);
-    gui_fill(c, maximize.x - ox, maximize.y - oy, BUTTON_SIZE, BUTTON_SIZE, BUTTON_COLOR);
+    gui_fill_rounded(c, maximize.x - ox, maximize.y - oy, BUTTON_SIZE, BUTTON_SIZE, SMALL_RADIUS, BUTTON_COLOR);
     gui_fill(c, maximize.x + 4 - ox, maximize.y + 4 - oy, 8, 8, TITLE_TEXT);
     gui_fill(c, maximize.x + 5 - ox, maximize.y + 6 - oy, 6, 5, BUTTON_COLOR);
-    gui_fill(c, minimize.x - ox, minimize.y - oy, BUTTON_SIZE, BUTTON_SIZE, BUTTON_COLOR);
+    gui_fill_rounded(c, minimize.x - ox, minimize.y - oy, BUTTON_SIZE, BUTTON_SIZE, SMALL_RADIUS, BUTTON_COLOR);
     gui_fill(c, minimize.x + 4 - ox, minimize.y + 11 - oy, 8, 2, TITLE_TEXT);
-    gui_copy(c, w->x - ox, w->y - oy, &w->canvas, 0, 0, w->canvas.width, w->canvas.height);
+    draw_contents(c, w, ox, oy);
+    if (rounded(w))
+        round_corners(c, frame, ox, oy, kept, BORDER_COLOR);
 }
 
 // The workspace's windows in the order they were made, which is how the taskbar
@@ -629,9 +780,21 @@ static void fitted_text(struct gui_canvas *c, int x, int y, int width, const cha
     gui_text(c, x, y, shown, color, 1);
 }
 
-static void draw_panel(struct gui_canvas *c, struct rect r, int ox, int oy) {
-    gui_fill(c, r.x - ox, r.y - oy, r.width, r.height, TASKBAR_LINE);
-    gui_fill(c, r.x + 1 - ox, r.y + 1 - oy, r.width - 2, r.height - 2, TASKBAR_COLOR);
+// Menus, the tray's panels, notifications and the switcher, with rounded corners
+// like windows'.
+// The taskbar, its flyouts, notifications and the switcher: rounded, outlined and see-through, blurring what's under them.
+static void draw_glass(struct gui_canvas *c, struct rect r, int ox, int oy) {
+    uint32_t kept[4][GUI_MAX_RADIUS][GUI_MAX_RADIUS];
+    int x = r.x - ox, y = r.y - oy;
+
+    keep_corners(c, r, ox, oy, kept);
+    blur(c, x, y, r.width, r.height);
+    blend_fill(c, x, y, r.width, r.height, TASKBAR_COLOR, BAR_ALPHA);
+    gui_fill(c, x, y, r.width, 1, TASKBAR_LINE);
+    gui_fill(c, x, y + r.height - 1, r.width, 1, TASKBAR_LINE);
+    gui_fill(c, x, y, 1, r.height, TASKBAR_LINE);
+    gui_fill(c, x + r.width - 1, y, 1, r.height, TASKBAR_LINE);
+    round_corners(c, r, ox, oy, kept, TASKBAR_LINE);
 }
 
 // 12 hour time goes without a leading zero, as people write it.
@@ -669,8 +832,10 @@ static int64_t now_ms(void) {
 static struct rect notice_rect(int index) {
     int from_bottom = notice_count - index;
 
-    return (struct rect){screen.width - NOTICE_WIDTH - 12,
-                         taskbar().y - 12 - from_bottom * (NOTICE_HEIGHT + 8) + 8, NOTICE_WIDTH, NOTICE_HEIGHT};
+    int bottom = settings.taskbar_top ? screen.height : taskbar().y;
+
+    return (struct rect){screen.width - NOTICE_WIDTH - GAP, bottom - from_bottom * (NOTICE_HEIGHT + GAP), NOTICE_WIDTH,
+                         NOTICE_HEIGHT};
 }
 
 static void damage_notices(void) {
@@ -718,24 +883,28 @@ static void draw_notices(struct gui_canvas *c, int ox, int oy) {
     for (int i = 0; i < notice_count; i++) {
         struct rect r = notice_rect(i);
 
-        draw_panel(c, r, ox, oy);
-        gui_fill(c, r.x - ox, r.y - oy, 3, r.height, TITLE_FOCUSED);
+        draw_glass(c, r, ox, oy);
+        gui_fill_rounded(c, r.x + 3 - ox, r.y + RADIUS - oy, 3, r.height - 2 * RADIUS, GUI_MAX_RADIUS, TITLE_FOCUSED);
         draw_notice(c, r, &notices[i], ox, oy);
     }
 }
 
-// The tray, left of the clock: the network, notifications and, if there's a sound
-// card, the volume, each an icon that opens a panel above it. The clock opens a
-// calendar.
-enum { TRAY_NETWORK, TRAY_NOTICES, TRAY_SOUND, TRAY_ITEMS, TRAY_CALENDAR = TRAY_ITEMS };
+// The tray, left of the clock: quick settings, shown by the network's and the
+// speaker's icons, and notifications, each opening a panel by it. The clock opens
+// a calendar.
+enum { TRAY_QUICK, TRAY_NOTICES, TRAY_ITEMS, TRAY_CALENDAR = TRAY_ITEMS };
+enum { TILE_AIRPLANE, TILE_NIGHT, TILE_DARK, TILES };
 #define DAY_WIDTH 32
 #define DAY_HEIGHT 24
 #define TRAY_ICON 24
 #define PANEL_LINE 20
+#define QUICK_WIDTH 320
+#define TILE_HEIGHT 52
 #define VOLUME_FILE "/system/etc/volume"
 #define VOLUME_STEP 5
 #define NET_CHECK_MS 5000 // how often the network's looked at, for its icon
 static int panel = -1; // the one open
+static void autohide(void);
 
 // What the player's playing, which it keeps in NOW_PLAYING, shown under the volume.
 #define NOW_PLAYING "/tmp/now-playing"
@@ -749,55 +918,68 @@ static bool connected(void) {
     return net.has_device && net.address;
 }
 
-static int tray_count(void) {
-    return mixer >= 0 ? TRAY_ITEMS : TRAY_SOUND;
-}
-
+// With a sound card, the speaker's beside the network.
 static struct rect tray_item(int item) {
     char clock[16];
-    int width = gui_text_width(clock_text(clock), 1), right = screen.width - width - 12 - 8;
+    int width = gui_text_width(clock_text(clock), 1), right = taskbar().x + taskbar().width - width - 12 - 8;
+    int y = taskbar().y + 4, quick = mixer >= 0 ? 2 * TRAY_ICON - 4 : TRAY_ICON;
 
     if (item == TRAY_CALENDAR)
-        return (struct rect){right + 2, taskbar().y + 4, width + 16, TASKBAR_HEIGHT - 8};
-    return (struct rect){right - (tray_count() - item) * TRAY_ICON, taskbar().y + 4, TRAY_ICON, TASKBAR_HEIGHT - 8};
+        return (struct rect){right + 2, y, width + 16, TASKBAR_HEIGHT - 8};
+    if (item == TRAY_NOTICES)
+        return (struct rect){right - TRAY_ICON, y, TRAY_ICON, TASKBAR_HEIGHT - 8};
+    return (struct rect){right - TRAY_ICON - quick - 2, y, quick, TASKBAR_HEIGHT - 8};
 }
 
 static struct rect tray(void) {
-    struct rect first = tray_item(0);
+    struct rect first = tray_item(TRAY_QUICK), last = tray_item(TRAY_NOTICES);
 
-    return (struct rect){first.x, first.y, tray_count() * TRAY_ICON, first.height};
+    return (struct rect){first.x, first.y, last.x + last.width - first.x, first.height};
 }
 
 static int tray_item_at(int x, int y) {
-    for (int i = 0; i < tray_count(); i++) {
+    for (int i = 0; i <= TRAY_CALENDAR; i++) {
         if (contains(tray_item(i), x, y))
             return i;
     }
-    return contains(tray_item(TRAY_CALENDAR), x, y) ? TRAY_CALENDAR : -1;
+    return -1;
+}
+
+static int sound_height(void) {
+    return mixer < 0 ? 0 : 32 + (now_playing[0] ? 22 : 0);
 }
 
 static struct rect panel_rect(int item) {
-    static const int widths[] = {260, NOTICE_WIDTH, 220, 7 * DAY_WIDTH + 24};
-    int heights[] = {16 + 7 * PANEL_LINE, 40 + (history_count ? history_count : 1) * (NOTICE_HEIGHT - 8),
-                     82 + (now_playing[0] ? 24 : 0),
-                     40 + 7 * DAY_HEIGHT};
+    static const int widths[] = {QUICK_WIDTH, NOTICE_WIDTH, 7 * DAY_WIDTH + 24};
+    int heights[] = {12 + TILE_HEIGHT + 12 + sound_height() + 9 + 6 * PANEL_LINE + 8,
+                     40 + (history_count ? history_count : 1) * (NOTICE_HEIGHT - 8), 40 + 7 * DAY_HEIGHT};
     struct rect t = tray_item(item);
-    int x = t.x + t.width - widths[item];
+    int x = t.x + t.width - widths[item], most = screen.width - GAP - widths[item];
 
-    return (struct rect){x > 0 ? x : 0, taskbar().y - heights[item], widths[item], heights[item]};
+    x = x < most ? x : most;
+    return (struct rect){x > GAP ? x : GAP, beside_bar(heights[item]), widths[item], heights[item]};
 }
 
-// Where the slider can be clicked, and the line it's drawn on through its middle.
+// The buttons across the top of quick settings.
+static struct rect quick_tile(int tile) {
+    struct rect p = panel_rect(TRAY_QUICK);
+    int width = (p.width - 24 - (TILES - 1) * 8) / TILES;
+
+    return (struct rect){p.x + 12 + tile * (width + 8), p.y + 12, width, TILE_HEIGHT};
+}
+
+// The speaker, which mutes, and the slider beside it, where it can be clicked,
+// with the line it's drawn on through its middle.
+static struct rect mute_button(void) {
+    struct rect p = panel_rect(TRAY_QUICK);
+
+    return (struct rect){p.x + 10, p.y + 12 + TILE_HEIGHT + 12, 24, 20};
+}
+
 static struct rect volume_slider(void) {
-    struct rect p = panel_rect(TRAY_SOUND);
+    struct rect p = panel_rect(TRAY_QUICK), m = mute_button();
 
-    return (struct rect){p.x + 16, p.y + 30, p.width - 32, 20};
-}
-
-static struct rect mute_row(void) {
-    struct rect p = panel_rect(TRAY_SOUND);
-
-    return (struct rect){p.x + 12, p.y + 56, p.width - 24, 20};
+    return (struct rect){m.x + m.width + 10, m.y, p.x + p.width - 56 - (m.x + m.width + 10), 20};
 }
 
 // The calendar's arrows to the month before and after, either side of its name.
@@ -830,6 +1012,7 @@ static void close_panel(void) {
     damage_tray();
     panel = -1;
     setting_volume = false;
+    autohide();
 }
 
 static struct notice *add_notice(const char *title, const char *text, const char *app) {
@@ -917,8 +1100,8 @@ static void check_network(void) {
 
     if (net_info(&now) < 0)
         now = (struct net_info){0};
-    if (panel == TRAY_NETWORK && memcmp(&now, &net, sizeof(now)))
-        add_damage(panel_rect(TRAY_NETWORK));
+    if (panel == TRAY_QUICK && memcmp(&now, &net, sizeof(now)))
+        add_damage(panel_rect(TRAY_QUICK));
     net = now;
     if (connected() != was) {
         printf("wm: network %s\n", connected() ? "connected" : "disconnected");
@@ -951,22 +1134,43 @@ static void shown_month(int *year, int *month) {
 static const char *const month_names[] = {"January", "February", "March", "April", "May", "June", "July",
                                           "August", "September", "October", "November", "December"};
 
+// Says where a panel's parts are, for the tests to find them.
+static void report_panel(int item) {
+    struct rect p = panel_rect(item);
+
+    printf("wm: panel %d at %d %d %d %d\n", item, p.x, p.y, p.width, p.height);
+    if (item != TRAY_QUICK)
+        return;
+    for (int i = 0; i < TILES; i++) {
+        struct rect t = quick_tile(i);
+
+        printf("wm: tile %d at %d %d %d %d\n", i, t.x, t.y, t.width, t.height);
+    }
+    if (mixer >= 0) {
+        struct rect m = mute_button(), v = volume_slider();
+
+        printf("wm: mute at %d %d %d %d\nwm: slider at %d %d %d %d\n", m.x, m.y, m.width, m.height, v.x, v.y, v.width,
+               v.height);
+    }
+}
+
 static void open_panel(int item) {
     close_panel();
     calendar_month = 0;
     now_playing[0] = '\0';
-    if (item == TRAY_SOUND) {
+    if (item == TRAY_QUICK) {
         FILE *f = fopen(NOW_PLAYING, "r");
 
         if (f && fgets(now_playing, sizeof(now_playing), f))
             now_playing[strcspn(now_playing, "\n")] = '\0';
         if (f)
             fclose(f);
-        printf("wm: sound panel%s%s\n", now_playing[0] ? ", " : "", now_playing);
+        printf("wm: quick settings%s%s\n", now_playing[0] ? ", " : "", now_playing);
+        check_network();
     }
     panel = item;
-    if (item == TRAY_NETWORK)
-        check_network();
+    report_panel(item);
+    autohide();
     if (item == TRAY_CALENDAR) {
         int year, month;
 
@@ -981,39 +1185,42 @@ static void open_panel(int item) {
     damage_tray();
 }
 
-static void draw_address(struct gui_canvas *c, struct rect p, int line, const char *label, uint32_t address, int ox,
-                         int oy) {
-    struct in_addr in = {htonl(address)};
-    int y = p.y + 8 + line * PANEL_LINE - oy;
-
-    gui_text(c, p.x + 12 - ox, y, label, TASKBAR_DIM_TEXT, 1);
-    gui_text(c, p.x + 96 - ox, y, address ? inet_ntoa(in) : "none", TASKBAR_TEXT, 1);
+static void draw_line(struct gui_canvas *c, struct rect p, int y, const char *label, const char *value, int ox,
+                      int oy) {
+    gui_text(c, p.x + 12 - ox, y - oy, label, TASKBAR_DIM_TEXT, 1);
+    gui_text(c, p.x + 96 - ox, y - oy, value, TASKBAR_TEXT, 1);
 }
 
-static void draw_amount(struct gui_canvas *c, struct rect p, int line, const char *label, uint64_t bytes, int ox,
+static void draw_address(struct gui_canvas *c, struct rect p, int y, const char *label, uint32_t address, int ox,
+                         int oy) {
+    struct in_addr in = {htonl(address)};
+
+    draw_line(c, p, y, label, address ? inet_ntoa(in) : "none", ox, oy);
+}
+
+static void draw_amount(struct gui_canvas *c, struct rect p, int y, const char *label, uint64_t bytes, int ox,
                         int oy) {
     char shown[32];
-    int y = p.y + 8 + line * PANEL_LINE - oy;
 
     snprintf(shown, sizeof(shown), bytes >= 10 << 20 ? "%llu MB" : bytes >= 10 << 10 ? "%llu KB" : "%llu bytes",
              (unsigned long long)(bytes >= 10 << 20 ? bytes >> 20 : bytes >= 10 << 10 ? bytes >> 10 : bytes));
-    gui_text(c, p.x + 12 - ox, y, label, TASKBAR_DIM_TEXT, 1);
-    gui_text(c, p.x + 96 - ox, y, shown, TASKBAR_TEXT, 1);
+    draw_line(c, p, y, label, shown, ox, oy);
 }
 
-static void draw_network(struct gui_canvas *c, struct rect p, int ox, int oy) {
-    const char *state = !net.has_device ? "No network card" : !net.address ? "Not connected" : "Connected";
+static void draw_network(struct gui_canvas *c, struct rect p, int y, int ox, int oy) {
+    const char *state = net.airplane      ? "Airplane mode"
+                      : !net.has_device ? "No network card"
+                      : !net.address    ? "Not connected"
+                                        : "Connected";
 
-    gui_text(c, p.x + 12 - ox, p.y + 8 - oy, "Network", TASKBAR_TEXT, 1);
-    gui_text(c, p.x + p.width - 12 - gui_text_width(state, 1) - ox, p.y + 8 - oy, state,
+    gui_text(c, p.x + 12 - ox, y - oy, "Network", TASKBAR_TEXT, 1);
+    gui_text(c, p.x + p.width - 12 - gui_text_width(state, 1) - ox, y - oy, state,
              connected() ? TASKBAR_TEXT : TASKBAR_DIM_TEXT, 1);
-    draw_address(c, p, 1, "Address", net.address, ox, oy);
-    draw_address(c, p, 2, "Gateway", net.gateway, ox, oy);
-    draw_address(c, p, 3, "DNS", net.dns, ox, oy);
-    gui_text(c, p.x + 12 - ox, p.y + 8 + 4 * PANEL_LINE - oy, "Set by", TASKBAR_DIM_TEXT, 1);
-    gui_text(c, p.x + 96 - ox, p.y + 8 + 4 * PANEL_LINE - oy, net.automatic ? "DHCP" : "hand", TASKBAR_TEXT, 1);
-    draw_amount(c, p, 5, "Received", net.rx_bytes, ox, oy);
-    draw_amount(c, p, 6, "Sent", net.tx_bytes, ox, oy);
+    draw_address(c, p, y + PANEL_LINE, "Address", net.address, ox, oy);
+    draw_address(c, p, y + 2 * PANEL_LINE, "Gateway", net.gateway, ox, oy);
+    draw_address(c, p, y + 3 * PANEL_LINE, "DNS", net.dns, ox, oy);
+    draw_amount(c, p, y + 4 * PANEL_LINE, "Received", net.rx_bytes, ox, oy);
+    draw_amount(c, p, y + 5 * PANEL_LINE, "Sent", net.tx_bytes, ox, oy);
 }
 
 static void draw_history(struct gui_canvas *c, struct rect p, int ox, int oy) {
@@ -1021,7 +1228,7 @@ static void draw_history(struct gui_canvas *c, struct rect p, int ox, int oy) {
 
     gui_text(c, p.x + 12 - ox, p.y + 10 - oy, "Notifications", TASKBAR_TEXT, 1);
     if (history_count) {
-        gui_fill(c, clear.x - ox, clear.y - oy, clear.width, clear.height, TASKBAR_BUTTON);
+        gui_fill_rounded(c, clear.x - ox, clear.y - oy, clear.width, clear.height, SMALL_RADIUS, TASKBAR_BUTTON);
         gui_text(c, clear.x + (clear.width - gui_text_width("Clear", 1)) / 2 - ox,
                  clear.y + (clear.height - GUI_CHAR_HEIGHT) / 2 - oy, "Clear", TASKBAR_TEXT, 1);
     } else {
@@ -1032,33 +1239,58 @@ static void draw_history(struct gui_canvas *c, struct rect p, int ox, int oy) {
         const struct notice *n = &history[i];
 
         if (contains(r, cursor_x, cursor_y) && n->file[0])
-            gui_fill(c, r.x - ox, r.y - oy, r.width, r.height, TASKBAR_BUTTON);
+            gui_fill_rounded(c, r.x - ox, r.y - oy, r.width, r.height, SMALL_RADIUS, TASKBAR_BUTTON);
         gui_text(c, r.x + r.width - 8 - gui_text_width(n->time, 1) - ox, r.y + 4 - oy, n->time, TASKBAR_DIM_TEXT, 1);
         draw_notice(c, (struct rect){r.x - 4, r.y - 4, r.width - 6 * GUI_CHAR_WIDTH, r.height}, n, ox, oy);
     }
 }
 
-static void draw_sound(struct gui_canvas *c, struct rect p, int ox, int oy) {
-    struct rect r = volume_slider(), m = mute_row();
-    int knob = r.x + r.width * volume / 100, line = r.y + r.height / 2;
-    char percent[8];
+static bool tile_on(int tile) {
+    return tile == TILE_AIRPLANE ? settings.airplane : tile == TILE_NIGHT ? settings.night_light : !settings.light;
+}
 
-    snprintf(percent, sizeof(percent), "%d%%", volume);
-    gui_text(c, p.x + 12 - ox, p.y + 8 - oy, "Volume", TASKBAR_TEXT, 1);
-    gui_text(c, p.x + p.width - 12 - gui_text_width(percent, 1) - ox, p.y + 8 - oy, percent,
-             muted ? TASKBAR_DIM_TEXT : TASKBAR_TEXT, 1);
-    gui_fill(c, r.x - ox, line - 2 - oy, r.width, 4, TASKBAR_LINE);
-    gui_fill(c, r.x - ox, line - 2 - oy, knob - r.x, 4, muted ? TASKBAR_DIM_TEXT : TITLE_FOCUSED);
-    gui_fill(c, knob - 5 - ox, line - 8 - oy, 10, 16, muted ? TASKBAR_DIM_TEXT : TITLE_FOCUSED);
-    gui_fill(c, m.x + 4 - ox, m.y + 3 - oy, 14, 14, TASKBAR_TEXT);
-    gui_fill(c, m.x + 5 - ox, m.y + 4 - oy, 12, 12, muted ? TITLE_FOCUSED : TASKBAR_COLOR);
-    gui_text(c, m.x + 26 - ox, m.y + (m.height - GUI_CHAR_HEIGHT) / 2 - oy, "Mute", TASKBAR_TEXT, 1);
-    if (now_playing[0]) {
-        char line[GUI_TITLE_MAX + 16];
+// The tiles, the volume and what's playing, then the network.
+static void draw_quick(struct gui_canvas *c, struct rect p, int ox, int oy) {
+    static const char *const labels[] = {"Airplane", "Night light", "Dark mode"};
+    static const char *const tile_icons[] = {"airplane", "night", "theme"};
+    int network_y = p.y + 12 + TILE_HEIGHT + 12 + sound_height();
 
-        snprintf(line, sizeof(line), "%.*s", (p.width - 24) / GUI_CHAR_WIDTH, now_playing);
-        gui_text(c, p.x + 12 - ox, p.y + 82 - oy, line, TASKBAR_DIM_TEXT, 1);
+    for (int i = 0; i < TILES; i++) {
+        struct rect t = quick_tile(i);
+        const struct gui_image *icon = gui_icon(tile_icons[i]);
+        bool on = tile_on(i);
+
+        gui_fill_rounded(c, t.x - ox, t.y - oy, t.width, t.height, RADIUS, on ? TITLE_FOCUSED : TASKBAR_BUTTON);
+        if (icon)
+            gui_draw_image(c, t.x + (t.width - ICON_SIZE) / 2 - ox, t.y + 8 - oy, icon);
+        gui_text(c, t.x + (t.width - gui_text_width(labels[i], 1)) / 2 - ox, t.y + t.height - GUI_CHAR_HEIGHT - 6 - oy,
+                 labels[i], on ? ON_ACCENT : TASKBAR_TEXT, 1);
     }
+    if (mixer >= 0) {
+        struct rect r = volume_slider(), m = mute_button();
+        int knob = r.x + r.width * volume / 100, line = r.y + r.height / 2;
+        const struct gui_image *speaker = gui_icon(muted || !volume ? "muted" : "speaker");
+        char percent[8];
+
+        snprintf(percent, sizeof(percent), "%d%%", volume);
+        if (contains(m, cursor_x, cursor_y))
+            gui_fill_rounded(c, m.x - ox, m.y - oy, m.width, m.height, SMALL_RADIUS, TASKBAR_BUTTON);
+        if (speaker)
+            gui_draw_image(c, m.x + (m.width - ICON_SIZE) / 2 - ox, m.y + (m.height - ICON_SIZE) / 2 - oy, speaker);
+        gui_fill_rounded(c, r.x - ox, line - 2 - oy, r.width, 4, GUI_MAX_RADIUS, TASKBAR_LINE);
+        gui_fill_rounded(c, r.x - ox, line - 2 - oy, knob - r.x, 4, GUI_MAX_RADIUS, muted ? TASKBAR_DIM_TEXT : TITLE_FOCUSED);
+        gui_fill_rounded(c, knob - 5 - ox, line - 8 - oy, 10, 16, GUI_MAX_RADIUS, muted ? TASKBAR_DIM_TEXT : TITLE_FOCUSED);
+        gui_text(c, p.x + p.width - 12 - gui_text_width(percent, 1) - ox, r.y + (r.height - GUI_CHAR_HEIGHT) / 2 - oy,
+                 percent, muted ? TASKBAR_DIM_TEXT : TASKBAR_TEXT, 1);
+        if (now_playing[0]) {
+            char shown[GUI_TITLE_MAX + 16];
+
+            snprintf(shown, sizeof(shown), "%.*s", (p.width - 24) / GUI_CHAR_WIDTH, now_playing);
+            gui_text(c, p.x + 12 - ox, m.y + 28 - oy, shown, TASKBAR_DIM_TEXT, 1);
+        }
+    }
+    gui_fill(c, p.x + 12 - ox, network_y - oy, p.width - 24, 1, TASKBAR_LINE);
+    draw_network(c, p, network_y + 9, ox, oy);
 }
 
 static void draw_calendar(struct gui_canvas *c, struct rect p, int ox, int oy) {
@@ -1075,7 +1307,7 @@ static void draw_calendar(struct gui_canvas *c, struct rect p, int ox, int oy) {
     for (int next = 0; next < 2; next++) {
         struct rect a = month_arrow(next);
 
-        gui_fill(c, a.x - ox, a.y - oy, a.width, a.height, TASKBAR_BUTTON);
+        gui_fill_rounded(c, a.x - ox, a.y - oy, a.width, a.height, SMALL_RADIUS, TASKBAR_BUTTON);
         gui_text(c, a.x + 8 - ox, a.y + 4 - oy, next ? ">" : "<", TASKBAR_TEXT, 1);
     }
 
@@ -1091,56 +1323,77 @@ static void draw_calendar(struct gui_canvas *c, struct rect p, int ox, int oy) {
 
         snprintf(number, sizeof(number), "%d", day);
         if (is_today)
-            gui_fill(c, x + 2 - ox, y - oy, DAY_WIDTH - 4, DAY_HEIGHT - 2, TITLE_FOCUSED);
+            gui_fill_rounded(c, x + 2 - ox, y - oy, DAY_WIDTH - 4, DAY_HEIGHT - 2, SMALL_RADIUS, TITLE_FOCUSED);
         gui_text(c, x + DAY_WIDTH - 8 - gui_text_width(number, 1) - ox, y + 3 - oy, number,
-                 is_today ? TITLE_TEXT : cell % 7 >= 5 ? TASKBAR_DIM_TEXT : TASKBAR_TEXT, 1);
+                 is_today ? ON_ACCENT : cell % 7 >= 5 ? TASKBAR_DIM_TEXT : TASKBAR_TEXT, 1);
     }
 }
 
 static void draw_open_panel(struct gui_canvas *c, int ox, int oy) {
     struct rect p = panel_rect(panel);
 
-    draw_panel(c, p, ox, oy);
-    if (panel == TRAY_NETWORK)
-        draw_network(c, p, ox, oy);
+    draw_glass(c, p, ox, oy);
+    if (panel == TRAY_QUICK)
+        draw_quick(c, p, ox, oy);
     else if (panel == TRAY_NOTICES)
         draw_history(c, p, ox, oy);
-    else if (panel == TRAY_CALENDAR)
-        draw_calendar(c, p, ox, oy);
     else
-        draw_sound(c, p, ox, oy);
+        draw_calendar(c, p, ox, oy);
 }
 
 static void draw_tray(struct gui_canvas *c, int ox, int oy) {
-    const char *names[] = {connected() ? "network" : "offline", "bell", muted || !volume ? "muted" : "speaker"};
+    struct rect q = tray_item(TRAY_QUICK), b = tray_item(TRAY_NOTICES);
+    const struct gui_image *network = gui_icon(net.airplane ? "airplane" : connected() ? "network" : "offline");
+    const struct gui_image *speaker = gui_icon(muted || !volume ? "muted" : "speaker"), *bell = gui_icon("bell");
+    int icon_y = q.y + (q.height - ICON_SIZE) / 2;
 
-    for (int i = 0; i < tray_count(); i++) {
+    for (int i = 0; i < TRAY_ITEMS; i++) {
         struct rect t = tray_item(i);
-        const struct gui_image *icon = gui_icon(names[i]);
 
-        if (panel == i)
-            gui_fill(c, t.x - ox, t.y - oy, t.width, t.height, TASKBAR_BUTTON);
-        if (icon)
-            gui_draw_image(c, t.x + (t.width - ICON_SIZE) / 2 - ox, t.y + (t.height - ICON_SIZE) / 2 - oy, icon);
+        if (panel == i || contains(t, cursor_x, cursor_y))
+            gui_fill_rounded(c, t.x - ox, t.y - oy, t.width, t.height, SMALL_RADIUS, TASKBAR_BUTTON);
     }
-    if (unseen) {
-        struct rect b = tray_item(TRAY_NOTICES);
-
-        gui_fill(c, b.x + b.width - 8 - ox, b.y + 1 - oy, 6, 6, CLOSE_COLOR);
-    }
+    if (network)
+        gui_draw_image(c, q.x + 4 - ox, icon_y - oy, network);
+    if (speaker && mixer >= 0)
+        gui_draw_image(c, q.x + q.width - 4 - ICON_SIZE - ox, icon_y - oy, speaker);
+    if (bell)
+        gui_draw_image(c, b.x + (b.width - ICON_SIZE) / 2 - ox, icon_y - oy, bell);
+    if (unseen)
+        gui_fill_rounded(c, b.x + b.width - 8 - ox, b.y + 1 - oy, 6, 6, GUI_MAX_RADIUS, CLOSE_COLOR);
 }
 
 static void open_file(const char *path);
+static void save_settings(const char *what);
+
+// A tile in quick settings turns what it's for on or off.
+static void toggle_tile(int tile) {
+    if (tile == TILE_AIRPLANE) {
+        settings.airplane = !settings.airplane;
+        save_settings(settings.airplane ? "airplane on" : "airplane off");
+        check_network();
+    } else if (tile == TILE_NIGHT) {
+        settings.night_light = !settings.night_light;
+        save_settings(settings.night_light ? "night light on" : "night light off");
+    } else {
+        settings.light = !settings.light;
+        save_settings(settings.light ? "theme light" : "theme dark");
+    }
+}
 
 // A click in an open panel does what it's on there, returning false if it's
 // outside the panel.
 static bool panel_click(void) {
     if (!contains(panel_rect(panel), cursor_x, cursor_y))
         return false;
-    if (panel == TRAY_SOUND && contains(volume_slider(), cursor_x, cursor_y)) {
+    for (int i = 0; panel == TRAY_QUICK && i < TILES; i++) {
+        if (contains(quick_tile(i), cursor_x, cursor_y))
+            toggle_tile(i);
+    }
+    if (panel == TRAY_QUICK && mixer >= 0 && contains(volume_slider(), cursor_x, cursor_y)) {
         setting_volume = true;
         set_volume_at(cursor_x);
-    } else if (panel == TRAY_SOUND && contains(mute_row(), cursor_x, cursor_y)) {
+    } else if (panel == TRAY_QUICK && mixer >= 0 && contains(mute_button(), cursor_x, cursor_y)) {
         set_volume(volume, !muted);
     } else if (panel == TRAY_NOTICES && history_count && contains(clear_button(), cursor_x, cursor_y)) {
         clear_history();
@@ -1171,9 +1424,8 @@ static void draw_taskbar(struct gui_canvas *c, int ox, int oy) {
     char clock[16];
     const char *shown = clock_text(clock);
 
-    gui_fill(c, bar.x - ox, bar.y - oy, bar.width, bar.height, TASKBAR_COLOR);
-    gui_fill(c, bar.x - ox, bar.y - oy, bar.width, 1, TASKBAR_LINE);
-    gui_fill(c, l.x - ox, l.y - oy, l.width, l.height, TASKBAR_BUTTON);
+    draw_glass(c, bar, ox, oy);
+    gui_fill_rounded(c, l.x - ox, l.y - oy, l.width, l.height, SMALL_RADIUS, TASKBAR_BUTTON);
     gui_text(c, l.x + (l.width - gui_text_width("Apps", 1)) / 2 - ox, text_y, "Apps", TASKBAR_TEXT, 1);
 
     // A box for each workspace, the one shown in the accent colour, with a dot in
@@ -1184,10 +1436,9 @@ static void draw_taskbar(struct gui_canvas *c, int ox, int oy) {
 
         for (int j = 0; j < window_count && !used; j++)
             used = !windows[j]->bare && windows[j]->workspace == i;
-        gui_fill(c, b.x - ox, b.y - oy, b.width, b.height, i == workspace ? TITLE_FOCUSED : TASKBAR_BUTTON);
+        gui_fill_rounded(c, b.x - ox, b.y - oy, b.width, b.height, SMALL_RADIUS, i == workspace ? TITLE_FOCUSED : TASKBAR_BUTTON);
         if (used)
-            gui_fill(c, b.x + b.width / 2 - 2 - ox, b.y + b.height / 2 - 2 - oy, 4, 4,
-                     i == workspace ? TITLE_TEXT : TASKBAR_TEXT);
+            gui_fill_rounded(c, b.x + b.width / 2 - 2 - ox, b.y + b.height / 2 - 2 - oy, 4, 4, GUI_MAX_RADIUS, i == workspace ? ON_ACCENT : TASKBAR_TEXT);
     }
 
     for (int i = 0; i < count; i++) {
@@ -1195,18 +1446,18 @@ static void draw_taskbar(struct gui_canvas *c, int ox, int oy) {
         struct window *w = list[i];
         uint32_t color = w == focused ? TITLE_FOCUSED : w->minimized ? TASKBAR_MINIMIZED : TASKBAR_BUTTON;
 
-        gui_fill(c, b.x - ox, b.y - oy, b.width, b.height, color);
+        gui_fill_rounded(c, b.x - ox, b.y - oy, b.width, b.height, SMALL_RADIUS, color);
         draw_icon(c, w->app, b.x + 4, b.y + (b.height - ICON_SIZE) / 2, ox, oy);
         fitted_text(c, b.x + 8 + ICON_SIZE - ox, text_y, b.width - 12 - ICON_SIZE, w->title,
-                    w == focused ? TITLE_TEXT : w->minimized ? TASKBAR_DIM_TEXT : TASKBAR_TEXT);
+                    w == focused ? ON_ACCENT : w->minimized ? TASKBAR_DIM_TEXT : TASKBAR_TEXT);
     }
 
     if (panel == TRAY_CALENDAR) {
         struct rect t = tray_item(TRAY_CALENDAR);
 
-        gui_fill(c, t.x - ox, t.y - oy, t.width, t.height, TASKBAR_BUTTON);
+        gui_fill_rounded(c, t.x - ox, t.y - oy, t.width, t.height, SMALL_RADIUS, TASKBAR_BUTTON);
     }
-    gui_text(c, bar.width - gui_text_width(shown, 1) - 12 - ox, text_y, shown, TASKBAR_TEXT, 1);
+    gui_text(c, bar.x + bar.width - gui_text_width(shown, 1) - 12 - ox, text_y, shown, TASKBAR_TEXT, 1);
     draw_tray(c, ox, oy);
 }
 
@@ -1216,35 +1467,92 @@ static void draw_item(struct gui_canvas *c, struct rect r, const char *text, con
     int text_x = 12 + ICON_SIZE;
 
     if (chosen)
-        gui_fill(c, r.x - ox, r.y - oy, r.width, r.height, TITLE_FOCUSED);
+        gui_fill_rounded(c, r.x - ox, r.y - oy, r.width, r.height, SMALL_RADIUS, TITLE_FOCUSED);
     if (icon)
         gui_draw_image(c, r.x + 6 - ox, r.y + (r.height - ICON_SIZE) / 2 - oy, icon);
     fitted_text(c, r.x + text_x - ox, r.y + (r.height - GUI_CHAR_HEIGHT) / 2 - oy, r.width - text_x - 8, text,
-                chosen ? TITLE_TEXT : color);
+                chosen ? ON_ACCENT : color);
 }
 
-static void draw_menu(struct gui_canvas *c, int ox, int oy) {
-    struct rect m = menu(), first_extra = menu_item(app_count);
+static int item_height(const struct item *item) {
+    return item->action == ACT_LINE ? MENU_GAP : ITEM_HEIGHT;
+}
 
-    draw_panel(c, m, ox, oy);
-    if (!app_count)
-        draw_item(c, menu_item(0), "No apps in " APPS_DIR, NULL, false, TASKBAR_DIM_TEXT, ox, oy);
-    for (int i = 0; i < menu_items(); i++) {
-        int extra = i < app_count ? -1 : extra_item(i);
-        const struct gui_image *icon = extra < 0           ? app_icon(apps[i])
-                                     : extra == ITEM_RUN ? app_icon(RUN_COMMAND)
-                                                         : gui_icon(extra_icons[extra]);
+static bool has_submenu(const struct item *item) {
+    return item->action == ACT_FOLDER || item->action == ACT_OPEN_WITH || item->action == ACT_POSITION;
+}
 
-        draw_item(c, menu_item(i), extra < 0 ? apps[i] : extra_items[extra], icon, i == menu_choice, TASKBAR_TEXT,
-                  ox, oy);
+static bool choosable(const struct item *item) {
+    return item->action != ACT_NONE && item->action != ACT_LINE;
+}
+
+static struct rect item_rect(const struct popup *p, int index) {
+    int y = p->r.y + 4;
+
+    for (int i = 0; i < index; i++)
+        y += item_height(&p->items[i]);
+    return (struct rect){p->r.x + 4, y, p->r.width - 8, item_height(&p->items[index])};
+}
+
+static int item_at(const struct popup *p, int x, int y) {
+    for (int i = 0; i < p->count; i++) {
+        if (choosable(&p->items[i]) && contains(item_rect(p, i), x, y))
+            return i;
     }
-    gui_fill(c, m.x + 8 - ox, first_extra.y - MENU_GAP / 2 - 1 - oy, m.width - 16, 1, TASKBAR_LINE);
+    return -1;
+}
+
+static void damage_popups(void) {
+    for (int i = 0; i < popup_depth; i++)
+        add_damage(popups[i].r);
+}
+
+// A menu width wide at x, y, or left of x and above y if it doesn't fit there,
+// kept on the screen.
+static void place_popup(struct popup *p, int x, int y, int width) {
+    int height = 8;
+
+    for (int i = 0; i < p->count; i++)
+        height += item_height(&p->items[i]);
+    x = x + width > screen.width ? x - width : x;
+    y = y + height > screen.height ? screen.height - height : y;
+    p->r = (struct rect){x < 0 ? 0 : x, y < 0 ? 0 : y, width, height};
+}
+
+// A tick in a box.
+static void draw_check(struct gui_canvas *c, int x, int y, bool on, int ox, int oy) {
+    gui_frame_rounded(c, x - ox, y - oy, 14, 14, SMALL_RADIUS, on ? TITLE_FOCUSED : TASKBAR_COLOR, TASKBAR_TEXT);
+}
+
+static void draw_popups(struct gui_canvas *c, int ox, int oy) {
+    for (int level = 0; level < popup_depth; level++) {
+        const struct popup *p = &popups[level];
+
+        draw_glass(c, p->r, ox, oy);
+        for (int i = 0; i < p->count; i++) {
+            const struct item *item = &p->items[i];
+            struct rect r = item_rect(p, i);
+            bool chosen = i == p->choice;
+
+            if (item->action == ACT_LINE) {
+                gui_fill(c, r.x + 4 - ox, r.y + MENU_GAP / 2 - oy, r.width - 8, 1, TASKBAR_LINE);
+                continue;
+            }
+            draw_item(c, r, item->label, item->icon, chosen && choosable(item),
+                      item->action == ACT_NONE ? TASKBAR_DIM_TEXT : TASKBAR_TEXT, ox, oy);
+            if (item->check)
+                draw_check(c, r.x + 7, r.y + (r.height - 14) / 2, item->checked, ox, oy);
+            if (has_submenu(item))
+                gui_text(c, r.x + r.width - 14 - ox, r.y + (r.height - GUI_CHAR_HEIGHT) / 2 - oy, ">",
+                         chosen ? ON_ACCENT : TASKBAR_DIM_TEXT, 1);
+        }
+    }
 }
 
 static void draw_switcher(struct gui_canvas *c, int ox, int oy) {
     struct rect s = switcher();
 
-    draw_panel(c, s, ox, oy);
+    draw_glass(c, s, ox, oy);
     for (int i = 0; i < window_count; i++) {
         struct window *w = switcher_window(i);
 
@@ -1291,35 +1599,65 @@ static void draw_snap(struct gui_canvas *c, int ox, int oy) {
     }
 }
 
-// Icons on the desktop for what's in Desktop in the home folder, in columns from the
-// top left, with pictures as small copies of themselves. Clicking one selects it,
-// double-clicking opens it, and dragging it takes it to a window, as from Files. A
-// file from Files dropped on the desktop is copied there.
+// Icons on the desktop for what's in Desktop in the home folder, on a grid, with
+// pictures as small copies of themselves. Clicking one selects it, double-clicking
+// opens it, and dragging it moves it to another place on the grid, or into a
+// folder there, or takes it to a window, as from Files. A file from Files dropped
+// on the desktop is copied there. Where each goes is kept in LAYOUT, a line each:
+// its column, its row and its name.
 #define DESKTOP_ICON 32
 #define DESKTOP_CELL_WIDTH 88
 #define DESKTOP_CELL_HEIGHT 72
 #define MAX_DESKTOP 64
 #define DOUBLE_CLICK_MS 400
 #define DRAG_DISTANCE 6
+#define LAYOUT "/system/etc/desktop"
 struct desktop_item {
     char name[256];
     bool folder;
     time_t changed;
     off_t size;
+    int column, row;
     struct gui_image picture;
 };
 static struct desktop_item desktop_items[MAX_DESKTOP];
 static int desktop_count, desktop_selected = -1, desktop_pressed = -1, pressed_x, pressed_y;
+static int desktop_dragged = -1; // the one being dragged
 static int64_t desktop_clicked; // when the one selected was clicked
 static char desktop_dir[GUI_PATH_MAX];
-static bool dragging_from_desktop;
 
-static struct rect desktop_cell(int index) {
+// The grid, from the desktop's top left, leaving room for the hint at the bottom.
+static int desktop_rows(void) {
     int rows = (desktop().height - 3 * GUI_CHAR_HEIGHT - 8) / DESKTOP_CELL_HEIGHT;
 
-    rows = rows > 0 ? rows : 1;
-    return (struct rect){8 + index / rows * DESKTOP_CELL_WIDTH, 8 + index % rows * DESKTOP_CELL_HEIGHT,
+    return rows > 0 ? rows : 1;
+}
+
+static int desktop_columns(void) {
+    int columns = (desktop().width - 8) / DESKTOP_CELL_WIDTH;
+
+    return columns > 0 ? columns : 1;
+}
+
+static struct rect grid_cell(int column, int row) {
+    struct rect d = desktop();
+
+    return (struct rect){d.x + 8 + column * DESKTOP_CELL_WIDTH, d.y + 8 + row * DESKTOP_CELL_HEIGHT,
                          DESKTOP_CELL_WIDTH - 4, DESKTOP_CELL_HEIGHT - 4};
+}
+
+static struct rect desktop_cell(int index) {
+    return grid_cell(desktop_items[index].column, desktop_items[index].row);
+}
+
+// The cell a point is in, kept on the grid.
+static void cell_at(int x, int y, int *column, int *row) {
+    struct rect d = desktop();
+
+    *column = (x - d.x - 8) / DESKTOP_CELL_WIDTH;
+    *row = (y - d.y - 8) / DESKTOP_CELL_HEIGHT;
+    *column = *column < 0 ? 0 : *column >= desktop_columns() ? desktop_columns() - 1 : *column;
+    *row = *row < 0 ? 0 : *row >= desktop_rows() ? desktop_rows() - 1 : *row;
 }
 
 static void desktop_path(int index, char out[GUI_PATH_MAX]) {
@@ -1327,8 +1665,16 @@ static void desktop_path(int index, char out[GUI_PATH_MAX]) {
 }
 
 static int desktop_item_at(int x, int y) {
-    for (int i = 0; i < desktop_count; i++) {
+    for (int i = 0; i < desktop_count && !settings.hide_icons; i++) {
         if (contains(desktop_cell(i), x, y))
+            return i;
+    }
+    return -1;
+}
+
+static int item_in_cell(int column, int row) {
+    for (int i = 0; i < desktop_count; i++) {
+        if (desktop_items[i].column == column && desktop_items[i].row == row)
             return i;
     }
     return -1;
@@ -1357,8 +1703,52 @@ static void make_picture(struct desktop_item *item, const char *path) {
     }
 }
 
-// Lists Desktop again, redrawing the desktop only if something's changed.
-static void load_desktop(void) {
+static void save_layout(void) {
+    FILE *f = fopen(LAYOUT, "w");
+
+    for (int i = 0; f && i < desktop_count; i++)
+        fprintf(f, "%d %d %s\n", desktop_items[i].column, desktop_items[i].row, desktop_items[i].name);
+    if (f)
+        fclose(f);
+}
+
+// Each item goes where LAYOUT says, if it's on the grid and free, and the rest in
+// the first free cells, down each column from the left.
+static void lay_out(void) {
+    FILE *f = fopen(LAYOUT, "r");
+    char line[300], name[256];
+    int column, row;
+
+    for (int i = 0; i < desktop_count; i++)
+        desktop_items[i].column = desktop_items[i].row = -1;
+    while (f && fgets(line, sizeof(line), f)) {
+        line[strcspn(line, "\n")] = '\0';
+        if (sscanf(line, "%d %d %255[^\n]", &column, &row, name) != 3 || column < 0 || row < 0
+            || column >= desktop_columns() || row >= desktop_rows() || item_in_cell(column, row) >= 0)
+            continue;
+        for (int i = 0; i < desktop_count; i++) {
+            if (!strcmp(desktop_items[i].name, name) && desktop_items[i].column < 0) {
+                desktop_items[i].column = column;
+                desktop_items[i].row = row;
+            }
+        }
+    }
+    if (f)
+        fclose(f);
+    for (int i = 0, cell = 0; i < desktop_count; i++) {
+        while (desktop_items[i].column < 0 && cell < desktop_columns() * desktop_rows()) {
+            if (item_in_cell(cell / desktop_rows(), cell % desktop_rows()) < 0) {
+                desktop_items[i].column = cell / desktop_rows();
+                desktop_items[i].row = cell % desktop_rows();
+            }
+            cell++;
+        }
+    }
+    save_layout();
+}
+
+// Lists Desktop again, redrawing the desktop only if something's changed, or always.
+static void load_desktop(bool always) {
     static struct desktop_item found[MAX_DESKTOP];
     DIR *dir = opendir(desktop_dir);
     struct dirent *d;
@@ -1380,7 +1770,7 @@ static void load_desktop(void) {
         closedir(dir);
     qsort(found, count, sizeof(*found), compare_desktop);
 
-    bool same = count == desktop_count;
+    bool same = count == desktop_count && !always;
 
     for (int i = 0; same && i < count; i++)
         same = !strcmp(found[i].name, desktop_items[i].name) && found[i].changed == desktop_items[i].changed
@@ -1393,7 +1783,8 @@ static void load_desktop(void) {
     }
     memcpy(desktop_items, found, count * sizeof(*found));
     desktop_count = count;
-    desktop_selected = desktop_pressed = -1;
+    desktop_selected = desktop_pressed = desktop_dragged = -1;
+    lay_out();
     printf("wm: desktop:");
     for (int i = 0; i < count; i++) {
         char path[GUI_PATH_MAX];
@@ -1417,7 +1808,7 @@ static void tint(struct gui_canvas *c, struct rect r, int ox, int oy, uint32_t c
 }
 
 static void draw_desktop(struct gui_canvas *c, int ox, int oy) {
-    for (int i = 0; i < desktop_count; i++) {
+    for (int i = 0; i < desktop_count && !settings.hide_icons; i++) {
         struct rect r = desktop_cell(i);
         const struct desktop_item *item = &desktop_items[i];
         char label[12];
@@ -1467,16 +1858,47 @@ static void desktop_drag(void) {
         return;
     desktop_path(desktop_pressed, drag_file);
     drag_icon = gui_file_icon(drag_file, desktop_items[desktop_pressed].folder);
-    dragging_from_desktop = true;
+    desktop_dragged = desktop_pressed;
     desktop_pressed = -1;
     add_damage(drag_rect());
     printf("wm: dragging %s\n", drag_file);
 }
 
-// A copy of a file let go on the desktop goes in Desktop, unless it's there already.
+// An icon let go on the desktop goes to the cell it's over, or into the folder
+// there. Anything else there, it stays where it was.
+static void desktop_drop(void) {
+    struct desktop_item *item = &desktop_items[desktop_dragged];
+    int column, row, there;
+
+    cell_at(cursor_x, cursor_y, &column, &row);
+    there = item_in_cell(column, row);
+    if (there >= 0 && there != desktop_dragged && desktop_items[there].folder) {
+        char from[GUI_PATH_MAX], to[GUI_PATH_MAX + 256];
+
+        desktop_path(desktop_dragged, from);
+        snprintf(to, sizeof(to), "%s/%s/%s", desktop_dir, desktop_items[there].name, item->name);
+        if (rename(from, to) == 0)
+            printf("wm: moved %s into %s\n", item->name, desktop_items[there].name);
+        load_desktop(false);
+        return;
+    }
+    if (there >= 0)
+        return;
+    add_damage(desktop_cell(desktop_dragged));
+    item->column = column;
+    item->row = row;
+    add_damage(desktop_cell(desktop_dragged));
+    save_layout();
+    printf("wm: moved %s to %d %d\n", item->name, column, row);
+}
+
+// A copy of a file let go on the desktop goes in Desktop, in the cell it was let
+// go over, unless it's there already.
 static void copy_to_desktop(const char *path) {
     const char *slash = strrchr(path, '/');
     pid_t child;
+    int column, row;
+    FILE *f;
 
     if (!slash || ((size_t)(slash - path) == strlen(desktop_dir) && !strncmp(path, desktop_dir, slash - path)))
         return;
@@ -1487,14 +1909,27 @@ static void copy_to_desktop(const char *path) {
     if (child > 0)
         waitpid(child, NULL, 0);
     printf("wm: copied %s to the desktop\n", path);
-    load_desktop();
+    cell_at(cursor_x, cursor_y, &column, &row);
+    if (item_in_cell(column, row) < 0 && (f = fopen(LAYOUT, "a"))) {
+        fprintf(f, "%d %d %s\n", column, row, slash + 1);
+        fclose(f);
+    }
+    load_desktop(false);
 }
 
-// Draws everything that overlaps a rectangle, through a canvas that is only that
-// part of the screen.
-static void compose(struct rect r) {
-    struct gui_canvas c = {screen.pixels + r.y * screen.stride + r.x, r.width, r.height, screen.stride};
-    int hint_y = desktop().height - 2 * GUI_CHAR_HEIGHT, first = -1;
+// Deleting from the desktop puts it in the trash.
+static void trash_file(const char *path) {
+    if (gui_trash(path))
+        printf("wm: trashed %s\n", path);
+    else
+        add_notice("Couldn't move it to the trash", strerror(errno), NULL);
+    load_desktop(false);
+}
+
+// Draws everything that overlaps a rectangle, on a canvas that is only that part
+// of the screen.
+static void draw_area(struct rect r, struct gui_canvas c) {
+    int hint_y = desktop().y + desktop().height - 2 * GUI_CHAR_HEIGHT, first = -1;
     struct rect bar = taskbar();
 
     // Nothing under a window that covers all of it can be seen.
@@ -1527,11 +1962,11 @@ static void compose(struct rect r) {
     }
     if (snap && overlaps(snap_rect(snap), r))
         draw_snap(&c, r.x, r.y);
-    if (r.y + r.height > bar.y)
+    if (bar_visible() && overlaps(r, bar))
         draw_taskbar(&c, r.x, r.y);
     draw_notices(&c, r.x, r.y);
-    if (menu_open)
-        draw_menu(&c, r.x, r.y);
+    if (popup_depth)
+        draw_popups(&c, r.x, r.y);
     if (panel >= 0)
         draw_open_panel(&c, r.x, r.y);
     if (switch_choice >= 0)
@@ -1547,6 +1982,51 @@ static void compose(struct rect r) {
 
 // Composes all that changed before showing any of it, so a window being moved is
 // never seen gone from both places.
+// The night light takes away some of the blue, and less of the green, as the
+// screen's shown, which is how these keep each.
+static uint8_t night_green[256], night_blue[256];
+
+static void make_night(void) {
+    int k = settings.night_strength;
+
+    for (int i = 0; i < 256; i++) {
+        night_green[i] = i * (256 - k * 72 / 100) >> 8;
+        night_blue[i] = i * (256 - k * 184 / 100) >> 8;
+    }
+}
+
+static void show_row(uint32_t *to, const uint32_t *from, int width) {
+    if (!settings.night_light) {
+        memcpy(to, from, width * sizeof(uint32_t));
+        return;
+    }
+    for (int x = 0; x < width; x++)
+        to[x] = (from[x] & 0xFF0000) | night_green[from[x] >> 8 & 0xFF] << 8 | night_blue[from[x] & 0xFF];
+}
+
+// Draws a rectangle of the screen. As what's see-through blurs what's under it,
+// a little more is drawn around it, on the side, so the blur reads what's really there.
+static void compose(struct rect r) {
+    static uint32_t *pixels;
+    static size_t size;
+    int x0 = r.x - BLUR_MARGIN < 0 ? 0 : r.x - BLUR_MARGIN, y0 = r.y - BLUR_MARGIN < 0 ? 0 : r.y - BLUR_MARGIN;
+    int x1 = r.x + r.width + BLUR_MARGIN, y1 = r.y + r.height + BLUR_MARGIN;
+    struct rect e = {x0, y0, (x1 < screen.width ? x1 : screen.width) - x0, (y1 < screen.height ? y1 : screen.height) - y0};
+    size_t needed = (size_t)e.width * e.height;
+
+    if (needed > size) {
+        uint32_t *bigger = realloc(pixels, needed * sizeof(*pixels));
+
+        if (!bigger)
+            return;
+        pixels = bigger, size = needed;
+    }
+    draw_area(e, (struct gui_canvas){pixels, e.width, e.height, e.width});
+    for (int row = r.y; row < r.y + r.height; row++)
+        memcpy(screen.pixels + (long)row * screen.stride + r.x, pixels + (long)(row - e.y) * e.width + r.x - e.x,
+               r.width * sizeof(*pixels));
+}
+
 static void redraw(void) {
     for (int i = 0; i < damage_count; i++)
         compose(damage[i]);
@@ -1554,8 +2034,8 @@ static void redraw(void) {
         struct rect r = damage[i];
 
         for (int row = r.y; row < r.y + r.height; row++)
-            memcpy(framebuffer + (long)row * pitch + r.x * sizeof(uint32_t), screen.pixels + (long)row * screen.stride + r.x,
-                   r.width * sizeof(uint32_t));
+            show_row((uint32_t *)(framebuffer + (long)row * pitch) + r.x, screen.pixels + (long)row * screen.stride + r.x,
+                     r.width);
     }
     damage_count = 0;
 }
@@ -1654,6 +2134,7 @@ static void raise_window(struct window *w) {
 }
 
 static void load_settings(void);
+static void settings_changed(void);
 
 // Opens shared memory a message names, removing the name. Returns its file, or -1.
 static int open_shared(const struct gui_message *m, int flags) {
@@ -1988,11 +2469,7 @@ static void handle_message(struct client *client, const struct gui_message *m) {
         add_notice(m->text, m->buffer, w ? w->app : NULL);
         break;
     case GUI_SETTINGS:
-        load_settings();
-        for (int i = 0; i < MAX_CLIENTS; i++) {
-            if (clients[i])
-                queue_message(clients[i], &(struct gui_message){.type = GUI_SETTINGS});
-        }
+        settings_changed();
         break;
     case GUI_ICON:
         if (w) {
@@ -2000,6 +2477,12 @@ static void handle_message(struct client *client, const struct gui_message *m) {
             w->app[sizeof(w->app) - 1] = '\0';
             add_damage(extent_of(w));
             damage_taskbar();
+        }
+        break;
+    case GUI_TRANSLUCENT:
+        if (w) {
+            w->translucent = m->x;
+            add_damage(extent_of(w));
         }
         break;
     case GUI_CURSOR:
@@ -2194,7 +2677,7 @@ static struct window *window_at(int x, int y, enum part *part, int *edges) {
 static void send_mouse(struct window *w, uint32_t type, uint32_t changed, int wheel) {
     send_to(w, (struct gui_message){
                    .type = type, .x = cursor_x - w->x, .y = cursor_y - w->y,
-                   .buttons = buttons, .changed = changed, .wheel = wheel,
+                   .buttons = buttons, .changed = changed, .wheel = wheel, .key.modifiers = modifiers,
                });
 }
 
@@ -2205,25 +2688,20 @@ static void launch(const char *command) {
     }
 }
 
-static void launch_app(const char *name) {
-    char path[sizeof(APPS_DIR) + GUI_TITLE_MAX];
-
-    snprintf(path, sizeof(path), APPS_DIR "/%s", name);
-    if (fork() == 0) {
-        execl(path, name, (char *)NULL);
-        _exit(127);
-    }
-}
-
-// Opens a file in the app the settings choose for its kind.
+// Opens a file in the app the settings choose for its kind, or runs it if it's a program.
 static void open_file(const char *path) {
     const char *app = settings.apps[gui_kind_of(path)];
-    char program[sizeof(APPS_DIR) + 32];
+    char program[GUI_PATH_MAX];
+    bool runs = gui_kind_of(path) != GUI_KIND_FOLDER && gui_is_program(path);
 
-    snprintf(program, sizeof(program), APPS_DIR "/%s", app);
-    printf("wm: opening %s in %s\n", path, app);
+    if (!runs && !gui_app_path(app, program))
+        return;
+    printf(runs ? "wm: running %s\n" : "wm: opening %s in %s\n", path, app);
     if (fork() == 0) {
-        execl(program, app, path, (char *)NULL);
+        if (runs)
+            execl(path, strrchr(path, '/') ? strrchr(path, '/') + 1 : path, (char *)NULL);
+        else
+            execl(program, app, path, (char *)NULL);
         _exit(127);
     }
 }
@@ -2290,33 +2768,199 @@ static void screenshot(bool window) {
                 path);
 }
 
-static int compare_names(const void *a, const void *b) {
-    return strcmp(a, b);
+static void close_menu(void) {
+    damage_popups();
+    popup_depth = popup_focus = 0;
+    start_open = false;
+    autohide();
 }
 
-// Lists the apps afresh each time, so new ones show up.
-static void open_menu(void) {
-    DIR *dir = opendir(APPS_DIR);
-    struct dirent *entry;
+static struct item *add_item(struct popup *p, int action, const char *label, const char *arg,
+                             const struct gui_image *icon) {
+    static struct item spare; // what goes past the end of a full menu
+    struct item *item = p->count < MAX_ITEMS ? &p->items[p->count++] : &spare;
 
-    app_count = 0;
-    while (dir && app_count < MAX_APPS && (entry = readdir(dir))) {
-        if (entry->d_name[0] != '.')
-            snprintf(apps[app_count++], GUI_TITLE_MAX, "%s", entry->d_name);
+    *item = (struct item){.action = action, .icon = icon};
+    snprintf(item->label, sizeof(item->label), "%s", label);
+    snprintf(item->arg, sizeof(item->arg), "%s", arg ? arg : "");
+    return item;
+}
+
+static void add_check(struct popup *p, int action, const char *label, bool on) {
+    struct item *item = add_item(p, action, label, NULL, NULL);
+
+    item->check = true;
+    item->checked = on;
+}
+
+struct named {
+    char name[GUI_TITLE_MAX];
+    bool folder;
+};
+
+static int compare_named(const void *a, const void *b) {
+    const struct named *x = a, *y = b;
+
+    return x->folder != y->folder ? y->folder - x->folder : strcmp(x->name, y->name);
+}
+
+// The apps in a folder, and with folders, the folders in it first, as they are.
+static void add_apps(struct popup *p, const char *folder, bool folders) {
+    struct named found[MAX_ITEMS];
+    int count = 0;
+    DIR *dir = opendir(folder);
+    struct dirent *d;
+
+    while (dir && count < MAX_ITEMS && (d = readdir(dir))) {
+        char path[GUI_PATH_MAX];
+        struct stat st;
+
+        snprintf(path, sizeof(path), "%s/%s", folder, d->d_name);
+        if (d->d_name[0] == '.' || stat(path, &st) < 0 || (S_ISDIR(st.st_mode) && !folders))
+            continue;
+        found[count].folder = S_ISDIR(st.st_mode);
+        snprintf(found[count++].name, GUI_TITLE_MAX, "%s", d->d_name);
     }
     if (dir)
         closedir(dir);
-    qsort(apps, app_count, sizeof(*apps), compare_names);
-    close_panel();
-    menu_open = true;
-    menu_choice = 0;
-    add_damage(menu());
+    qsort(found, count, sizeof(*found), compare_named);
+    for (int i = 0; i < count; i++) {
+        char path[GUI_PATH_MAX];
+
+        snprintf(path, sizeof(path), "%s/%s", folder, found[i].name);
+        add_item(p, found[i].folder ? ACT_FOLDER : ACT_APP, found[i].name, path,
+                 found[i].folder ? gui_icon("folder") : app_icon(found[i].name));
+    }
 }
 
-static void close_menu(void) {
-    if (menu_open)
-        add_damage(menu());
-    menu_open = false;
+static int first_choosable(const struct popup *p) {
+    for (int i = 0; i < p->count; i++) {
+        if (choosable(&p->items[i]))
+            return i;
+    }
+    return -1;
+}
+
+// Says where a menu is, for the tests to find its items.
+static void show_popup(int level) {
+    struct popup *p = &popups[level];
+
+    popup_depth = level + 1;
+    add_damage(p->r);
+    autohide();
+    printf("wm: menu %d at %d %d %d %d\n", level, p->r.x, p->r.y, p->r.width, p->r.height);
+}
+
+// The apps, by the folders in APPS_DIR, listed afresh each time so new ones show up.
+static void open_start_menu(void) {
+    struct popup *p = &popups[0];
+
+    close_panel();
+    close_menu();
+    p->count = 0;
+    add_apps(p, APPS_DIR, true);
+    if (!p->count)
+        add_item(p, ACT_NONE, "No apps in " APPS_DIR, NULL, NULL);
+    add_item(p, ACT_LINE, "", NULL, NULL);
+    add_item(p, ACT_RUN, "Run...", NULL, app_icon(RUN_COMMAND));
+    if (login_mode) { // locking and logging out are for a desktop someone logged in to
+        add_item(p, ACT_LOCK, "Lock", NULL, gui_icon("lock"));
+        add_item(p, ACT_LOG_OUT, "Log out", NULL, gui_icon("logout"));
+    }
+    add_item(p, ACT_REBOOT, "Reboot", NULL, gui_icon("reboot"));
+    add_item(p, ACT_SHUT_DOWN, "Shut down", NULL, gui_icon("shutdown"));
+    place_popup(p, GAP, 0, MENU_WIDTH);
+    p->r.y = beside_bar(p->r.height);
+    p->choice = first_choosable(p);
+    start_open = true;
+    show_popup(0);
+}
+
+// What can be done with an icon on the desktop, as in Files, or on the desktop itself.
+static void open_desktop_menu(int index) {
+    struct popup *p = &popups[0];
+
+    close_panel();
+    close_menu();
+    p->count = 0;
+    if (index >= 0) {
+        bool folder = desktop_items[index].folder;
+        char editor[GUI_PATH_MAX];
+
+        desktop_path(index, popup_file);
+        add_item(p, ACT_OPEN, "Open", NULL, NULL);
+        if (!folder && gui_app_path("editor", editor))
+            add_item(p, ACT_OPEN_IN, "Open in Editor", editor, NULL);
+        if (!folder)
+            add_item(p, ACT_OPEN_WITH, "Open with", NULL, NULL);
+        if (!folder && gui_is_program(popup_file))
+            add_item(p, ACT_RUN_FILE, "Run", NULL, NULL);
+        add_item(p, ACT_LINE, "", NULL, NULL);
+        add_item(p, ACT_CUT, "Cut", NULL, NULL);
+        add_item(p, ACT_COPY, "Copy", NULL, NULL);
+        add_item(p, ACT_COPY_PATH, "Copy path", NULL, NULL);
+        add_item(p, ACT_RENAME, "Rename", NULL, NULL);
+        add_item(p, ACT_DELETE, "Delete", NULL, NULL);
+        add_item(p, ACT_LINE, "", NULL, NULL);
+        add_item(p, ACT_PROPERTIES, "Properties", NULL, NULL);
+    } else {
+        add_item(p, ACT_REFRESH, "Refresh", NULL, NULL);
+        add_check(p, ACT_SHOW_ICONS, "Show icons", !settings.hide_icons);
+    }
+    place_popup(p, cursor_x, cursor_y, MENU_WIDTH);
+    p->choice = -1;
+    show_popup(0);
+}
+
+static void open_taskbar_menu(void) {
+    struct popup *p = &popups[0];
+
+    close_panel();
+    close_menu();
+    p->count = 0;
+    add_item(p, ACT_POSITION, "Position", NULL, NULL);
+    add_check(p, ACT_AUTOHIDE, "Autohide taskbar", settings.autohide);
+    place_popup(p, cursor_x, 0, MENU_WIDTH);
+    p->r.y = beside_bar(p->r.height);
+    p->choice = -1;
+    show_popup(0);
+}
+
+static void close_submenu(void) {
+    if (popup_depth > 1)
+        add_damage(popups[1].r);
+    popup_depth = 1;
+    popup_focus = 0;
+}
+
+// Beside the item it's for, or on the other side if there isn't room.
+static void open_submenu(int index) {
+    const struct item *parent = &popups[0].items[index];
+    struct popup *p = &popups[1], *menu = &popups[0];
+    struct rect r = item_rect(menu, index);
+    int width = 180, x = menu->r.x + menu->r.width - 2;
+
+    close_submenu();
+    p->count = 0;
+    if (parent->action == ACT_FOLDER) {
+        add_apps(p, parent->arg, false);
+    } else if (parent->action == ACT_OPEN_WITH) {
+        char names[MAX_ITEMS][32], path[GUI_PATH_MAX];
+        int count = gui_app_names(names, MAX_ITEMS);
+
+        for (int i = 0; i < count; i++) {
+            if (gui_app_path(names[i], path))
+                add_item(p, ACT_OPEN_IN, names[i], path, app_icon(names[i]));
+        }
+    } else {
+        add_check(p, ACT_TOP, "Top", settings.taskbar_top);
+        add_check(p, ACT_BOTTOM, "Bottom", !settings.taskbar_top);
+    }
+    if (!p->count)
+        add_item(p, ACT_NONE, "Empty", NULL, NULL);
+    place_popup(p, x + width > screen.width ? menu->r.x - width + 2 : x, r.y - 4, width);
+    p->choice = -1;
+    show_popup(1);
 }
 
 // Logging out, rebooting and shutting down ask every window to close first, so
@@ -2364,18 +3008,165 @@ static int check_leaving(void) {
     return -1;
 }
 
-static void choose(int index) {
-    int item = index >= app_count && index < menu_items() ? extra_item(index) : -1;
+static void load_desktop(bool always);
+static void trash_file(const char *path);
+
+// Saves a setting changed here, and tells everyone, as Settings does.
+static void save_settings(const char *what) {
+    if (gui_settings_save(&settings))
+        printf("wm: %s\n", what);
+    settings_changed();
+}
+
+// What the desktop's file is for the clipboard: its path, and when it's cut, where
+// Files looks to move it, rather than copy it, when it's pasted.
+#define CUT "/tmp/files-cut"
+static void put_path(const char *path, bool cut) {
+    FILE *f;
+
+    free(clipboard);
+    clipboard = strdup(path);
+    clipboard_length = clipboard ? strlen(path) : 0;
+    clipboard_width = clipboard_height = 0;
+    unlink(CUT);
+    if (cut && (f = fopen(CUT, "w"))) {
+        fputs(path, f);
+        fclose(f);
+    }
+    printf("wm: %s %s\n", cut ? "cut" : "copied", path);
+}
+
+// Runs a program, with an option and a file, either of which may be NULL.
+static void start(const char *program, const char *option, const char *file) {
+    const char *name = strrchr(program, '/') ? strrchr(program, '/') + 1 : program;
+
+    if (fork() == 0) {
+        execl(program, name, option ? option : file, option ? file : (char *)NULL, (char *)NULL);
+        _exit(127);
+    }
+}
+
+static void files_with(const char *option, const char *file) {
+    char files[GUI_PATH_MAX];
+
+    if (gui_app_path("files", files))
+        start(files, option, file);
+}
+
+static void act(const struct item *item) {
+    switch (item->action) {
+    case ACT_APP:
+        start(item->arg, NULL, NULL);
+        break;
+    case ACT_RUN:
+        launch(RUN_COMMAND);
+        break;
+    case ACT_LOCK:
+        lock();
+        break;
+    case ACT_LOG_OUT:
+    case ACT_REBOOT:
+    case ACT_SHUT_DOWN:
+        start_leaving(item->action == ACT_LOG_OUT ? ITEM_LOG_OUT : item->action == ACT_REBOOT ? ITEM_REBOOT : ITEM_SHUT_DOWN);
+        break;
+    case ACT_OPEN:
+        open_file(popup_file);
+        break;
+    case ACT_OPEN_IN:
+        printf("wm: opening %s in %s\n", popup_file, item->label);
+        start(item->arg, NULL, popup_file);
+        break;
+    case ACT_RUN_FILE:
+        printf("wm: running %s\n", popup_file);
+        start(popup_file, NULL, NULL);
+        break;
+    case ACT_CUT:
+    case ACT_COPY:
+    case ACT_COPY_PATH:
+        put_path(popup_file, item->action == ACT_CUT);
+        break;
+    case ACT_RENAME:
+    case ACT_PROPERTIES:
+        files_with(item->action == ACT_RENAME ? "--rename" : "--properties", popup_file);
+        break;
+    case ACT_DELETE:
+        trash_file(popup_file);
+        break;
+    case ACT_REFRESH:
+        load_desktop(true);
+        break;
+    case ACT_SHOW_ICONS:
+        settings.hide_icons = !settings.hide_icons;
+        save_settings(settings.hide_icons ? "icons hidden" : "icons shown");
+        break;
+    case ACT_TOP:
+    case ACT_BOTTOM:
+        settings.taskbar_top = item->action == ACT_TOP;
+        save_settings(settings.taskbar_top ? "taskbar top" : "taskbar bottom");
+        break;
+    case ACT_AUTOHIDE:
+        settings.autohide = !settings.autohide;
+        save_settings(settings.autohide ? "autohide on" : "autohide off");
+        break;
+    }
+}
+
+// An item with a submenu opens it, with the keyboard, and any other does what
+// it's for, closing the menus.
+static void choose(int level, int index) {
+    struct item item = popups[level].items[index];
+
+    if (has_submenu(&item) && level == 0) {
+        open_submenu(index);
+        popup_focus = 1;
+        popups[1].choice = first_choosable(&popups[1]);
+    } else if (choosable(&item) && !has_submenu(&item)) {
+        close_menu();
+        act(&item);
+    }
+}
+
+// The mouse over a menu highlights what it's on, opening its submenu if it has one.
+static void hover_menu(void) {
+    for (int level = popup_depth - 1; level >= 0; level--) {
+        struct popup *p = &popups[level];
+        int i = item_at(p, cursor_x, cursor_y);
+        bool open = popup_depth > 1 && p->choice == i;
+
+        if (!contains(p->r, cursor_x, cursor_y))
+            continue;
+        popup_focus = level;
+        if (i < 0 || i == p->choice)
+            return;
+        p->choice = i;
+        add_damage(p->r);
+        if (level == 0 && has_submenu(&p->items[i]) && !open)
+            open_submenu(i);
+        else if (level == 0 && !has_submenu(&p->items[i]))
+            close_submenu();
+        return;
+    }
+}
+
+// A press in a menu chooses what it's on, and anywhere else closes the menus,
+// returning whether it should go no further: when it was in one, or on the
+// launcher, which would open the start menu again.
+static bool menu_press(uint32_t changed) {
+    for (int level = popup_depth - 1; level >= 0; level--) {
+        struct popup *p = &popups[level];
+        int i = item_at(p, cursor_x, cursor_y);
+
+        if (!contains(p->r, cursor_x, cursor_y))
+            continue;
+        if (i >= 0 && (changed & MOUSE_BUTTON_LEFT))
+            choose(level, i);
+        return true;
+    }
+
+    bool on_launcher = start_open && bar_visible() && contains(launcher(), cursor_x, cursor_y);
 
     close_menu();
-    if (index >= 0 && index < app_count)
-        launch_app(apps[index]);
-    else if (item == ITEM_RUN)
-        launch(RUN_COMMAND);
-    else if (item == ITEM_LOCK)
-        lock();
-    else if (item >= 0)
-        start_leaving(item);
+    return on_launcher;
 }
 
 static void move_window(struct window *w, int x, int y) {
@@ -2422,7 +3213,7 @@ static void taskbar_click(void) {
     int count = windows_by_age(list);
 
     if (contains(launcher(), cursor_x, cursor_y))
-        open_menu();
+        open_start_menu();
     for (int i = 0; i < WORKSPACES; i++) {
         if (contains(workspace_box(i), cursor_x, cursor_y))
             go_to_workspace(i);
@@ -2455,7 +3246,7 @@ static void press(uint32_t changed) {
     }
 
     // Clicking a notification puts it away.
-    int notice = menu_open || panel >= 0 ? -1 : notice_at(cursor_x, cursor_y);
+    int notice = popup_depth || panel >= 0 ? -1 : notice_at(cursor_x, cursor_y);
 
     if (notice >= 0) {
         if (notices[notice].file[0])
@@ -2466,7 +3257,7 @@ static void press(uint32_t changed) {
 
     // A click in an open panel does what it's on, and anywhere else closes it. Its
     // icon in the tray closes it too, and another's opens that one.
-    int item = tray_item_at(cursor_x, cursor_y);
+    int item = bar_visible() ? tray_item_at(cursor_x, cursor_y) : -1;
 
     if (panel >= 0) {
         int was = panel;
@@ -2483,26 +3274,26 @@ static void press(uint32_t changed) {
         return;
     }
 
-    // A click anywhere closes the menu, and does what it would have done unless it
+    // A click anywhere closes a menu, and does what it would have done unless it
     // was in the menu or on the launcher.
-    if (menu_open) {
-        struct rect m = menu();
-        bool in_menu = contains(m, cursor_x, cursor_y);
-
-        if (in_menu && (changed & MOUSE_BUTTON_LEFT))
-            choose(menu_item_at(cursor_x, cursor_y));
-        close_menu();
-        if (in_menu || contains(launcher(), cursor_x, cursor_y))
-            return;
-    }
-    if (contains(taskbar(), cursor_x, cursor_y)) {
+    if (popup_depth && menu_press(changed))
+        return;
+    if (bar_visible() && contains(taskbar(), cursor_x, cursor_y)) {
         if (changed & MOUSE_BUTTON_LEFT)
             taskbar_click();
+        else if (changed & MOUSE_BUTTON_RIGHT)
+            open_taskbar_menu();
         return;
     }
     if (!w) {
         if (changed & MOUSE_BUTTON_LEFT)
             desktop_press();
+        else if (changed & MOUSE_BUTTON_RIGHT) {
+            int index = desktop_item_at(cursor_x, cursor_y);
+
+            select_desktop_item(index);
+            open_desktop_menu(index);
+        }
         return;
     }
     set_focus(w);
@@ -2542,9 +3333,14 @@ static void drop_file(void) {
     struct window *w = window_at(cursor_x, cursor_y, &part, &edges);
 
     add_damage(drag_rect());
-    if (!w && !locked && !dragging_from_desktop && !contains(taskbar(), cursor_x, cursor_y))
-        copy_to_desktop(drag_file);
-    dragging_from_desktop = false;
+    if (!w && !locked && !(bar_visible() && contains(taskbar(), cursor_x, cursor_y)))
+    {
+        if (desktop_dragged >= 0)
+            desktop_drop();
+        else
+            copy_to_desktop(drag_file);
+    }
+    desktop_dragged = -1;
     if (w && part == PART_CONTENT && !locked) {
         set_focus(w);
         raise_window(w);
@@ -2564,6 +3360,21 @@ static int faster(int d, int axis) {
 
     left[axis] = scaled % 5;
     return scaled / 5;
+}
+
+// A hidden taskbar shows while the mouse is at its edge of the screen, or on it,
+// or a menu or panel is open.
+static void autohide(void) {
+    // The bar, and the gap between it and the edge.
+    struct rect bar = taskbar(), near = {0, settings.taskbar_top ? 0 : bar.y, screen.width, bar.height + GAP};
+    bool at_edge = settings.taskbar_top ? cursor_y == 0 : cursor_y == screen.height - 1;
+    bool show = !settings.autohide || at_edge || popup_depth || panel >= 0 || (bar_shown && contains(near, cursor_x, cursor_y));
+
+    if (show == bar_shown)
+        return;
+    bar_shown = show;
+    add_damage(bar);
+    printf("wm: taskbar %s\n", show ? "shown" : "hidden");
 }
 
 static void handle_mouse(const struct mouse_event *e) {
@@ -2587,11 +3398,13 @@ static void handle_mouse(const struct mouse_event *e) {
         damage_cursor();
     }
     buttons = e->buttons;
+    if (moved)
+        autohide();
 
     // Windows can be dragged partly off the screen, but the title bar stays on it.
     // A tiled one goes back to its own size, as far across under the mouse as it was.
     if (dragging && moved) {
-        int top = cursor_y - drag_y, bottom = desktop().height - BORDER;
+        int top = cursor_y - drag_y, bottom = desktop().y + desktop().height - BORDER, least = desktop().y + TITLE_HEIGHT;
         enum snap to = cursor_x <= 0 ? SNAP_LEFT : cursor_x >= screen.width - 1 ? SNAP_RIGHT : cursor_y <= 0 ? SNAP_TOP
                                                                                                               : SNAP_NONE;
 
@@ -2601,7 +3414,7 @@ static void handle_mouse(const struct mouse_event *e) {
             drag_x = drag_x * (r.width - 2 * BORDER) / dragging->canvas.width;
             untile(dragging);
         }
-        move_window(dragging, cursor_x - drag_x, top < TITLE_HEIGHT ? TITLE_HEIGHT : top > bottom ? bottom : top);
+        move_window(dragging, cursor_x - drag_x, top < least ? least : top > bottom ? bottom : top);
         if (to != snap) {
             add_damage(snap_rect(snap ? snap : to));
             add_damage(snap_rect(to));
@@ -2617,17 +3430,13 @@ static void handle_mouse(const struct mouse_event *e) {
                  resize_height + (edges & EDGE_BOTTOM ? dy : edges & EDGE_TOP ? -dy : 0));
     }
 
-    // The menu highlights what's under the mouse, and so do notifications in the tray.
-    if (panel == TRAY_NOTICES && moved)
-        add_damage(panel_rect(TRAY_NOTICES));
-    if (menu_open && moved) {
-        int choice = menu_item_at(cursor_x, cursor_y);
-
-        if (choice >= 0 && choice != menu_choice) {
-            menu_choice = choice;
-            add_damage(menu());
-        }
-    }
+    // Menus highlight what's under the mouse, and so do the tray and its panels.
+    if (popup_depth && moved)
+        hover_menu();
+    if (panel >= 0 && moved)
+        add_damage(panel_rect(panel));
+    if (moved && bar_visible())
+        add_damage(tray());
 
     int wheel = e->wheel;
 
@@ -2638,8 +3447,8 @@ static void handle_mouse(const struct mouse_event *e) {
     if (released & MOUSE_BUTTON_LEFT)
         setting_volume = false;
     if (e->wheel && mixer >= 0 && !locked
-        && (contains(tray_item(TRAY_SOUND), cursor_x, cursor_y)
-            || (panel == TRAY_SOUND && contains(panel_rect(TRAY_SOUND), cursor_x, cursor_y)))) {
+        && ((bar_visible() && contains(tray_item(TRAY_QUICK), cursor_x, cursor_y))
+            || (panel == TRAY_QUICK && contains(panel_rect(TRAY_QUICK), cursor_x, cursor_y)))) {
         set_volume(volume - e->wheel * VOLUME_STEP, muted);
         wheel = 0; // so no window gets it
     }
@@ -2707,20 +3516,41 @@ static bool switch_key(const struct key_event *e) {
     return false;
 }
 
-// Up and Down move through the menu, Enter runs what's highlighted, and Escape closes it.
+// Up and Down move through a menu, Right and Enter open a submenu, Left and Escape
+// close it, Enter does what's highlighted, and Escape closes the menu.
 static bool menu_key(const struct key_event *e) {
-    if (!menu_open || (e->modifiers & KEY_MOD_SUPER)
-        || !(e->code == KEY_UP || e->code == KEY_DOWN || e->code == KEY_ENTER || e->code == KEY_ESCAPE))
+    uint16_t code = e->code;
+
+    if (!popup_depth || (e->modifiers & KEY_MOD_SUPER)
+        || !(code == KEY_UP || code == KEY_DOWN || code == KEY_LEFT || code == KEY_RIGHT || code == KEY_ENTER
+             || code == KEY_ESCAPE))
         return false;
     if (!e->pressed)
         return true;
-    if (e->code == KEY_ENTER)
-        choose(menu_choice);
-    else if (e->code == KEY_ESCAPE)
-        close_menu();
-    else {
-        menu_choice = (menu_choice + (e->code == KEY_DOWN ? 1 : menu_items() - 1)) % menu_items();
-        add_damage(menu());
+
+    struct popup *p = &popups[popup_focus];
+
+    if (code == KEY_ESCAPE || code == KEY_LEFT) {
+        if (popup_focus)
+            close_submenu();
+        else if (code == KEY_ESCAPE)
+            close_menu();
+    } else if (code == KEY_ENTER || code == KEY_RIGHT) {
+        if (p->choice >= 0 && (code == KEY_ENTER || has_submenu(&p->items[p->choice])))
+            choose(popup_focus, p->choice);
+    } else if (p->count) {
+        int step = code == KEY_DOWN ? 1 : p->count - 1, i = p->choice < 0 ? (code == KEY_DOWN ? p->count - 1 : 0) : p->choice;
+
+        for (int tries = 0; tries < p->count; tries++) {
+            i = (i + step) % p->count;
+            if (choosable(&p->items[i])) {
+                p->choice = i;
+                break;
+            }
+        }
+        add_damage(p->r);
+        if (popup_focus == 0)
+            close_submenu();
     }
     return true;
 }
@@ -2736,10 +3566,10 @@ static void super_key(const struct key_event *e) {
     if (is_super)
         super_down = e->pressed;
     if (is_super && !e->pressed && super_alone) {
-        if (menu_open)
+        if (popup_depth)
             close_menu();
         else
-            open_menu();
+            open_start_menu();
     }
 }
 
@@ -2758,7 +3588,7 @@ static void update_cursor(void) {
     int edges = 0;
     struct window *w = resizing ? resizing : grabbed ? grabbed : window_at(cursor_x, cursor_y, &part, &edges);
     enum gui_cursor shape = resizing                                         ? resize_cursor(resizing->resize_edges)
-                          : grabbed || (w && part == PART_CONTENT && !menu_open) ? w->cursor
+                          : grabbed || (w && part == PART_CONTENT && !popup_depth) ? w->cursor
                           : part == PART_RESIZE && !dragging                 ? resize_cursor(edges)
                                                                              : GUI_CURSOR_ARROW;
 
@@ -2877,11 +3707,35 @@ static void load_wallpaper(void) {
     };
 }
 
-// Changes the screen's resolution. Tiled windows keep their share of the desktop,
-// and the others move to stay on it.
+// When the desktop changes, tiled windows keep their share of it, and the others
+// move to stay on it.
+static void fit_windows(struct rect was) {
+    struct rect now = desktop();
+
+    for (int i = 0; i < window_count; i++) {
+        struct window *w = windows[i];
+        struct rect f = frame_of(w);
+
+        if (w->bare) {
+            center(w);
+            continue;
+        }
+        if (w->tiled) {
+            place(w, (struct rect){(f.x - was.x) * now.width / was.width + now.x,
+                                   (f.y - was.y) * now.height / was.height + now.y, f.width * now.width / was.width,
+                                   f.height * now.height / was.height});
+            continue;
+        }
+        f.x = f.x + f.width > now.x + now.width ? now.x + now.width - f.width : f.x;
+        f.y = f.y + f.height > now.y + now.height ? now.y + now.height - f.height : f.y;
+        move_window(w, (f.x > now.x ? f.x : now.x) + BORDER, (f.y > now.y ? f.y : now.y) + TITLE_HEIGHT + BORDER);
+    }
+}
+
+// Changes the screen's resolution.
 static void change_resolution(int width, int height) {
     struct fb_info info;
-    struct rect was = desktop(), now;
+    struct rect was = desktop();
     uint32_t *pixels = malloc((size_t)width * height * sizeof(uint32_t));
 
     if (!pixels || fb_set_mode(fb, width, height) < 0 || fb_info(fb, &info) < 0) {
@@ -2899,24 +3753,7 @@ static void change_resolution(int width, int height) {
         quitting = true;
         return;
     }
-    now = desktop();
-    for (int i = 0; i < window_count; i++) {
-        struct window *w = windows[i];
-        struct rect f = frame_of(w);
-
-        if (w->bare) {
-            center(w);
-            continue;
-        }
-        if (w->tiled) {
-            place(w, (struct rect){f.x * now.width / was.width, f.y * now.height / was.height,
-                                   f.width * now.width / was.width, f.height * now.height / was.height});
-            continue;
-        }
-        f.x = f.x + f.width > now.width ? now.width - f.width : f.x;
-        f.y = f.y + f.height > now.height ? now.height - f.height : f.y;
-        move_window(w, (f.x > 0 ? f.x : 0) + BORDER, (f.y > 0 ? f.y : 0) + TITLE_HEIGHT + BORDER);
-    }
+    fit_windows(was);
     cursor_x = cursor_x < screen.width ? cursor_x : screen.width - 1;
     cursor_y = cursor_y < screen.height ? cursor_y : screen.height - 1;
     for (int i = 0; i < MAX_CLIENTS; i++) {
@@ -2930,8 +3767,23 @@ static void change_resolution(int width, int height) {
 // Settings change the colours, shadows, clock, resolution and wallpaper, so
 // everything is drawn again.
 static void load_settings(void) {
+    struct rect was = desktop();
+    bool icons_were_hidden = settings.hide_icons;
+
     gui_settings_load(&settings);
-    theme = settings.light ? &light : &dark;
+    theme_now = *(settings.light ? &light : &dark);
+    theme_now.title_focused = gui_accent_colors[settings.accent];
+    theme_now.on_accent = gui_on_accent(settings.accent);
+    theme = &theme_now;
+    make_night();
+    net_airplane(settings.airplane);
+    autohide();
+    if (desktop().y != was.y || desktop().height != was.height) {
+        fit_windows(was);
+        load_desktop(true); // on a grid that's moved
+    }
+    if (icons_were_hidden != settings.hide_icons)
+        desktop_selected = -1;
     ioctl(keyboard, KEYBOARD_SET_REPEAT_DELAY, &settings.repeat_delay);
     ioctl(keyboard, KEYBOARD_SET_REPEAT_RATE, &settings.repeat_rate);
 
@@ -2948,6 +3800,15 @@ static void load_settings(void) {
         change_resolution(settings.width, settings.height);
     load_wallpaper();
     add_damage((struct rect){0, 0, screen.width, screen.height});
+}
+
+// wm, then every program, loads the settings again.
+static void settings_changed(void) {
+    load_settings();
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        if (clients[i])
+            queue_message(clients[i], &(struct gui_message){.type = GUI_SETTINGS});
+    }
 }
 
 static int fail(const char *what) {
@@ -3004,9 +3865,10 @@ int main(int argc, char **argv) {
     mkdir(desktop_dir, 0755);
     add_damage((struct rect){0, 0, screen.width, screen.height});
     make_falloff();
+    make_coverage();
     load_settings();
     load_volume();
-    load_desktop();
+    load_desktop(false);
     if (login_mode)
         lock();
     else
@@ -3067,7 +3929,7 @@ int main(int argc, char **argv) {
         }
         if (now_ms() >= net_checked + NET_CHECK_MS) {
             check_network();
-            load_desktop();
+            load_desktop(false);
             net_checked = now_ms();
         }
 

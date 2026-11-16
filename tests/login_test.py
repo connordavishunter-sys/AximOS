@@ -95,4 +95,21 @@ try:
     check('without welcoming again', 'login: welcome' not in v.text(), v.text())
 finally:
     v.close()
+
+# Without the desktop, ttylogin asks at the terminal for the same account, and
+# axfetch then says who's logged in.
+v = VM(disk=img)
+try:
+    check('the shell asks to log in', v.wait('AximOS login: ', 40), v.text())
+    at = v.mark()
+    v.type('tester\n'); v.wait('Password: ', 5, at); v.type('wrong\n')
+    check('a wrong password is turned away', v.wait('Wrong username or password.\n\nAximOS login: ', 10, at), v.text(at))
+    check("and isn't shown", 'wrong' not in v.text(at), v.text(at))
+    at = v.mark()
+    v.type('tester\n'); v.wait('Password: ', 5, at); v.type('secret1\n')
+    check('the right one logs in', v.wait('ttylogin: logged in tester', 10, at) and v.wait('/$ ', 5, at), v.text(at))
+    o = v.run('axfetch')
+    check('axfetch has the username', 'tester@' in o, o)
+finally:
+    v.close()
 finish()

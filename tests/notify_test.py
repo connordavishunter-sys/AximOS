@@ -5,10 +5,10 @@ from vm import VM, check, finish
 
 W, H = 1280, 800
 DESKTOP = 0x1E2430
-# 300 by 52, 12 from the right and 12 above the taskbar, the newest lowest, 8 apart.
+# 300 by 52, 12 from the right and 12 above the taskbar, 32 tall, the newest lowest, 8 apart.
 X = W - 300 - 12
-BOTTOM = (X + 150, H - 28 - 12 - 26)        # the middle of the lowest
-ABOVE = (X + 150, H - 28 - 12 - 52 - 8 - 26) # and of the one above it
+BOTTOM = (X + 150, H - 8 - 32 - 8 - 26)        # the middle of the lowest
+ABOVE = (X + 150, H - 8 - 32 - 8 - 52 - 8 - 26) # and of the one above it
 
 v = VM(vmmouse=True)
 try:

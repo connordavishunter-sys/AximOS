@@ -6,6 +6,7 @@
 struct net_info {
     bool has_device;
     bool automatic;     // set by DHCP rather than by hand
+    bool airplane;      // sending and taking nothing, in airplane mode
     uint8_t mac[6];
     uint32_t address;   // 0 until there is one
     uint32_t netmask;

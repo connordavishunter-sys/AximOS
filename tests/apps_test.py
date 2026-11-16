@@ -47,7 +47,7 @@ try:
     check('prompt at boot', v.wait('/$ ', 30), v.text())
     v.run('echo none > /system/etc/wallpaper; rm -f /system/etc/gui.conf') # the plain colour and default theme, to look for
     v.run('echo hello > /tmp/hello.txt')
-    o = v.run('ls /system/bin/gui'); check('editor and files are apps', 'editor' in o and 'files' in o, o)
+    o = v.run('ls /system/bin/gui /system/bin/gui/Accessories'); check('editor and files are apps', 'editor' in o and 'files' in o, o)
 
     at = v.mark()
     v.type("wm 'files /tmp'\n")
@@ -163,13 +163,10 @@ try:
           v.text(at))
 
     # A folder's menu: Open, Open in new tab, a line, Cut, Copy, Copy path, Rename
-    # and Delete, which asks first, with the keyboard on its Delete button.
+    # and Delete, which moves it to the trash.
     at = v.mark()
     menu(80 + x + 40, 84 + y + 2 + 11, 6, 1)
-    time.sleep(0.5)
-    check('Delete asks first', 'files: deleted' not in v.text(at), v.text(at))
-    v.key('ret')
-    check('and deletes when told to', v.wait('files: deleted /tmp/docs', 5, at), v.text(at))
+    check('Delete moves it to the trash', v.wait('files: trashed /tmp/docs', 5, at), v.text(at))
 
     # F2 renames hello.txt, second after copy.txt, with its name selected to type over.
     at = v.mark()
@@ -254,8 +251,8 @@ try:
     # The start menu has each app's icon.
     v.key('meta_l'); time.sleep(0.5)
     w, h, px = v.screenshot()
-    menu_top = 772 - 16 * 24 - 9 - 8
-    icon = [px(4 + 6 + 8, menu_top + 4 + i * 24 + 12) for i in range(3)]
+    menu_top = 760 - 8 - 10 * 24 - 9 - 8 # floating 8 above the taskbar, 8 from the left
+    icon = [px(8 + 4 + 6 + 8, menu_top + 4 + i * 24 + 12) for i in range(3)]
     check('icons in the start menu', all(p not in (0x141821, 0x3D63DD) for p in icon), [hex(p) for p in icon])
     v.key('esc')
 

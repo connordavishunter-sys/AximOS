@@ -18,6 +18,12 @@ for code, glyph in enumerate(re.findall(r'\{((?:\s*0x[0-9A-Fa-f]{2},?){16})\s*\}
 LEFT, TOP, COLS, ROWS = 84, 88, 80, 25
 
 
+def differs(a, b):
+    """Whether a pixel is ink rather than background, which shows a little of what's
+    under the window, blurred."""
+    return sum(abs((a >> s & 0xFF) - (b >> s & 0xFF)) for s in (0, 8, 16)) > 96
+
+
 def screen_text(v, shift=0, left=LEFT, top=TOP, rows=ROWS, cols=COLS):
     """The terminal's lines, with anything unreadable as ?. Each window after the
     first opens shift pixels further right and down."""
@@ -29,7 +35,7 @@ def screen_text(v, shift=0, left=LEFT, top=TOP, rows=ROWS, cols=COLS):
             x0, y0 = left + shift + c * 8, top + shift + r * 16
             samples = [[px(x0 + bit, y0 + row) for bit in range(8)] for row in range(16)]
             background = px(x0 + 7, y0 + 15) # no glyph reaches the bottom right
-            glyph = tuple(sum(0x80 >> bit for bit in range(8) if row[bit] != background) for row in samples)
+            glyph = tuple(sum(0x80 >> bit for bit in range(8) if differs(row[bit], background)) for row in samples)
             line += FONT.get(glyph, '?')
         lines.append(line.rstrip())
     return lines
@@ -153,9 +159,9 @@ try:
     # program running in it.
     v.type('clear; winsize -w\n'); time.sleep(1)
     v.key('meta_l-up'); time.sleep(1.5)
-    big = dict(left=5, top=29, rows=46, cols=158)
-    lines = wait_screen(v, 'rows 46 cols 158', **big)
-    check('maximizing resizes the terminal', shown(lines, 'rows 25 cols 80') and shown(lines, 'rows 46 cols 158'),
+    big = dict(left=5, top=29, rows=45, cols=158)
+    lines = wait_screen(v, 'rows 44 cols 158', **big)
+    check('maximizing resizes the terminal', shown(lines, 'rows 25 cols 80') and shown(lines, 'rows 44 cols 158'),
           '\n'.join(lines))
     v.key('meta_l-down'); time.sleep(1.5)
     lines = wait_screen(v, 'rows 25 cols 80')

@@ -23,6 +23,10 @@
 #define TAB_WIDTH 170 // at most, with narrower ones when there are many
 #define TAB_CLOSE 16
 #define SEPARATOR_HEIGHT 9 // in a menu
+#define ROUND 5      // the corners of buttons, boxes, lists and scroll bars
+#define ROUND_SMALL 3 // of checkboxes and what's in them
+#define ROUND_POPUP 4 // of menus and dropdowns, as far in as their first item
+#define ROUND_DIALOG 8
 
 // Colours, from the theme the settings choose.
 struct theme {
@@ -43,6 +47,7 @@ static const struct theme light = {
     .focus_ring = 0x5578E8, .separator = 0xC9CED8, .selection = 0xB9CAF7, .thumb = 0xB4BBC8,
     .syntax = {0x1E2129, 0x8A3FC7, 0x2C5CC5, 0x2E7D32, 0xB85C00, 0x8A93A6, 0x0A7F8F},
 };
+static struct theme current;
 static const struct theme *theme = &dark;
 
 #define BACKGROUND (theme->background)
@@ -90,6 +95,17 @@ static void fill(struct gui_ui *ui, int x, int y, int width, int height, uint32_
     gui_fill(&c, x - ui->layout.clip.x, y - ui->layout.clip.y, width, height, color);
 }
 
+static void round_frame(struct gui_ui *ui, int x, int y, int width, int height, int radius, uint32_t fill_color,
+                        uint32_t line) {
+    struct gui_canvas c = clipped(ui);
+
+    gui_frame_rounded(&c, x - ui->layout.clip.x, y - ui->layout.clip.y, width, height, radius, fill_color, line);
+}
+
+static void round_fill(struct gui_ui *ui, int x, int y, int width, int height, int radius, uint32_t color) {
+    round_frame(ui, x, y, width, height, radius, color, GUI_NONE);
+}
+
 static void draw_image(struct gui_ui *ui, int x, int y, const struct gui_image *image) {
     struct gui_canvas c = clipped(ui);
 
@@ -134,7 +150,20 @@ static void load_theme(void) {
     struct gui_settings settings;
 
     gui_settings_load(&settings);
-    theme = settings.light ? &light : &dark;
+
+    // Another accent colour than the first, which the themes are made for, has what
+    // goes with it worked out from it.
+    uint32_t accent = gui_accent_colors[settings.accent];
+
+    current = *(settings.light ? &light : &dark);
+    theme = &current;
+    if (!settings.accent)
+        return;
+    current.accent = accent;
+    current.accent_hot = gui_mix(accent, 0xFFFFFF, 48);
+    current.on_accent = gui_on_accent(settings.accent);
+    current.focus_ring = settings.light ? current.accent_hot : gui_mix(accent, 0xFFFFFF, 112);
+    current.selection = settings.light ? gui_mix(accent, 0xFFFFFF, 176) : gui_mix(accent, current.background, 96);
 }
 
 void gui_ui_init(struct gui_ui *ui, struct gui_window *window) {
@@ -168,6 +197,8 @@ bool gui_ui_event(struct gui_ui *ui, const struct gui_message *e) {
             ui->mouse_released |= !ui->mouse_down;
             clock_gettime(CLOCK_MONOTONIC, &now);
             if (ui->mouse_down) {
+                ui->click_modifiers = e->key.modifiers;
+
                 long ms = now.tv_sec * 1000 + now.tv_nsec / 1000000;
 
                 ui->double_click = ms - ui->last_press < DOUBLE_CLICK_MS;
@@ -445,10 +476,7 @@ static bool focusable(struct gui_ui *ui, uint32_t id) {
 }
 
 static void draw_focus(struct gui_ui *ui, struct gui_rect r) {
-    fill(ui, r.x - 2, r.y - 2, r.width + 4, 1, FOCUS_RING);
-    fill(ui, r.x - 2, r.y + r.height + 1, r.width + 4, 1, FOCUS_RING);
-    fill(ui, r.x - 2, r.y - 2, 1, r.height + 4, FOCUS_RING);
-    fill(ui, r.x + r.width + 1, r.y - 2, 1, r.height + 4, FOCUS_RING);
+    round_frame(ui, r.x - 2, r.y - 2, r.width + 4, r.height + 4, ROUND + 2, GUI_NONE, FOCUS_RING);
 }
 
 static void draw_border(struct gui_ui *ui, struct gui_rect r, uint32_t color) {
@@ -491,8 +519,8 @@ void gui_progress(struct gui_ui *ui, float fraction) {
 
     fraction = fraction < 0 ? 0 : fraction > 1 ? 1 : fraction;
     snprintf(s, sizeof(s), "%d%%", (int)(fraction * 100 + 0.5f));
-    fill(ui, r.x, r.y, r.width, r.height, FRAME);
-    fill(ui, r.x, r.y, (int)(r.width * fraction), r.height, ACCENT);
+    round_fill(ui, r.x, r.y, r.width, r.height, ROUND, FRAME);
+    round_fill(ui, r.x, r.y, (int)(r.width * fraction), r.height, ROUND, ACCENT);
     text(ui, r.x + (r.width - gui_text_width(s, 1)) / 2, r.y + PADDING, s, TEXT, 1);
 }
 
@@ -507,7 +535,7 @@ bool gui_button_sized(struct gui_ui *ui, const char *label, int width, int heigh
     clicked |= focused && (key_pressed(ui, KEY_ENTER) || key_pressed(ui, KEY_SPACE));
     bool pressed = ui->active == id && ui->hot == id;
 
-    fill(ui, r.x, r.y, r.width, r.height, pressed ? ACCENT : ui->hot == id ? FRAME_HOT : FRAME);
+    round_fill(ui, r.x, r.y, r.width, r.height, ROUND, pressed ? ACCENT : ui->hot == id ? FRAME_HOT : FRAME);
     draw_label(ui, r.x + (r.width - label_width) / 2, r.y + (r.height - GUI_CHAR_HEIGHT) / 2, label,
                pressed ? ON_ACCENT : TEXT);
     if (focused)
@@ -523,7 +551,7 @@ bool gui_button(struct gui_ui *ui, const char *label) {
 void gui_display(struct gui_ui *ui, const char *s, int height) {
     struct gui_rect r = place(ui, room(ui), height);
 
-    fill(ui, r.x, r.y, r.width, r.height, PANEL);
+    round_fill(ui, r.x, r.y, r.width, r.height, ROUND, PANEL);
     text(ui, r.x + r.width - PADDING * 2 - gui_text_width(s, 2), r.y + (r.height - 2 * GUI_CHAR_HEIGHT) / 2, s, TEXT, 2);
 }
 
@@ -544,8 +572,8 @@ bool gui_image_button(struct gui_ui *ui, const char *label, const struct gui_ima
     uint32_t edge = selected ? ACCENT : ui->hot == id ? FRAME_HOT : FRAME;
 
     clicked |= focused && (key_pressed(ui, KEY_ENTER) || key_pressed(ui, KEY_SPACE));
-    fill(ui, picture.x, picture.y, picture.width, picture.height, edge);
-    fill(ui, picture.x + 2, picture.y + 2, width + 2, height + 2, BACKGROUND);
+    round_fill(ui, picture.x, picture.y, picture.width, picture.height, ROUND, edge);
+    round_fill(ui, picture.x + 2, picture.y + 2, width + 2, height + 2, ROUND - 2, BACKGROUND);
     if (image)
         draw_image(ui, picture.x + 3, picture.y + 3, image);
     draw_fitted(ui, r.x + (r.width - shown_length(label) * GUI_CHAR_WIDTH) / 2, r.y + picture.height + 4, r.width, label,
@@ -564,9 +592,9 @@ bool gui_checkbox(struct gui_ui *ui, const char *label, bool *value) {
     toggled |= focused && key_pressed(ui, KEY_SPACE);
     if (toggled)
         *value = !*value;
-    fill(ui, r.x, r.y, CHECK_SIZE, CHECK_SIZE, ui->hot == id ? FRAME_HOT : FRAME);
+    round_fill(ui, r.x, r.y, CHECK_SIZE, CHECK_SIZE, ROUND_SMALL + 1, ui->hot == id ? FRAME_HOT : FRAME);
     if (*value)
-        fill(ui, r.x + 3, r.y + 3, CHECK_SIZE - 6, CHECK_SIZE - 6, ui->hot == id ? ACCENT_HOT : ACCENT);
+        round_fill(ui, r.x + 3, r.y + 3, CHECK_SIZE - 6, CHECK_SIZE - 6, ROUND_SMALL - 1, ui->hot == id ? ACCENT_HOT : ACCENT);
     draw_label(ui, r.x + CHECK_SIZE + 8, r.y + (CHECK_SIZE - GUI_CHAR_HEIGHT) / 2, label, TEXT);
     if (focused)
         draw_focus(ui, (struct gui_rect){r.x, r.y, CHECK_SIZE, CHECK_SIZE});
@@ -613,8 +641,8 @@ bool gui_slider(struct gui_ui *ui, const char *label, int *value, int min, int m
     int grab = frame.x + (int)((long)(*value - min) * track / span);
 
     snprintf(s, sizeof(s), "%d", *value);
-    fill(ui, frame.x, frame.y, frame.width, frame.height, ui->hot == id ? FRAME_HOT : FRAME);
-    fill(ui, grab, frame.y + 2, GRAB_WIDTH, frame.height - 4, ui->active == id ? ACCENT_HOT : ACCENT);
+    round_fill(ui, frame.x, frame.y, frame.width, frame.height, ROUND, ui->hot == id ? FRAME_HOT : FRAME);
+    round_fill(ui, grab, frame.y + 2, GRAB_WIDTH, frame.height - 4, ROUND_SMALL, ui->active == id ? ACCENT_HOT : ACCENT);
     text(ui, frame.x + (frame.width - gui_text_width(s, 1)) / 2, frame.y + PADDING, s, TEXT, 1);
     if (focused)
         draw_focus(ui, frame);
@@ -1001,7 +1029,7 @@ static bool text_box(struct gui_ui *ui, const char *label, char *s, size_t size,
         changed |= edit(&ui->keys[i], &e);
     first = focused && (int)ui->text_cursor >= fits ? ui->text_cursor - fits + 1 : 0;
 
-    fill(ui, frame.x, frame.y, frame.width, frame.height, ui->hot == id || focused ? FRAME_HOT : FRAME);
+    round_fill(ui, frame.x, frame.y, frame.width, frame.height, ROUND, ui->hot == id || focused ? FRAME_HOT : FRAME);
     if (focused)
         draw_selection(ui, &e, frame.x + PADDING, frame.y + PADDING, first, fits);
     if (secret) {
@@ -1090,8 +1118,8 @@ static struct gui_rect scrolling(struct gui_ui *ui, uint32_t id, struct gui_scro
     clamp_scroll(s, view.height);
     thumb.y = track.y + (int)((long)s->offset * room_left / most);
 
-    fill(ui, track.x, track.y, track.width, track.height, PANEL);
-    fill(ui, thumb.x + 2, thumb.y + 2, thumb.width - 4, thumb.height - 4, ui->active == bar_id ? ACCENT : THUMB);
+    round_fill(ui, track.x, track.y, track.width, track.height, ROUND, PANEL);
+    round_fill(ui, thumb.x + 2, thumb.y + 2, thumb.width - 4, thumb.height - 4, ROUND_SMALL, ui->active == bar_id ? ACCENT : THUMB);
     view.width -= SCROLLBAR;
     return view;
 }
@@ -1332,7 +1360,7 @@ bool gui_code_area(struct gui_ui *ui, const char *label, char *s, size_t size, i
 
     if (flags & GUI_CODE_INDENT)
         ui->next_tab_owner = id;
-    fill(ui, frame.x, frame.y, frame.width, frame.height, ui->hot == id || focused ? FRAME_HOT : FRAME);
+    round_fill(ui, frame.x, frame.y, frame.width, frame.height, ROUND, ui->hot == id || focused ? FRAME_HOT : FRAME);
 
     // The scroll bar shows when the rows don't fit, which with wrapping depends on
     // how wide they are, so that's as of last frame.
@@ -1474,6 +1502,7 @@ static void popup_begin(struct gui_ui *ui, struct gui_rect r) {
     ui->item_y = r.y + 4;
     ui->item_width = r.width;
     ui->item_index = 0;
+    gui_keep_corners(&ui->window->canvas, r.x, r.y, r.width, 2 * ROUND_POPUP, ROUND_POPUP, ui->popup_corners);
     fill(ui, r.x, r.y, r.width, 4, POPUP);
 }
 
@@ -1482,10 +1511,15 @@ static void popup_end(struct gui_ui *ui, int bottom) {
     struct gui_rect *r = &ui->popup_rect;
     struct gui_canvas *w = &ui->window->canvas;
 
+    uint32_t below[4][GUI_MAX_RADIUS][GUI_MAX_RADIUS];
+
     ui->layout.clip = whole(ui);
-    fill(ui, r->x, bottom, r->width, 4, POPUP);
     r->height = bottom + 4 - r->y;
+    gui_keep_corners(w, r->x, r->y, r->width, r->height, ROUND_POPUP, below);
+    memcpy(ui->popup_corners[2], below[2], sizeof(below[2]) * 2); // the bottom corners, under the last 4 rows
+    fill(ui, r->x, bottom, r->width, 4, POPUP);
     draw_border(ui, *r, SEPARATOR);
+    gui_round_corners(w, r->x, r->y, r->width, r->height, ROUND_POPUP, ui->popup_corners, SEPARATOR);
     *r = intersect(*r, whole(ui));
     free(ui->popup_pixels);
     ui->popup_pixels = malloc((size_t)r->width * r->height * sizeof(uint32_t));
@@ -1505,7 +1539,9 @@ static bool popup_item(struct gui_ui *ui, const char *label, bool keyed, bool ma
 
     ui->item_y += ROW_HEIGHT;
     ui->item_index++;
-    fill(ui, r.x, r.y, r.width, r.height, is_over || keyed ? ACCENT : marked ? FRAME_HOT : POPUP);
+    fill(ui, r.x, r.y, r.width, r.height, POPUP);
+    if (is_over || keyed || marked)
+        round_fill(ui, r.x + 4, r.y + 1, r.width - 8, r.height - 2, ROUND_SMALL, is_over || keyed ? ACCENT : FRAME_HOT);
     draw_fitted(ui, r.x + 8, r.y + (ROW_HEIGHT - GUI_CHAR_HEIGHT) / 2, r.width - 16, label, shown_length(label),
                 is_over || keyed ? ON_ACCENT : TEXT);
 
@@ -1590,7 +1626,7 @@ bool gui_dropdown(struct gui_ui *ui, const char *label, const char *const *items
     }
     *selected = *selected >= count ? count - 1 : *selected < 0 ? 0 : *selected;
 
-    fill(ui, frame.x, frame.y, frame.width, frame.height, ui->hot == id || ui->popup == id ? FRAME_HOT : FRAME);
+    round_fill(ui, frame.x, frame.y, frame.width, frame.height, ROUND, ui->hot == id || ui->popup == id ? FRAME_HOT : FRAME);
     if (count)
         draw_fitted(ui, frame.x + PADDING, frame.y + PADDING, frame.width - 2 * PADDING - 16, items[*selected], 255, TEXT);
     text(ui, frame.x + frame.width - PADDING - GUI_CHAR_WIDTH, frame.y + PADDING, "v", DIM_TEXT, 1);
@@ -1600,6 +1636,55 @@ bool gui_dropdown(struct gui_ui *ui, const char *label, const char *const *items
     if (ui->popup == id)
         dropdown_popup(ui, id, frame, items, count, selected, !was_open, moved);
     return *selected != before;
+}
+
+void gui_list_marks(struct gui_ui *ui, bool *marks) {
+    ui->marks = marks;
+}
+
+// A click on item i of a list with marks: on its own it marks only that one, with
+// Ctrl it marks or unmarks it, and with Shift it marks those from the selected
+// one to it. A right-click on one that's marked keeps them all.
+static void mark_click(struct gui_ui *ui, bool *marks, int count, int i, int from, bool right) {
+    uint16_t held = ui->click_modifiers;
+
+    if (right && marks[i])
+        return;
+    if (!right && (held & KEY_MOD_CTRL)) {
+        marks[i] = !marks[i];
+        return;
+    }
+    if (!right && (held & KEY_MOD_SHIFT) && from >= 0) {
+        for (int j = 0; j < count; j++)
+            marks[j] = (j >= from && j <= i) || (j <= from && j >= i);
+        return;
+    }
+    memset(marks, 0, count * sizeof(*marks));
+    marks[i] = true;
+}
+
+// After the keyboard moved the selection, it alone is marked, or with Shift those
+// from where it was as well. Ctrl+A marks everything.
+static void mark_keys(struct gui_ui *ui, bool *marks, int count, int selected, int before, bool moved) {
+    bool shift = false;
+
+    for (int i = 0; i < ui->key_count; i++) {
+        shift |= ui->keys[i].modifiers & KEY_MOD_SHIFT;
+        if (ctrl_key(&ui->keys[i], 'a'))
+            memset(marks, 1, count * sizeof(*marks));
+    }
+    if (!moved || selected < 0)
+        return;
+    if (!shift)
+        memset(marks, 0, count * sizeof(*marks));
+    for (int j = before; shift && j >= 0 && j != selected; j += j < selected ? 1 : -1)
+        marks[j] = true;
+    marks[selected] = true;
+}
+
+// Whether an item's drawn as chosen.
+static bool chosen_item(const bool *marks, int i, int selected) {
+    return marks ? marks[i] : i == selected;
 }
 
 int gui_list(struct gui_ui *ui, const char *label, const char *const *items, int count, int *selected, int rows) {
@@ -1612,8 +1697,9 @@ int gui_list_icons(struct gui_ui *ui, const char *label, const char *const *item
     struct gui_scroll *scroll = scroll_of(ui, id);
     struct gui_rect frame, was;
     int before = *selected;
-    bool activated = false;
+    bool activated = false, *marks = ui->marks;
 
+    ui->marks = NULL;
     framed(ui, label, rows > 0 ? rows * ROW_HEIGHT + 4 : height_left(ui, ROW_HEIGHT + 4), &frame);
     rows = (frame.height - 4) / ROW_HEIGHT;
     scroll->content = count * ROW_HEIGHT + 4;
@@ -1641,8 +1727,10 @@ int gui_list_icons(struct gui_ui *ui, const char *label, const char *const *item
         activated |= code == KEY_ENTER && count;
     }
     *selected = *selected >= count ? count - 1 : *selected < -1 || (*selected == -1 && moved) ? 0 : *selected;
+    if (marks && focused)
+        mark_keys(ui, marks, count, *selected, before, moved);
 
-    fill(ui, frame.x, frame.y, frame.width, frame.height, PANEL);
+    round_fill(ui, frame.x, frame.y, frame.width, frame.height, ROUND, PANEL);
 
     // Choosing with the keyboard scrolls to keep the choice in sight.
     if (moved) {
@@ -1662,18 +1750,21 @@ int gui_list_icons(struct gui_ui *ui, const char *label, const char *const *item
             break;
         if (over(ui, r) && (ui->mouse_pressed || ui->right_pressed)) {
             activated |= ui->mouse_pressed && ui->double_click && i == *selected;
+            if (marks)
+                mark_click(ui, marks, count, i, *selected, !ui->mouse_pressed);
             *selected = ui->clicked_item = i;
         }
         if (ui->dropping && contains(intersect(r, inner), ui->drop_x, ui->drop_y))
             ui->drop_item = i;
         int text_x = icons ? 12 + GUI_ICON_SIZE : 6;
+        bool on = chosen_item(marks, i, *selected);
 
-        if (i == *selected || over(ui, r))
-            fill(ui, r.x, r.y, r.width, r.height, i == *selected ? ACCENT : FRAME_HOT);
+        if (on || over(ui, r))
+            round_fill(ui, r.x, r.y, r.width, r.height, ROUND_SMALL + 1, on ? ACCENT : FRAME_HOT);
         if (icons && icons[i])
             draw_image(ui, r.x + 5, r.y + (ROW_HEIGHT - GUI_ICON_SIZE) / 2, icons[i]);
         draw_fitted(ui, r.x + text_x, r.y + (ROW_HEIGHT - GUI_CHAR_HEIGHT) / 2, r.width - text_x - 6, items[i], 255,
-                    i == *selected ? ON_ACCENT : TEXT);
+                    on ? ON_ACCENT : TEXT);
     }
     ui->layout.clip = was;
     if (focused)
@@ -1690,8 +1781,9 @@ int gui_grid(struct gui_ui *ui, const char *label, const char *const *items, con
     struct gui_scroll *scroll = scroll_of(ui, id);
     struct gui_rect frame, was;
     int before = *selected;
-    bool activated = false, moved = false;
+    bool activated = false, moved = false, *marks = ui->marks;
 
+    ui->marks = NULL;
     framed(ui, label, height_left(ui, CELL_HEIGHT + 4), &frame);
 
     int columns = (frame.width - 4 - SCROLLBAR) / CELL_WIDTH > 0 ? (frame.width - 4 - SCROLLBAR) / CELL_WIDTH : 1;
@@ -1719,7 +1811,9 @@ int gui_grid(struct gui_ui *ui, const char *label, const char *const *items, con
         activated |= code == KEY_ENTER && count;
     }
     *selected = *selected >= count ? count - 1 : *selected < 0 ? 0 : *selected;
-    fill(ui, frame.x, frame.y, frame.width, frame.height, PANEL);
+    if (marks && focused)
+        mark_keys(ui, marks, count, *selected, before, moved);
+    round_fill(ui, frame.x, frame.y, frame.width, frame.height, ROUND, PANEL);
     if (moved) {
         int top = *selected / columns * CELL_HEIGHT, bottom = top + CELL_HEIGHT + 4;
 
@@ -1741,16 +1835,21 @@ int gui_grid(struct gui_ui *ui, const char *label, const char *const *items, con
             break;
         if (over(ui, r) && (ui->mouse_pressed || ui->right_pressed)) {
             activated |= ui->mouse_pressed && ui->double_click && i == *selected;
+            if (marks)
+                mark_click(ui, marks, count, i, *selected, !ui->mouse_pressed);
             *selected = ui->clicked_item = i;
         }
         if (ui->dropping && contains(intersect(r, inner), ui->drop_x, ui->drop_y))
             ui->drop_item = i;
-        if (i == *selected || over(ui, r))
-            fill(ui, r.x, r.y, r.width, r.height, i == *selected ? ACCENT : FRAME_HOT);
+
+        bool on = chosen_item(marks, i, *selected);
+
+        if (on || over(ui, r))
+            round_fill(ui, r.x, r.y, r.width, r.height, ROUND_SMALL + 1, on ? ACCENT : FRAME_HOT);
         if (image)
             draw_image(ui, r.x + (r.width - image->width) / 2, r.y + 6 + (GUI_THUMBNAIL - image->height) / 2, image);
         draw_fitted(ui, r.x + (r.width - shown * GUI_CHAR_WIDTH) / 2, r.y + GUI_THUMBNAIL + 10, shown * GUI_CHAR_WIDTH,
-                    items[i], shown, i == *selected ? ON_ACCENT : TEXT);
+                    items[i], shown, on ? ON_ACCENT : TEXT);
     }
     ui->layout.clip = was;
     if (focused)
@@ -1821,7 +1920,8 @@ bool gui_menu(struct gui_ui *ui, const char *label) {
     }
     if (ui->popup == id)
         menu_keys(ui, id);
-    fill(ui, r.x, r.y, r.width, r.height, ui->popup == id ? ACCENT : is_over ? FRAME_HOT : FRAME);
+    if (ui->popup == id || is_over)
+        round_fill(ui, r.x + 1, r.y + 2, r.width - 2, r.height - 4, ROUND_SMALL, ui->popup == id ? ACCENT : FRAME_HOT);
     draw_label(ui, r.x + PADDING + 3, r.y + PADDING, label, ui->popup == id ? ON_ACCENT : TEXT);
     if (ui->popup != id)
         return false;
@@ -1925,8 +2025,7 @@ int gui_dialog(struct gui_ui *ui, const char *message, const char *const *button
 
     ui->layout.clip = all;
     ui->popup = 0;
-    fill(ui, r.x, r.y, r.width, r.height, POPUP);
-    draw_border(ui, r, SEPARATOR);
+    round_frame(ui, r.x, r.y, r.width, r.height, ROUND_DIALOG, POPUP, SEPARATOR);
 
     const char *line = message;
 
@@ -1950,7 +2049,7 @@ int gui_dialog(struct gui_ui *ui, const char *message, const char *const *button
             ui->dialog_choice = i;
         if (is_over && ui->mouse_released && ui->dialog_choice == i)
             result = i + 1;
-        fill(ui, b.x, b.y, b.width, b.height, i == ui->dialog_choice ? ACCENT : is_over ? FRAME_HOT : FRAME);
+        round_fill(ui, b.x, b.y, b.width, b.height, ROUND, i == ui->dialog_choice ? ACCENT : is_over ? FRAME_HOT : FRAME);
         draw_label(ui, b.x + (w - label_width) / 2, b.y + PADDING, buttons[i], i == ui->dialog_choice ? ON_ACCENT : TEXT);
     }
     ui->layout.clip = was;
@@ -2016,17 +2115,20 @@ int gui_tabs(struct gui_ui *ui, const char *const *names, int count, int *active
             *active = i;
             result = GUI_TABS_CHANGED;
         }
+        // The tab shown runs into what's under the bar, with only its top corners rounded.
         if (i == *active) {
-            fill(ui, r.x, r.y, r.width, r.height + 1, BACKGROUND);
-            fill(ui, r.x, r.y, r.width, 2, ACCENT);
+            fill(ui, r.x, r.y + r.height - ROUND, r.width, ROUND + 1, BACKGROUND);
+            round_fill(ui, r.x, r.y, r.width, r.height, ROUND, BACKGROUND);
+            fill(ui, r.x + ROUND, r.y, r.width - 2 * ROUND, 2, ACCENT);
         } else {
-            fill(ui, r.x, r.y, r.width, r.height, on_tab ? FRAME_HOT : FRAME);
+            if (on_tab)
+                round_fill(ui, r.x, r.y, r.width, r.height - 2, ROUND, FRAME_HOT);
             fill(ui, r.x + r.width + 1, r.y + 4, 1, r.height - 8, SEPARATOR);
         }
         draw_fitted(ui, r.x + 8, r.y + (r.height - GUI_CHAR_HEIGHT) / 2 + 1, r.width - 16 - x.width, names[i], 255,
                     i == *active ? TEXT : DIM_TEXT);
         if (on_close)
-            fill(ui, x.x, x.y, x.width, x.height, i == *active ? FRAME : SEPARATOR);
+            round_fill(ui, x.x, x.y, x.width, x.height, ROUND_SMALL, i == *active ? FRAME : SEPARATOR);
         if (closing)
             text(ui, x.x + (TAB_CLOSE - GUI_CHAR_WIDTH) / 2, x.y, "x", on_close ? TEXT : DIM_TEXT, 1);
     }
@@ -2036,7 +2138,7 @@ int gui_tabs(struct gui_ui *ui, const char *const *names, int count, int *active
     if (closing && interact(ui, id, add))
         result = GUI_TABS_NEW;
     if (closing && ui->hot == id)
-        fill(ui, add.x, add.y, add.width, add.height, FRAME_HOT);
+        round_fill(ui, add.x, add.y, add.width, add.height, ROUND_SMALL, FRAME_HOT);
     if (closing)
         text(ui, add.x + (plus - GUI_CHAR_WIDTH) / 2, add.y + (add.height - GUI_CHAR_HEIGHT) / 2, "+", TEXT, 1);
 
@@ -2085,7 +2187,7 @@ void gui_scroll_begin(struct gui_ui *ui, const char *label, int height) {
     struct gui_scroll *scroll = scroll_of(ui, id);
     struct gui_rect area = place(ui, room(ui), height > 0 ? height : height_left(ui, FRAME_HEIGHT));
 
-    fill(ui, area.x, area.y, area.width, area.height, PANEL);
+    round_fill(ui, area.x, area.y, area.width, area.height, ROUND, PANEL);
 
     struct gui_rect inner = scrolling(ui, id, scroll, area);
 

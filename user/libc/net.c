@@ -47,6 +47,10 @@ int net_set(uint32_t address, uint32_t netmask, uint32_t gateway, uint32_t dns) 
     return 0;
 }
 
+int net_airplane(bool on) {
+    return (int)syscall3(SYS_NET_AIRPLANE, on, 0, 0);
+}
+
 static uint16_t read16(const uint8_t *p) {
     return (uint16_t)(p[0] << 8 | p[1]);
 }

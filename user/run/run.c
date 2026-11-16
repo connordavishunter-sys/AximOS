@@ -11,7 +11,6 @@
 #define WIDTH 480
 #define HEIGHT 130
 #define BROWSING_HEIGHT 420
-#define APPS_DIR "/system/bin/gui"
 
 static struct gui_window *window;
 static char command[GUI_PATH_MAX], status[GUI_PATH_MAX + 64];
@@ -77,8 +76,8 @@ static bool start(const char *const argv[]) {
     return pid > 0;
 }
 
-// A file or folder opens in the app the settings choose for its kind, and
-// anything else is a command for the shell.
+// A file or folder opens in the app the settings choose for its kind, but for a
+// program, which runs, as does anything else, as a command for the shell.
 static void run(void) {
     char first[GUI_PATH_MAX], program[GUI_PATH_MAX];
     struct stat st;
@@ -90,11 +89,10 @@ static void run(void) {
         snprintf(status, sizeof(status), "Type something to open first.");
         return;
     }
-    if (!strcmp(first, at) && stat(first, &st) == 0 && (S_ISDIR(st.st_mode) || access(first, X_OK) < 0)) {
+    if (!strcmp(first, at) && stat(first, &st) == 0 && (S_ISDIR(st.st_mode) || !gui_is_program(first))) {
         char with[GUI_PATH_MAX];
 
-        snprintf(with, sizeof(with), APPS_DIR "/%s", gui_app_for(first));
-        started = start((const char *[]){with, first, NULL});
+        started = gui_app_path(gui_app_for(first), with) && start((const char *[]){with, first, NULL});
     } else if (find_program(first, program)) {
         started = start((const char *[]){"/system/bin/sh", "-c", at, NULL});
     } else {

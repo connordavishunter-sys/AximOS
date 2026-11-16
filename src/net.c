@@ -82,7 +82,7 @@ enum dhcp_state {
     DHCP_BOUND,
 };
 
-static bool has_device;
+static bool has_device, airplane; // in airplane mode, the card sends and takes nothing
 static uint8_t our_mac[6];
 static uint32_t our_address;
 static uint32_t our_netmask;
@@ -131,6 +131,8 @@ static void send_frame(uint8_t *frame, const uint8_t *to, uint16_t type, size_t 
 
     size_t len = ETH_HEADER + payload_len;
 
+    if (airplane)
+        return;
     tx_packets++;
     tx_bytes += len;
     e1000_send(frame, len);
@@ -326,7 +328,7 @@ int net_send_ip(uint8_t *frame, size_t payload_len, uint8_t protocol, uint32_t s
         loop_back(ip, total);
         return 0;
     }
-    if (!has_device)
+    if (!has_device || airplane)
         return -ENETUNREACH;
 
     uint32_t host_bits = ~our_netmask;
@@ -581,7 +583,7 @@ static void handle_ip(const uint8_t *ip, size_t len) {
 void net_receive(const void *frame, size_t len) {
     const uint8_t *bytes = frame;
 
-    if (len < ETH_HEADER)
+    if (len < ETH_HEADER || airplane)
         return;
 
     rx_packets++;
@@ -625,8 +627,10 @@ void net_init(void) {
 void net_tick(void) {
     if (has_device) {
         e1000_poll();
-        arp_tick();
-        dhcp_tick();
+        if (!airplane) {
+            arp_tick();
+            dhcp_tick();
+        }
     }
     tcp_tick();
 }
@@ -634,6 +638,7 @@ void net_tick(void) {
 void net_get_info(struct net_info *out) {
     *out = (struct net_info){
         .has_device = has_device,
+        .airplane = airplane,
         .automatic = dhcp_state != DHCP_OFF,
         .address = our_address,
         .netmask = our_netmask,
@@ -658,4 +663,20 @@ void net_configure(uint32_t address, uint32_t netmask, uint32_t gateway, uint32_
     dhcp_state = DHCP_OFF;
     if (address == 0 && has_device)
         dhcp_start();
+}
+
+// Airplane mode forgets the address, and leaving it asks DHCP for one again, as
+// when the system starts.
+void net_set_airplane(bool on) {
+    if (on == airplane)
+        return;
+    airplane = on;
+    if (on) {
+        for (int i = 0; i < ARP_ENTRIES; i++)
+            arp_clear(&arp[i]);
+        our_address = our_netmask = our_gateway = our_dns = 0;
+        dhcp_state = DHCP_OFF;
+    } else if (has_device) {
+        dhcp_start();
+    }
 }

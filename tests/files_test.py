@@ -96,12 +96,11 @@ try:
     v.type('pwd > where\n'); time.sleep(0.5)
     v.key('meta_l-q'); time.sleep(0.5)
 
-    # A file's menu: Open, Open in Editor and Run, then Cut, Copy, Copy path,
-    # Rename and Delete. a.txt is second.
+    # A file's menu: Open, Open in Editor and Open with..., then Cut, Copy, Copy
+    # path, Rename and Delete, which moves it to the trash. a.txt is second.
     at = v.mark()
     menu(row(1), 7, 1)
-    v.key('ret')
-    check('Delete from the menu', v.wait('files: deleted /tmp/a.txt', 5, at), v.text(at))
+    check('Delete from the menu', v.wait('files: trashed /tmp/a.txt', 5, at), v.text(at))
     at = v.mark()
     menu(row(1), 1)
     check('Open in Editor', v.wait('editor: opened /tmp/notes.txt', 10, at), v.text(at))

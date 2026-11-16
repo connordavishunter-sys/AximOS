@@ -23,6 +23,7 @@ enum gui_message_type {
     GUI_TITLE,  // a new title, in text
     GUI_CURSOR, // the mouse cursor to show over the window: x is a gui_cursor
     GUI_ICON,   // the program's name in text, which picks its icon
+    GUI_TRANSLUCENT, // x 1 if the top byte of each pixel says how see-through it is, from 0, not at all, to 255
 
     // Either way: settings have changed, and wm, then every program, loads them again.
     GUI_SETTINGS,
@@ -122,6 +123,9 @@ void gui_set_title(struct gui_window *window, const char *title);
 // after the program, as it was run.
 void gui_set_icon(struct gui_window *window, const char *name);
 void gui_set_cursor(struct gui_window *window, enum gui_cursor cursor);
+// With it on, wm shows what's under the window through its pixels, blurred, as
+// much as each one's top byte says: 0 not at all, up to 255, nearly all.
+void gui_set_translucent(struct gui_window *window, bool on);
 
 // Shows a notification in the corner of the screen for a few seconds, with the
 // window's icon, if it's given. What doesn't fit in GUI_TITLE_MAX is cut short.
@@ -173,6 +177,25 @@ void gui_fill(struct gui_canvas *canvas, int x, int y, int width, int height, ui
 void gui_copy(struct gui_canvas *canvas, int x, int y, const struct gui_canvas *from, int from_x, int from_y,
               int width, int height);
 
+// Rectangles with rounded corners, smoothed: filled, and filled with a line round
+// them, either of which can be GUI_NONE, which no pixel is.
+#define GUI_NONE 0xFFFFFFFF
+#define GUI_MAX_RADIUS 16
+void gui_fill_rounded(struct gui_canvas *canvas, int x, int y, int width, int height, int radius, uint32_t color);
+void gui_frame_rounded(struct gui_canvas *canvas, int x, int y, int width, int height, int radius, uint32_t fill,
+                       uint32_t line);
+
+// Rounding what's drawn some other way: the pixels in its corners kept before it's
+// drawn, then put back outside its rounded edge, with a line along it, or GUI_NONE.
+void gui_keep_corners(const struct gui_canvas *canvas, int x, int y, int width, int height, int radius,
+                      uint32_t kept[4][GUI_MAX_RADIUS][GUI_MAX_RADIUS]);
+void gui_round_corners(struct gui_canvas *canvas, int x, int y, int width, int height, int radius,
+                       uint32_t kept[4][GUI_MAX_RADIUS][GUI_MAX_RADIUS], uint32_t line);
+
+// How much of a pixel, out of 256, is inside a corner rounded to radius, x and y
+// in from the corner.
+int gui_corner_coverage(int x, int y, int radius);
+
 // Text in the 8x16 font, scaled up by scale. Each character is 8 * scale wide.
 #define GUI_CHAR_WIDTH 8
 #define GUI_CHAR_HEIGHT 16
@@ -194,7 +217,23 @@ struct gui_settings {
     bool sharp_text;    // the bitmap font, rather than text smoothed from a TrueType one
     int mouse_speed;    // 1 to 10, with 5 as the mouse moves it
     char apps[GUI_KINDS][32]; // which app in /system/bin/gui opens each kind of file
+    int accent;         // one of gui_accent_names
+    bool taskbar_top;   // rather than along the bottom
+    bool autohide;      // the taskbar, until the mouse goes to its edge of the screen
+    bool hide_icons;    // on the desktop
+    bool night_light;   // less blue on the screen, by night_strength, from 10 to 100
+    int night_strength;
+    bool airplane;      // the network card sends and takes nothing
 };
+
+// The accent colours there are, as Settings names them, and what goes on each.
+#define GUI_ACCENTS 8
+extern const char *const gui_accent_names[GUI_ACCENTS];
+extern const uint32_t gui_accent_colors[GUI_ACCENTS];
+uint32_t gui_on_accent(int accent);
+
+// a to b by amount out of 256.
+uint32_t gui_mix(uint32_t a, uint32_t b, int amount);
 
 void gui_settings_load(struct gui_settings *settings);
 bool gui_settings_save(const struct gui_settings *settings);
@@ -202,6 +241,39 @@ bool gui_settings_save(const struct gui_settings *settings);
 // What kind of file is at path, and the app the settings say opens it.
 int gui_kind_of(const char *path);
 const char *gui_app_for(const char *path);
+
+// Apps are in /system/bin/gui, or a folder in it, as the start menu shows them.
+// Finds one by name, returning false if there's none.
+#define GUI_APPS "/system/bin/gui"
+bool gui_app_path(const char *name, char path[GUI_PATH_MAX]);
+
+// Every app's name, sorted, up to max, returning how many there are.
+int gui_app_names(char (*names)[32], int max);
+
+// Whether a file is a program: an ELF file, which opening runs.
+bool gui_is_program(const char *path);
+
+// The trash is GUI_TRASH, where each thing has a random name, with what it was
+// called and where it was in GUI_TRASH_DB, a line each: the name, a tab, the path.
+#define GUI_TRASH "/trash"
+#define GUI_TRASH_DB "/system/etc/trash.db"
+
+// Moves a file, or a folder and all in it, to the trash.
+bool gui_trash(const char *path);
+
+// Where something in the trash, by its name there, came from, or false if it's not known.
+bool gui_trash_origin(const char *name, char path[GUI_PATH_MAX]);
+
+// Puts it back where it was, as near as it can, saying where in path.
+bool gui_trash_restore(const char *name, char path[GUI_PATH_MAX]);
+
+// Deletes it, or everything in the trash, for good.
+bool gui_trash_delete(const char *name);
+bool gui_trash_empty(void);
+
+// Deletes a file, or a folder and all in it, and copies one.
+bool gui_delete_tree(const char *path);
+bool gui_copy_tree(const char *from, const char *to);
 
 // Tells wm the settings have changed, and through it every program with a window.
 void gui_settings_changed(void);
@@ -300,6 +372,8 @@ struct gui_ui {
     bool mouse_down, mouse_pressed, mouse_released;
     bool double_click; // the press was the second in quick succession
     bool right_pressed;
+    uint16_t click_modifiers; // the keys held at the last press
+    bool *marks;       // for the next list, from gui_list_marks
     long last_press;   // when the last press was, in milliseconds
     int wheel;
     struct key_event keys[GUI_UI_MAX_KEYS];
@@ -331,6 +405,7 @@ struct gui_ui {
     bool popup_is_menu, popup_drawn, in_popup, mouse_in_popup;
     struct gui_rect popup_rect, outside_popup;
     uint32_t *popup_pixels;
+    uint32_t popup_corners[4][GUI_MAX_RADIUS][GUI_MAX_RADIUS]; // what was under its rounded corners
     int item_y, item_width, item_index, bar_x;
 
     // The menus in the bar, as of the last frame and so far in this one. An open
@@ -460,6 +535,11 @@ bool gui_dropdown(struct gui_ui *ui, const char *label, const char *const *items
 // double-clicked or Enter is pressed on it.
 enum { GUI_LIST_CHANGED = 1, GUI_LIST_ACTIVATED };
 int gui_list(struct gui_ui *ui, const char *label, const char *const *items, int count, int *selected, int rows);
+
+// The next list or grid lets several items be chosen, which marks says, as long
+// as it: Ctrl+click adds or takes one away, Shift+click those from the selected
+// one, and Ctrl+A all of them. The selected one is the last clicked.
+void gui_list_marks(struct gui_ui *ui, bool *marks);
 
 // The same, with an icon before each item, where icons has one that isn't NULL.
 int gui_list_icons(struct gui_ui *ui, const char *label, const char *const *items, const struct gui_image *const *icons,

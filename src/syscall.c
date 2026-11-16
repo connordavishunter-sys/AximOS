@@ -1567,6 +1567,10 @@ void syscall_dispatch(struct interrupt_frame *frame) {
         net_configure(frame->rdi, frame->rsi, frame->rdx, frame->r10);
         result = 0;
         break;
+    case SYS_NET_AIRPLANE:
+        net_set_airplane(frame->rdi != 0);
+        result = 0;
+        break;
     case SYS_SIGRETURN:
         // This restores a whole frame, including the result of whatever the
         // signal interrupted.

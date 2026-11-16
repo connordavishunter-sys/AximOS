@@ -25,12 +25,11 @@
 #define THUMBS_ACROSS 3
 #define MAX_RESOLUTIONS 16
 #define MAX_APPS 32
-#define APPS_DIR "/system/bin/gui"
 #define VOLUME_FILE "/system/etc/volume" // as wm keeps it
 #define TEST_SOUND "/system/share/example_music/1.wav"
 
-enum { APPEARANCE, DISPLAY, KEYBOARD, TIME, SOUND, APPS, TABS };
-static const char *const tabs[] = {"Appearance", "Display", "Keyboard", "Date & time", "Sound", "Apps"};
+enum { APPEARANCE, DISPLAY, KEYBOARD, TIME, SOUND, APPS, TASKBAR, TABS };
+static const char *const tabs[] = {"Appearance", "Display", "Keyboard", "Date & time", "Sound", "Apps", "Taskbar"};
 static const char *const kind_names[GUI_KINDS] = {"Folders", "Pictures", "Sounds", "Other files"};
 
 // The apps there are, to open each kind of file in.
@@ -39,6 +38,7 @@ static const char *apps[MAX_APPS];
 static int app_count;
 static char try_typing[128];
 static const char *const themes[] = {"Dark", "Light"}, *const clocks[] = {"24 hour", "12 hour"};
+static const char *const positions[] = {"Bottom", "Top"};
 
 // What the screen can be, as far as QEMU's graphics card goes. Their widths are
 // multiples of 8, which it needs.
@@ -263,7 +263,7 @@ static void screen_changed(void) {
 
 // Says where a widget is when that changes, for the tests to find it.
 static void report(struct gui_ui *ui, int index, const char *what) {
-    static struct gui_rect places[32 + MAX_WALLPAPERS];
+    static struct gui_rect places[40 + MAX_WALLPAPERS];
     struct gui_rect r = gui_last_rect(ui);
 
     if (memcmp(&places[index], &r, sizeof(r)))
@@ -279,6 +279,17 @@ static void appearance(struct gui_ui *ui) {
         save(settings.light ? "theme light" : "theme dark");
     }
     report(ui, 0, "theme");
+
+    int accent = settings.accent;
+
+    if (gui_dropdown(ui, "Accent colour", gui_accent_names, GUI_ACCENTS, &accent)) {
+        char what[32];
+
+        settings.accent = accent;
+        snprintf(what, sizeof(what), "accent %s", gui_accent_names[accent]);
+        save(what);
+    }
+    report(ui, 24, "accent");
     if (gui_checkbox(ui, "Window shadows", &settings.shadows))
         save(settings.shadows ? "shadows on" : "shadows off");
     report(ui, 1, "shadows");
@@ -310,6 +321,43 @@ static void appearance(struct gui_ui *ui) {
     }
 }
 
+// Less blue on the screen, which quick settings turns on and off as well.
+static void night_light(struct gui_ui *ui) {
+    char what[32];
+
+    gui_separator(ui);
+    gui_heading(ui, "Night light");
+    if (gui_checkbox(ui, "Less blue light", &settings.night_light))
+        save(settings.night_light ? "night light on" : "night light off");
+    report(ui, 25, "night");
+    gui_label(ui, "How much less:");
+    if (gui_slider(ui, "##strength", &settings.night_strength, 10, 100)) {
+        snprintf(what, sizeof(what), "night strength %d", settings.night_strength);
+        save(what);
+    }
+    report(ui, 26, "strength");
+}
+
+// Where the taskbar goes, whether it hides, and whether the desktop has icons.
+static void taskbar(struct gui_ui *ui) {
+    int top = settings.taskbar_top;
+    bool icons = !settings.hide_icons;
+
+    if (gui_dropdown(ui, "Position", positions, 2, &top)) {
+        settings.taskbar_top = top;
+        save(top ? "taskbar top" : "taskbar bottom");
+    }
+    report(ui, 27, "position");
+    if (gui_checkbox(ui, "Hide the taskbar until the mouse goes to it", &settings.autohide))
+        save(settings.autohide ? "autohide on" : "autohide off");
+    report(ui, 28, "autohide");
+    if (gui_checkbox(ui, "Icons on the desktop", &icons)) {
+        settings.hide_icons = !icons;
+        save(icons ? "icons shown" : "icons hidden");
+    }
+    report(ui, 29, "icons");
+}
+
 static void display(struct gui_ui *ui) {
     const struct gui_screen *s = gui_screen();
     char now[16];
@@ -317,6 +365,7 @@ static void display(struct gui_ui *ui) {
 
     if (!s->can_resize) {
         gui_label(ui, "The screen is %dx%d, and its resolution can't be changed.", s->width, s->height);
+        night_light(ui);
         return;
     }
     snprintf(now, sizeof(now), "%dx%d", s->width, s->height);
@@ -340,6 +389,7 @@ static void display(struct gui_ui *ui) {
     gui_same_line(ui);
     gui_label(ui, "The screen is %s.", now);
     gui_label(ui, "%s", status);
+    night_light(ui);
 }
 
 static void date_and_time(struct gui_ui *ui) {
@@ -431,8 +481,10 @@ static void sound(struct gui_ui *ui) {
     }
     close(mixer);
     gui_separator(ui);
-    if (gui_button(ui, "Play a test sound") && fork() == 0) {
-        execl(APPS_DIR "/player", "player", TEST_SOUND, (char *)NULL);
+    char player[GUI_PATH_MAX];
+
+    if (gui_button(ui, "Play a test sound") && gui_app_path("player", player) && fork() == 0) {
+        execl(player, "player", TEST_SOUND, (char *)NULL);
         _exit(127);
     }
     report(ui, 18, "test sound");
@@ -460,19 +512,9 @@ static void default_apps(struct gui_ui *ui) {
 }
 
 static void load_apps(void) {
-    DIR *dir = opendir(APPS_DIR);
-    struct dirent *d;
-
-    while (dir && (d = readdir(dir)) && app_count < MAX_APPS) {
-        if (d->d_name[0] != '.') {
-            snprintf(app_names[app_count], sizeof(app_names[0]), "%s", d->d_name);
-            apps[app_count] = app_names[app_count];
-            app_count++;
-        }
-    }
-    if (dir)
-        closedir(dir);
-    qsort(apps, app_count, sizeof(*apps), compare);
+    app_count = gui_app_names(app_names, MAX_APPS);
+    for (int i = 0; i < app_count; i++)
+        apps[i] = app_names[i];
 }
 
 // Asks whether to keep the new resolution, above whichever tab is showing.
@@ -517,6 +559,8 @@ static void frame(struct gui_ui *ui) {
         sound(ui);
     else if (tab == APPS)
         default_apps(ui);
+    else if (tab == TASKBAR)
+        taskbar(ui);
     else
         date_and_time(ui);
     gui_ui_end(ui);
@@ -558,6 +602,8 @@ int main(int argc, char **argv) {
     while (gui_next_event(&e) && e.type != GUI_CLOSE) {
         if (e.type == GUI_SCREEN)
             screen_changed();
+        if (e.type == GUI_SETTINGS) // changed elsewhere, as quick settings do
+            gui_settings_load(&settings);
         if (e.type == GUI_TIMER && e.x == keep_timer && keep_left && --keep_left == 0)
             go_back();
         if (gui_ui_event(&ui, &e))

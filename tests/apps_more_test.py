@@ -1,6 +1,6 @@
 """Checks Paint's selecting, moving, words, filled boxes, redo and asking before
 losing changes; the calculator's history; Snake's speeds; the player's shuffle,
-repeat and what the sound panel says is playing; Settings' default apps; and
+repeat and what quick settings say is playing; Settings' default apps; and
 rebooting waiting for a program with changes."""
 import re, time
 from vm import VM, check, finish
@@ -100,7 +100,7 @@ try:
     check('Escape pauses', v.wait('snake: paused', 5, at), v.text(at))
     v.key('meta_l-q'); time.sleep(0.5)
 
-    # The player repeats the one track, and the sound panel says what's playing.
+    # The player repeats the one track.
     at = v.mark()
     check('the player plays', run('player /system/share/example_music/1.wav', 'player: playing'), v.text())
     at = v.mark()
@@ -112,18 +112,18 @@ try:
     click(X + rx + 20, Y + ry + 10)
     check('then to one', v.wait('player: Repeat: one', 5, at), v.text(at))
 
-    # The sound panel, from the speaker, has a line more under Mute for it, so it's
-    # 106 tall rather than 82.
-    speaker = (1280 - 40 - 12 - 8 - 12, 800 - 14)
+    # Quick settings, from the network and speaker icons, say what's playing under
+    # the volume, a line below the speaker that mutes it.
+    quick = (1280 - 8 - 40 - 12 - 8 - 24 - 2 - 22, 800 - 14)
     at = v.mark()
-    click(*speaker)
-    check('the sound panel knows what is playing', v.wait('wm: sound panel, Playing: 1.wav', 5, at),
+    click(*quick)
+    check('quick settings know what is playing', v.wait('wm: quick settings, Playing: 1.wav', 5, at),
           [l for l in v.text().split('\n') if 'player' in l and ' at ' not in l])
     time.sleep(0.5)
+    mx, my = map(int, re.findall(r'wm: mute at (\d+) (\d+)', v.text(at))[-1])
     w, h, px = v.screenshot()
-    inside = px(speaker[0] - 60, 800 - 28 - 40)
-    check('the sound panel says what is playing', px(speaker[0] - 60, 800 - 28 - 100) == inside != 0x181B21,
-          (hex(inside), hex(px(speaker[0] - 60, 800 - 28 - 100))))
+    line = [px(x, my + 28 + 8) for x in range(mx, mx + 120)]
+    check('and show it', any(p != 0x141821 for p in line), sorted(set(hex(p) for p in line)))
     v.key('esc')
     v.key('meta_l-shift-q'); time.sleep(1)
 
