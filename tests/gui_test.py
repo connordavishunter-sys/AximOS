@@ -151,8 +151,9 @@ try:
     at = v.mark()
     v.key('meta_l-right')
     check('Super+Right takes the right half', v.wait('guidemo: size 638 726', 5, at), v.text(at))
+    time.sleep(0.5) # once it's finished moving there
     w, h, px = v.screenshot()
-    check('on the right half', px(1000, 400) == PAPER and px(300, 400) == DESKTOP, hex(px(1000, 400)))
+    check('on the right half', px(1000, 400) == PAPER and px(300, 400) == DESKTOP, (hex(px(1000, 400)), hex(px(300, 400))))
 
     # Minimize is the third button from the right, now at the top right of the screen.
     at = v.mark()

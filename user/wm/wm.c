@@ -170,11 +170,12 @@ struct window {
     bool translucent; // its pixels' top bytes say how see-through they are, 0 for not at all
     int workspace;
 
-    // While it opens or is restored, it grows from anim_from to its frame over
-    // anim_ms, drawn from layer, a copy of it at full size.
+    // While it opens, is restored, maximized or tiled, it goes from anim_from to
+    // its frame over anim_ms, fading in if anim_fade, drawn from layer, a copy of it.
     int anim_ms;
+    bool anim_fade;
     int64_t anim_start;
-    struct rect anim_from;
+    struct rect anim_from, anim_to; // where it was going as of the last frame
     struct gui_canvas layer;
 };
 
@@ -848,6 +849,7 @@ static int64_t now_ms(void) {
 #define OPEN_MS 180
 #define CLOSE_MS 120
 #define MINIMIZE_MS 200
+#define MAXIMIZE_MS 200
 #define ANIM_SCALE 240 // out of 256, the size windows start opening and finish closing at
 
 // A window going away, closed or minimized, drawn from a copy of how it looked.
@@ -956,24 +958,51 @@ static void draw_layer(struct gui_canvas *c, const struct gui_canvas *layer, str
 }
 
 // Where an opening or restored window is now, and how much of it shows.
+// The frame a window's going to have, at the size it's been asked to be, which
+// its program may not have answered yet.
+static struct rect wanted_frame(const struct window *w) {
+    struct rect f = frame_of(w);
+
+    return (struct rect){f.x, f.y, f.width + w->want_width - w->canvas.width, f.height + w->want_height - w->canvas.height};
+}
+
 static struct rect arriving(const struct window *w, int *alpha) {
     int t = ease_out(progress(w->anim_start, w->anim_ms));
 
-    *alpha = t;
-    return between(w->anim_from, frame_of(w), t);
+    *alpha = w->anim_fade ? t : 256;
+    return between(w->anim_from, wanted_frame(w), t);
 }
 
 // All that a window covers, as it's drawn now.
 static struct rect drawn_extent(const struct window *w) {
-    return w->anim_ms ? bounds(with_shadow(w->anim_from), extent_of(w)) : extent_of(w);
+    if (!w->anim_ms)
+        return extent_of(w);
+    return bounds(with_shadow(w->anim_from), bounds(extent_of(w), with_shadow(wanted_frame(w))));
 }
 
 static void arrive(struct window *w, struct rect from, int ms) {
     if (!settings.animations || w->bare)
         return;
+    // What the animation it replaces drew, between where that went from and to,
+    // is drawn over.
+    if (w->anim_ms)
+        add_damage(bounds(with_shadow(w->anim_from), with_shadow(w->anim_to)));
     w->anim_from = from;
+    w->anim_to = wanted_frame(w);
     w->anim_ms = ms;
+    w->anim_fade = true;
     w->anim_start = now_ms();
+}
+
+// Moves a window to a new frame from where it was, as maximizing and tiling do.
+static void reframe(struct window *w, struct rect from) {
+    int alpha;
+
+    // From where it's got to, if it was still on the way somewhere.
+    if (w->anim_ms && settings.animations)
+        from = arriving(w, &alpha);
+    arrive(w, from, MAXIMIZE_MS);
+    w->anim_fade = false;
 }
 
 // Leaves a copy of a window behind, going from its frame to a rectangle.
@@ -1006,6 +1035,7 @@ static bool animate(void) {
 
         if (!w->anim_ms)
             continue;
+        w->anim_to = wanted_frame(w);
         add_damage(drawn_extent(w));
         if (progress(w->anim_start, w->anim_ms) < 256 && fill_layer(&w->layer, w))
             going = true;
@@ -3618,16 +3648,20 @@ static void untile(struct window *w) {
 }
 
 static void toggle_maximized(struct window *w) {
+    struct rect was = frame_of(w);
+
     if (w->tiled)
         untile(w);
     else
         place(w, desktop());
+    reframe(w, was);
 }
 
 static void tile_half(struct window *w, bool right) {
-    struct rect d = desktop();
+    struct rect d = desktop(), was = frame_of(w);
 
     place(w, (struct rect){right ? d.width / 2 : 0, 0, d.width / 2, d.height});
+    reframe(w, was);
 }
 
 static void taskbar_click(void) {
@@ -3893,7 +3927,10 @@ static void handle_mouse(const struct mouse_event *e) {
     if (!buttons && drag_file[0])
         drop_file();
     if (!buttons && dragging && snap) {
+        struct rect was = frame_of(dragging);
+
         place(dragging, snap_rect(snap));
+        reframe(dragging, was);
         printf("wm: snapped %s %s\n", dragging->title, snap == SNAP_TOP ? "maximized" : snap == SNAP_LEFT ? "left" : "right");
         stop_snap();
     }
@@ -4080,8 +4117,12 @@ static void handle_key(const struct key_event *e) {
             return;
         if (e->code == KEY_UP)
             toggle_maximized(focused);
-        else if (e->code == KEY_DOWN && focused->tiled)
+        else if (e->code == KEY_DOWN && focused->tiled) {
+            struct rect was = frame_of(focused);
+
             untile(focused);
+            reframe(focused, was);
+        }
         else if (e->code == KEY_DOWN)
             minimize(focused);
         else
