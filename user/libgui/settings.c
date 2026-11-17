@@ -24,6 +24,7 @@
 //     icons on
 //     night off 50
 //     airplane off
+//     animations on
 //
 // Anything missing or not understood is left as it is by default.
 
@@ -55,7 +56,7 @@ void gui_settings_load(struct gui_settings *s) {
     char line[64], value[32], kind[16];
     int width, height;
 
-    *s = (struct gui_settings){.shadows = true, .repeat_delay = KEYBOARD_REPEAT_DELAY_DEFAULT,
+    *s = (struct gui_settings){.shadows = true, .animations = true, .repeat_delay = KEYBOARD_REPEAT_DELAY_DEFAULT,
                                .repeat_rate = KEYBOARD_REPEAT_RATE_DEFAULT, .mouse_speed = 5,
                                .apps = {"files", "viewer", "player", "editor"}, .night_strength = 50};
     while (f && fgets(line, sizeof(line), f)) {
@@ -63,6 +64,8 @@ void gui_settings_load(struct gui_settings *s) {
             s->light = !strcmp(value, "light");
         else if (sscanf(line, "shadows %31s", value) == 1)
             s->shadows = strcmp(value, "off") != 0;
+        else if (sscanf(line, "animations %31s", value) == 1)
+            s->animations = strcmp(value, "off") != 0;
         else if (sscanf(line, "clock %31s", value) == 1)
             s->clock_12_hour = !strcmp(value, "12");
         else if (sscanf(line, "resolution %dx%d", &width, &height) == 2 && width > 0 && height > 0)
@@ -114,6 +117,7 @@ bool gui_settings_save(const struct gui_settings *s) {
     fprintf(f, "accent %s\ntaskbar %s\nautohide %s\nicons %s\nnight %s %d\nairplane %s\n", accent_keys[s->accent],
             s->taskbar_top ? "top" : "bottom", s->autohide ? "on" : "off", s->hide_icons ? "off" : "on",
             s->night_light ? "on" : "off", s->night_strength, s->airplane ? "on" : "off");
+    fprintf(f, "animations %s\n", s->animations ? "on" : "off");
     return fclose(f) == 0;
 }
 

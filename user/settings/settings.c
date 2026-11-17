@@ -293,6 +293,9 @@ static void appearance(struct gui_ui *ui) {
     if (gui_checkbox(ui, "Window shadows", &settings.shadows))
         save(settings.shadows ? "shadows on" : "shadows off");
     report(ui, 1, "shadows");
+    if (gui_checkbox(ui, "Animations", &settings.animations))
+        save(settings.animations ? "animations on" : "animations off");
+    report(ui, 30, "animations");
 
     bool smooth = !settings.sharp_text;
 

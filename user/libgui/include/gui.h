@@ -224,6 +224,7 @@ struct gui_settings {
     bool night_light;   // less blue on the screen, by night_strength, from 10 to 100
     int night_strength;
     bool airplane;      // the network card sends and takes nothing
+    bool animations;    // windows grow in, shrink away, and minimize to the taskbar
 };
 
 // The accent colours there are, as Settings names them, and what goes on each.

@@ -169,6 +169,13 @@ struct window {
     bool bare; // the log-in screen's, with no frame, in the middle of the screen
     bool translucent; // its pixels' top bytes say how see-through they are, 0 for not at all
     int workspace;
+
+    // While it opens or is restored, it grows from anim_from to its frame over
+    // anim_ms, drawn from layer, a copy of it at full size.
+    int anim_ms;
+    int64_t anim_start;
+    struct rect anim_from;
+    struct gui_canvas layer;
 };
 
 enum part { PART_NONE, PART_CONTENT, PART_TITLE, PART_CLOSE, PART_MAXIMIZE, PART_MINIMIZE, PART_RESIZE };
@@ -411,7 +418,7 @@ static bool covers(const struct window *w, struct rect r) {
     struct rect f = frame_of(w);
     int top = w->bare ? RADIUS : TITLE_HEIGHT + BORDER;
 
-    return visible(w) && !w->translucent && r.x >= f.x && r.y >= f.y + top && r.x + r.width <= f.x + f.width
+    return visible(w) && !w->translucent && !w->anim_ms && r.x >= f.x && r.y >= f.y + top && r.x + r.width <= f.x + f.width
         && r.y + r.height <= f.y + f.height - RADIUS;
 }
 
@@ -669,6 +676,10 @@ static void draw_icon(struct gui_canvas *c, const char *app, int x, int y, int o
         gui_draw_image(c, x - ox, y - oy, icon);
 }
 
+// While a window's copied to its layer for an animation, it's drawn plainly: its
+// corners square and nothing blurred, as the layer has nothing under it.
+static bool drawing_layer;
+
 // A window's pixels. A see-through window's blur what's under them, and show it as
 // much as their top bytes say.
 static void draw_contents(struct gui_canvas *c, const struct window *w, int ox, int oy) {
@@ -676,7 +687,7 @@ static void draw_contents(struct gui_canvas *c, const struct window *w, int ox, 
     int x0 = x < 0 ? 0 : x, x1 = x + w->canvas.width > c->width ? c->width : x + w->canvas.width;
     int y0 = y < 0 ? 0 : y, y1 = y + w->canvas.height > c->height ? c->height : y + w->canvas.height;
 
-    if (!w->translucent) {
+    if (!w->translucent || drawing_layer) {
         gui_copy(c, x, y, &w->canvas, 0, 0, w->canvas.width, w->canvas.height);
         return;
     }
@@ -702,8 +713,9 @@ static bool rounded(const struct window *w) {
 static void draw_window(struct gui_canvas *c, const struct window *w, int ox, int oy) {
     uint32_t kept[4][GUI_MAX_RADIUS][GUI_MAX_RADIUS];
     struct rect frame = frame_of(w);
+    bool round = rounded(w) && !drawing_layer;
 
-    if (rounded(w))
+    if (round)
         keep_corners(c, frame, ox, oy, kept);
     if (w->bare) {
         draw_contents(c, w, ox, oy);
@@ -720,8 +732,10 @@ static void draw_window(struct gui_canvas *c, const struct window *w, int ox, in
     gui_fill(c, frame.x - ox, frame.y + frame.height - BORDER - oy, frame.width, BORDER, BORDER_COLOR);
     gui_fill(c, frame.x - ox, frame.y - oy, BORDER, frame.height, BORDER_COLOR);
     gui_fill(c, frame.x + frame.width - BORDER - ox, frame.y - oy, BORDER, frame.height, BORDER_COLOR);
-    blur(c, w->x - ox, w->y - TITLE_HEIGHT - oy, w->canvas.width, TITLE_HEIGHT);
-    blend_fill(c, w->x - ox, w->y - TITLE_HEIGHT - oy, w->canvas.width, TITLE_HEIGHT, title_color, BAR_ALPHA);
+    if (!drawing_layer)
+        blur(c, w->x - ox, w->y - TITLE_HEIGHT - oy, w->canvas.width, TITLE_HEIGHT);
+    blend_fill(c, w->x - ox, w->y - TITLE_HEIGHT - oy, w->canvas.width, TITLE_HEIGHT, title_color,
+               drawing_layer ? 256 : BAR_ALPHA);
     draw_icon(c, w->app, w->x + 5, w->y - TITLE_HEIGHT + (TITLE_HEIGHT - ICON_SIZE) / 2, ox, oy);
 
     // A title too long for the bar stops short of the buttons.
@@ -738,7 +752,7 @@ static void draw_window(struct gui_canvas *c, const struct window *w, int ox, in
     gui_fill_rounded(c, minimize.x - ox, minimize.y - oy, BUTTON_SIZE, BUTTON_SIZE, SMALL_RADIUS, BUTTON_COLOR);
     gui_fill(c, minimize.x + 4 - ox, minimize.y + 11 - oy, 8, 2, TITLE_TEXT);
     draw_contents(c, w, ox, oy);
-    if (rounded(w))
+    if (round)
         round_corners(c, frame, ox, oy, kept, BORDER_COLOR);
 }
 
@@ -827,6 +841,189 @@ static int64_t now_ms(void) {
 
     clock_gettime(CLOCK_MONOTONIC, &t);
     return (int64_t)t.tv_sec * 1000 + t.tv_nsec / 1000000;
+}
+
+// Windows grow in from a little smaller as they fade in, and shrink as they fade
+// out, or fly to and from their taskbar buttons when minimized and restored.
+#define OPEN_MS 180
+#define CLOSE_MS 120
+#define MINIMIZE_MS 200
+#define ANIM_SCALE 240 // out of 256, the size windows start opening and finish closing at
+
+// A window going away, closed or minimized, drawn from a copy of how it looked.
+struct ghost {
+    struct gui_canvas layer;
+    bool rounded, translucent;
+    int shadow, ms;
+    int64_t start;
+    struct rect from, to;
+};
+static struct ghost ghosts[MAX_WINDOWS];
+static int ghost_count;
+
+// How far through an animation it is, out of 256, and that eased: quickly then
+// slowing for what arrives, and slowly then quickly for what goes.
+static int progress(int64_t start, int ms) {
+    int64_t t = (now_ms() - start) * 256 / ms;
+
+    return t < 0 ? 0 : t > 256 ? 256 : (int)t;
+}
+
+static int ease_out(int t) {
+    return 256 - (256 - t) * (256 - t) * (256 - t) / 65536;
+}
+
+static int ease_in(int t) {
+    return t * t * t / 65536;
+}
+
+static struct rect between(struct rect a, struct rect b, int t) {
+    return (struct rect){a.x + (b.x - a.x) * t / 256, a.y + (b.y - a.y) * t / 256, a.width + (b.width - a.width) * t / 256,
+                         a.height + (b.height - a.height) * t / 256};
+}
+
+// A frame at ANIM_SCALE of its size, about its middle.
+static struct rect shrunk(struct rect r) {
+    int width = r.width * ANIM_SCALE / 256, height = r.height * ANIM_SCALE / 256;
+
+    return (struct rect){r.x + (r.width - width) / 2, r.y + (r.height - height) / 2, width, height};
+}
+
+static struct rect with_shadow(struct rect r) {
+    return (struct rect){r.x - SHADOW, r.y - SHADOW, r.width + 2 * SHADOW, r.height + 2 * SHADOW};
+}
+
+// Where a window's button is on the taskbar.
+static struct rect button_for(const struct window *w) {
+    struct window *list[MAX_WINDOWS];
+    int count = windows_by_age(list);
+
+    for (int i = 0; i < count; i++) {
+        if (list[i] == w)
+            return taskbar_button(i, count);
+    }
+    return taskbar();
+}
+
+// Draws a window, at full size, into a layer the size of its frame.
+static bool fill_layer(struct gui_canvas *layer, const struct window *w) {
+    struct rect f = frame_of(w);
+
+    if (layer->width != f.width || layer->height != f.height) {
+        uint32_t *pixels = realloc(layer->pixels, (size_t)f.width * f.height * sizeof(uint32_t));
+
+        if (!pixels)
+            return false;
+        *layer = (struct gui_canvas){pixels, f.width, f.height, f.width};
+    }
+    drawing_layer = true;
+    draw_window(layer, w, f.x, f.y);
+    drawing_layer = false;
+    return true;
+}
+
+// A layer drawn into r, alpha of it out of 256, with its shadow, its corners
+// rounded, and see-through where its pixels say if it's translucent.
+static void draw_layer(struct gui_canvas *c, const struct gui_canvas *layer, struct rect r, int alpha, int shadow,
+                       bool round, bool translucent, int ox, int oy) {
+    int x0 = r.x - ox < 0 ? 0 : r.x - ox, x1 = r.x + r.width - ox > c->width ? c->width : r.x + r.width - ox;
+    int y0 = r.y - oy < 0 ? 0 : r.y - oy, y1 = r.y + r.height - oy > c->height ? c->height : r.y + r.height - oy;
+
+    if (r.width <= 0 || r.height <= 0)
+        return;
+    if (settings.shadows && r.width > 4 * RADIUS && r.height > 4 * RADIUS) {
+        struct window outline = {.x = r.x + BORDER, .y = r.y + TITLE_HEIGHT + BORDER, .shadow = shadow * alpha / 256};
+
+        outline.canvas.width = r.width - 2 * BORDER;
+        outline.canvas.height = r.height - TITLE_HEIGHT - 2 * BORDER;
+        draw_shadow(c, &outline, ox, oy);
+    }
+    for (int y = y0; y < y1; y++) {
+        int ly = (y + oy - r.y) * layer->height / r.height, cy = ly < layer->height - 1 - ly ? ly : layer->height - 1 - ly;
+        const uint32_t *from = layer->pixels + (long)ly * layer->stride;
+        uint32_t *to = c->pixels + (long)y * c->stride;
+
+        for (int x = x0; x < x1; x++) {
+            int lx = (x + ox - r.x) * layer->width / r.width, cx = lx < layer->width - 1 - lx ? lx : layer->width - 1 - lx;
+            uint32_t p = from[lx];
+            int a = translucent ? alpha * (256 - (int)(p >> 24)) / 256 : alpha;
+
+            if (round && cx < RADIUS && cy < RADIUS)
+                a = a * coverage[cy][cx] / 256;
+            to[x] = gui_mix(to[x], p, a);
+        }
+    }
+}
+
+// Where an opening or restored window is now, and how much of it shows.
+static struct rect arriving(const struct window *w, int *alpha) {
+    int t = ease_out(progress(w->anim_start, w->anim_ms));
+
+    *alpha = t;
+    return between(w->anim_from, frame_of(w), t);
+}
+
+// All that a window covers, as it's drawn now.
+static struct rect drawn_extent(const struct window *w) {
+    return w->anim_ms ? bounds(with_shadow(w->anim_from), extent_of(w)) : extent_of(w);
+}
+
+static void arrive(struct window *w, struct rect from, int ms) {
+    if (!settings.animations || w->bare)
+        return;
+    w->anim_from = from;
+    w->anim_ms = ms;
+    w->anim_start = now_ms();
+}
+
+// Leaves a copy of a window behind, going from its frame to a rectangle.
+static void depart(const struct window *w, struct rect to, int ms) {
+    struct ghost *g = &ghosts[ghost_count];
+
+    if (!settings.animations || w->bare || !visible(w) || ghost_count == MAX_WINDOWS)
+        return;
+    *g = (struct ghost){.rounded = rounded(w), .translucent = w->translucent, .shadow = w->shadow, .ms = ms,
+                        .start = now_ms(), .from = frame_of(w), .to = to};
+    if (fill_layer(&g->layer, w))
+        ghost_count++;
+}
+
+static void draw_ghosts(struct gui_canvas *c, int ox, int oy) {
+    for (int i = 0; i < ghost_count; i++) {
+        const struct ghost *g = &ghosts[i];
+        int t = ease_in(progress(g->start, g->ms));
+
+        draw_layer(c, &g->layer, between(g->from, g->to, t), 256 - t, g->shadow, g->rounded, g->translucent, ox, oy);
+    }
+}
+
+// Moves each animation on a frame, returning whether any has further to go.
+static bool animate(void) {
+    bool going = false;
+
+    for (int i = 0; i < window_count; i++) {
+        struct window *w = windows[i];
+
+        if (!w->anim_ms)
+            continue;
+        add_damage(drawn_extent(w));
+        if (progress(w->anim_start, w->anim_ms) < 256 && fill_layer(&w->layer, w))
+            going = true;
+        else
+            w->anim_ms = 0;
+    }
+    for (int i = 0; i < ghost_count; i++) {
+        struct ghost *g = &ghosts[i];
+
+        add_damage(bounds(with_shadow(g->from), with_shadow(g->to)));
+        if (progress(g->start, g->ms) < 256) {
+            going = true;
+            continue;
+        }
+        free(g->layer.pixels);
+        *g-- = ghosts[--ghost_count];
+    }
+    return going;
 }
 
 static struct rect notice_rect(int index) {
@@ -1949,12 +2146,22 @@ static void draw_area(struct rect r, struct gui_canvas c) {
         first = 0;
     }
     for (int i = first; i < window_count; i++) {
-        if (visible(windows[i]) && overlaps(extent_of(windows[i]), r)) {
-            if (settings.shadows)
-                draw_shadow(&c, windows[i], r.x, r.y);
-            draw_window(&c, windows[i], r.x, r.y);
+        struct window *w = windows[i];
+        int alpha;
+
+        if (!visible(w) || !overlaps(drawn_extent(w), r))
+            continue;
+        if (w->anim_ms) {
+            struct rect now = arriving(w, &alpha);
+
+            draw_layer(&c, &w->layer, now, alpha, w->shadow, rounded(w), w->translucent, r.x, r.y);
+            continue;
         }
+        if (settings.shadows)
+            draw_shadow(&c, w, r.x, r.y);
+        draw_window(&c, w, r.x, r.y);
     }
+    draw_ghosts(&c, r.x, r.y);
     if (locked) {
         if (!no_cursor)
             draw_cursor(&c, r.x, r.y);
@@ -2181,6 +2388,7 @@ static void focus_top(void) {
 }
 
 static void minimize(struct window *w) {
+    depart(w, button_for(w), MINIMIZE_MS);
     w->minimized = true;
     add_damage(extent_of(w));
     damage_taskbar();
@@ -2200,6 +2408,8 @@ static void go_to_workspace(int to);
 static void show(struct window *w) {
     if (!on_workspace(w))
         go_to_workspace(w->workspace);
+    if (w->minimized)
+        arrive(w, button_for(w), MINIMIZE_MS);
     w->minimized = false;
     raise_window(w);
     set_focus(w);
@@ -2229,7 +2439,8 @@ static void send_to_workspace(struct window *w, int to) {
 static void remove_window(struct window *w) {
     int i = index_of(w);
 
-    add_damage(extent_of(w));
+    depart(w, shrunk(frame_of(w)), CLOSE_MS);
+    add_damage(drawn_extent(w));
     if (switch_choice >= 0) {
         add_damage(switcher());
         switch_choice = window_count > 1 ? switch_choice % (window_count - 1) : -1;
@@ -2250,6 +2461,7 @@ static void remove_window(struct window *w) {
         focus_top();
     }
     unmap_buffer(&w->canvas);
+    free(w->layer.pixels);
     free(w);
 }
 
@@ -2292,6 +2504,7 @@ static void create_window(struct client *client, const struct gui_message *m) {
     memcpy(w->title, m->text, sizeof(w->title));
     w->title[sizeof(w->title) - 1] = '\0';
     windows[window_count++] = w;
+    arrive(w, shrunk(frame_of(w)), OPEN_MS);
     damage_taskbar();
     if (switch_choice >= 0)
         add_damage(switcher());
@@ -3890,7 +4103,7 @@ int main(int argc, char **argv) {
             fds[3 + i].fd = clients[i] ? clients[i]->fd : -1;
             fds[3 + i].events = clients[i] ? POLLIN | (clients[i]->out_used ? POLLOUT : 0) : 0;
         }
-        bool fading = fade_shadows();
+        bool fading = fade_shadows() | animate();
         int notice = expire_notices(); // before drawing, so those that went are gone
 
         redraw();

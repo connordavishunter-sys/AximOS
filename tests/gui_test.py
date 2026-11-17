@@ -26,7 +26,9 @@ try:
     check('/dev/keyboard is only for one', v.wait('busy', 5, at), v.text(at))
     check('new window has focus', v.wait('guidemo: focus 1', 5, at), v.text(at))
 
-    # The first window's contents start at 80, 84, under a title bar from y = 60.
+    # The first window's contents start at 80, 84, under a title bar from y = 60,
+    # once it's finished growing in.
+    time.sleep(0.5)
     w, h, px = v.screenshot()
     check('desktop', px(5, 5) == DESKTOP and px(w - 5, h // 2) == DESKTOP, hex(px(5, 5)))
     check('focused title bar', near(px(300, 65), FOCUSED), hex(px(300, 65)))

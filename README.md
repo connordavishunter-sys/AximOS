@@ -28,6 +28,8 @@ with the dash shell.
 
 - **wm**, a compositing window manager: rounded, anti-aliased windows with shadows,
   resizing from every edge, snapping and tiling, minimizing, four workspaces and Alt+Tab
+- Windows grow and fade in as they open, shrink away as they close, and fly to and
+  from their taskbar buttons when minimized and restored (Settings can turn this off)
 - A floating, see-through taskbar at the top or bottom, which can hide itself, with a
   start menu sorted into folders
 - Blurred glass for the taskbar, title bars, menus, panels, notifications and the
