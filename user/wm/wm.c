@@ -1101,6 +1101,7 @@ enum { TILE_AIRPLANE, TILE_NIGHT, TILE_DARK, TILES };
 #define VOLUME_STEP 5
 #define NET_CHECK_MS 5000 // how often the network's looked at, for its icon
 static int panel = -1; // the one open
+static int64_t panel_opened, menu_opened; // when they did, to fade them in
 static void autohide(void);
 
 // What the player's playing, which it keeps in NOW_PLAYING, shown under the volume.
@@ -1205,7 +1206,11 @@ static void damage_tray(void) {
         add_damage(panel_rect(panel));
 }
 
+static void flyout_leaves(struct rect r);
+
 static void close_panel(void) {
+    if (panel >= 0)
+        flyout_leaves(panel_rect(panel));
     damage_tray();
     panel = -1;
     setting_volume = false;
@@ -1366,6 +1371,7 @@ static void open_panel(int item) {
         check_network();
     }
     panel = item;
+    panel_opened = now_ms();
     report_panel(item);
     autohide();
     if (item == TRAY_CALENDAR) {
@@ -1526,8 +1532,10 @@ static void draw_calendar(struct gui_canvas *c, struct rect p, int ox, int oy) {
     }
 }
 
-static void draw_open_panel(struct gui_canvas *c, int ox, int oy) {
+static void draw_open_panel(struct gui_canvas *c, int unused, int ox, int oy) {
     struct rect p = panel_rect(panel);
+
+    (void)unused;
 
     draw_glass(c, p, ox, oy);
     if (panel == TRAY_QUICK)
@@ -1721,28 +1729,26 @@ static void draw_check(struct gui_canvas *c, int x, int y, bool on, int ox, int 
     gui_frame_rounded(c, x - ox, y - oy, 14, 14, SMALL_RADIUS, on ? TITLE_FOCUSED : TASKBAR_COLOR, TASKBAR_TEXT);
 }
 
-static void draw_popups(struct gui_canvas *c, int ox, int oy) {
-    for (int level = 0; level < popup_depth; level++) {
-        const struct popup *p = &popups[level];
+static void draw_popup(struct gui_canvas *c, int level, int ox, int oy) {
+    const struct popup *p = &popups[level];
 
-        draw_glass(c, p->r, ox, oy);
-        for (int i = 0; i < p->count; i++) {
-            const struct item *item = &p->items[i];
-            struct rect r = item_rect(p, i);
-            bool chosen = i == p->choice;
+    draw_glass(c, p->r, ox, oy);
+    for (int i = 0; i < p->count; i++) {
+        const struct item *item = &p->items[i];
+        struct rect r = item_rect(p, i);
+        bool chosen = i == p->choice;
 
-            if (item->action == ACT_LINE) {
-                gui_fill(c, r.x + 4 - ox, r.y + MENU_GAP / 2 - oy, r.width - 8, 1, TASKBAR_LINE);
-                continue;
-            }
-            draw_item(c, r, item->label, item->icon, chosen && choosable(item),
-                      item->action == ACT_NONE ? TASKBAR_DIM_TEXT : TASKBAR_TEXT, ox, oy);
-            if (item->check)
-                draw_check(c, r.x + 7, r.y + (r.height - 14) / 2, item->checked, ox, oy);
-            if (has_submenu(item))
-                gui_text(c, r.x + r.width - 14 - ox, r.y + (r.height - GUI_CHAR_HEIGHT) / 2 - oy, ">",
-                         chosen ? ON_ACCENT : TASKBAR_DIM_TEXT, 1);
+        if (item->action == ACT_LINE) {
+            gui_fill(c, r.x + 4 - ox, r.y + MENU_GAP / 2 - oy, r.width - 8, 1, TASKBAR_LINE);
+            continue;
         }
+        draw_item(c, r, item->label, item->icon, chosen && choosable(item),
+                  item->action == ACT_NONE ? TASKBAR_DIM_TEXT : TASKBAR_TEXT, ox, oy);
+        if (item->check)
+            draw_check(c, r.x + 7, r.y + (r.height - 14) / 2, item->checked, ox, oy);
+        if (has_submenu(item))
+            gui_text(c, r.x + r.width - 14 - ox, r.y + (r.height - GUI_CHAR_HEIGHT) / 2 - oy, ">",
+                     chosen ? ON_ACCENT : TASKBAR_DIM_TEXT, 1);
     }
 }
 
@@ -2123,6 +2129,185 @@ static void trash_file(const char *path) {
     load_desktop(false);
 }
 
+// Locking, logging out and logging in fade from what the screen showed to what
+// it shows next. Locking and logging out hold what was there until the lock or
+// log-in screen's window comes, or HOLD_MS goes by without it.
+#define SCREEN_FADE_MS 250
+#define HOLD_MS 1500
+
+static struct {
+    uint32_t *was; // the screen as it was, or NULL
+    int width, height; // of the screen then
+    bool holding;
+    int64_t start; // of holding, then of fading
+} screen_fade;
+
+static void fade_screen(bool hold) {
+    size_t size = (size_t)screen.width * screen.height * sizeof(uint32_t);
+
+    if (screen_fade.was && (screen_fade.width != screen.width || screen_fade.height != screen.height)) {
+        free(screen_fade.was);
+        screen_fade.was = NULL;
+    }
+    if (!settings.animations || (!screen_fade.was && !(screen_fade.was = malloc(size))))
+        return;
+    screen_fade.width = screen.width;
+    screen_fade.height = screen.height;
+    for (int y = 0; y < screen.height; y++)
+        memcpy(screen_fade.was + (long)y * screen.width, screen.pixels + (long)y * screen.stride, screen.width * sizeof(uint32_t));
+    screen_fade.holding = hold;
+    screen_fade.start = now_ms();
+    add_damage((struct rect){0, 0, screen.width, screen.height});
+}
+
+// What the screen is now, after holding.
+static void stop_holding(void) {
+    if (screen_fade.was && screen_fade.holding) {
+        screen_fade.holding = false;
+        screen_fade.start = now_ms();
+    }
+}
+
+// How much of the new screen shows, out of 256.
+static int screen_shown(void) {
+    if (!screen_fade.was || screen_fade.width != screen.width || screen_fade.height != screen.height)
+        return 256;
+    return screen_fade.holding ? 0 : ease_out(progress(screen_fade.start, SCREEN_FADE_MS));
+}
+
+static bool animate_screen(void) {
+    if (!screen_fade.was)
+        return false;
+    if (screen_fade.holding && now_ms() - screen_fade.start >= HOLD_MS)
+        stop_holding();
+    add_damage((struct rect){0, 0, screen.width, screen.height});
+    if (screen_shown() < 256)
+        return true;
+    free(screen_fade.was);
+    screen_fade.was = NULL;
+    return false;
+}
+
+// Menus and the taskbar's panels fade in as they slide FLYOUT_SLIDE towards the
+// taskbar, and fade out sliding the other way, from a copy of how they looked.
+#define FLYOUT_MS 150
+#define FLYOUT_SLIDE 8
+
+static struct {
+    struct gui_canvas copy; // of the screen around it, from at
+    struct rect at, r;
+    int64_t start;
+} flyout_ghost;
+
+// Which way away from the taskbar is, down or up, as 1 or -1.
+static int from_bar(void) {
+    return settings.taskbar_top ? -1 : 1;
+}
+
+static int flyout_progress(int64_t start) {
+    return settings.animations ? progress(start, FLYOUT_MS) : 256;
+}
+
+// Draws a flyout that opened at start, shifted and mixed with what's under it.
+static void draw_flyout(struct gui_canvas *c, struct rect r, int64_t start,
+                        void (*draw)(struct gui_canvas *, int, int, int), int arg, int ox, int oy) {
+    static uint32_t *under;
+    static size_t size;
+    int t = ease_out(flyout_progress(start)), dy = (256 - t) * FLYOUT_SLIDE / 256 * from_bar();
+    int x0 = r.x - ox < 0 ? 0 : r.x - ox, x1 = r.x + r.width - ox > c->width ? c->width : r.x + r.width - ox;
+    int y0 = r.y + dy - oy < 0 ? 0 : r.y + dy - oy, y1 = r.y + dy + r.height - oy > c->height ? c->height : r.y + dy + r.height - oy;
+    size_t needed = x1 > x0 && y1 > y0 ? (size_t)(x1 - x0) * (y1 - y0) : 0;
+
+    if (t == 256 || !needed) {
+        draw(c, arg, ox, oy - dy);
+        return;
+    }
+    if (needed > size) {
+        uint32_t *bigger = realloc(under, needed * sizeof(*under));
+
+        if (!bigger) {
+            draw(c, arg, ox, oy - dy);
+            return;
+        }
+        under = bigger, size = needed;
+    }
+    for (int y = y0; y < y1; y++)
+        memcpy(under + (size_t)(y - y0) * (x1 - x0), c->pixels + (long)y * c->stride + x0, (x1 - x0) * sizeof(*under));
+    draw(c, arg, ox, oy - dy);
+    for (int y = y0; y < y1; y++) {
+        uint32_t *row = c->pixels + (long)y * c->stride, *was = under + (size_t)(y - y0) * (x1 - x0);
+
+        for (int x = x0; x < x1; x++)
+            row[x] = gui_mix(was[x - x0], row[x], t);
+    }
+}
+
+static void draw_area(struct rect r, struct gui_canvas c);
+
+// Keeps a copy of a flyout as it closes, to fade out.
+static void flyout_leaves(struct rect r) {
+    int x0 = r.x - BLUR_MARGIN < 0 ? 0 : r.x - BLUR_MARGIN, y0 = r.y - BLUR_MARGIN < 0 ? 0 : r.y - BLUR_MARGIN;
+    int x1 = r.x + r.width + BLUR_MARGIN, y1 = r.y + r.height + BLUR_MARGIN;
+    struct rect at = {x0, y0, (x1 < screen.width ? x1 : screen.width) - x0, (y1 < screen.height ? y1 : screen.height) - y0};
+    uint32_t *pixels;
+
+    if (!settings.animations || !(pixels = realloc(flyout_ghost.copy.pixels, (size_t)at.width * at.height * sizeof(uint32_t))))
+        return;
+    flyout_ghost.copy = (struct gui_canvas){pixels, at.width, at.height, at.width};
+    flyout_ghost.at = at;
+    flyout_ghost.r = r;
+    flyout_ghost.start = now_ms();
+    no_cursor = true;
+    draw_area(at, flyout_ghost.copy);
+    no_cursor = false;
+    add_damage(at);
+}
+
+static void draw_flyout_ghost(struct gui_canvas *c, int ox, int oy) {
+    struct rect r = flyout_ghost.r;
+    int t = ease_in(flyout_progress(flyout_ghost.start)), dy = t * FLYOUT_SLIDE / 256 * from_bar();
+
+    if (t == 256 || !flyout_ghost.copy.pixels)
+        return;
+    for (int y = r.y + dy; y < r.y + dy + r.height; y++) {
+        const uint32_t *from = flyout_ghost.copy.pixels + (long)(y - dy - flyout_ghost.at.y) * flyout_ghost.copy.stride
+                             - flyout_ghost.at.x;
+
+        if (y < oy || y >= oy + c->height)
+            continue;
+        for (int x = r.x < ox ? ox : r.x; x < r.x + r.width && x < ox + c->width; x++) {
+            uint32_t *to = c->pixels + (long)(y - oy) * c->stride + x - ox;
+
+            *to = gui_mix(*to, from[x], 256 - t);
+        }
+    }
+}
+
+// Damages the flyouts while they move, returning whether any has further to go.
+static bool animate_flyouts(void) {
+    bool going = false;
+
+    // Each goes on a frame past its end, to be drawn as it ends.
+    if (popup_depth && settings.animations && now_ms() - menu_opened < FLYOUT_MS + FRAME_MS) {
+        add_damage(with_shadow(popups[0].r));
+        going = true;
+    }
+    if (panel >= 0 && settings.animations && now_ms() - panel_opened < FLYOUT_MS + FRAME_MS) {
+        add_damage(with_shadow(panel_rect(panel)));
+        going = true;
+    }
+    if (flyout_ghost.copy.pixels) {
+        add_damage(with_shadow(flyout_ghost.r));
+        if (flyout_progress(flyout_ghost.start) < 256)
+            going = true;
+        else {
+            free(flyout_ghost.copy.pixels);
+            flyout_ghost.copy.pixels = NULL;
+        }
+    }
+    return going;
+}
+
 // Draws everything that overlaps a rectangle, on a canvas that is only that part
 // of the screen.
 static void draw_area(struct rect r, struct gui_canvas c) {
@@ -2173,9 +2358,12 @@ static void draw_area(struct rect r, struct gui_canvas c) {
         draw_taskbar(&c, r.x, r.y);
     draw_notices(&c, r.x, r.y);
     if (popup_depth)
-        draw_popups(&c, r.x, r.y);
+        draw_flyout(&c, popups[0].r, menu_opened, draw_popup, 0, r.x, r.y);
+    if (popup_depth > 1)
+        draw_popup(&c, 1, r.x, r.y);
     if (panel >= 0)
-        draw_open_panel(&c, r.x, r.y);
+        draw_flyout(&c, panel_rect(panel), panel_opened, draw_open_panel, 0, r.x, r.y);
+    draw_flyout_ghost(&c, r.x, r.y);
     if (switch_choice >= 0)
         draw_switcher(&c, r.x, r.y);
     if (drag_file[0] && drag_icon && !no_cursor) {
@@ -2235,14 +2423,27 @@ static void compose(struct rect r) {
 }
 
 static void redraw(void) {
+    static uint32_t mixed[MAX_SIZE];
+    int shown = screen_shown();
+
     for (int i = 0; i < damage_count; i++)
         compose(damage[i]);
     for (int i = 0; i < damage_count; i++) {
         struct rect r = damage[i];
 
-        for (int row = r.y; row < r.y + r.height; row++)
-            show_row((uint32_t *)(framebuffer + (long)row * pitch) + r.x, screen.pixels + (long)row * screen.stride + r.x,
-                     r.width);
+        for (int row = r.y; row < r.y + r.height; row++) {
+            uint32_t *now = screen.pixels + (long)row * screen.stride + r.x;
+
+            // Part way through fading, the row's what was there mixed with what's there now.
+            if (shown < 256) {
+                const uint32_t *was = screen_fade.was + (long)row * screen.width + r.x;
+
+                for (int x = 0; x < r.width; x++)
+                    mixed[x] = gui_mix(was[x], now[x], shown);
+                now = mixed;
+            }
+            show_row((uint32_t *)(framebuffer + (long)row * pitch) + r.x, now, r.width);
+        }
     }
     damage_count = 0;
 }
@@ -2514,6 +2715,8 @@ static void create_window(struct client *client, const struct gui_message *m) {
     add_damage(extent_of(w));
     if (visible(w)) // so nothing can take what's typed on the log-in screen
         set_focus(w);
+    if (w->bare)
+        stop_holding();
 }
 
 // Asks for a new size, unless an answer is still awaited, in which case this is
@@ -2808,6 +3011,7 @@ static void lock(void) {
     drag_file[0] = '\0';
     stop_snap();
     set_focus(NULL);
+    fade_screen(true);
     locked = true;
     add_damage((struct rect){0, 0, screen.width, screen.height});
     printf("wm: locked\n");
@@ -2834,6 +3038,7 @@ static void log_out(void) {
 }
 
 static void unlock(void) {
+    fade_screen(false);
     locked = false;
     add_damage((struct rect){0, 0, screen.width, screen.height});
     focus_top();
@@ -2982,6 +3187,8 @@ static void screenshot(bool window) {
 }
 
 static void close_menu(void) {
+    if (popup_depth)
+        flyout_leaves(popups[0].r);
     damage_popups();
     popup_depth = popup_focus = 0;
     start_open = false;
@@ -3059,6 +3266,8 @@ static void show_popup(int level) {
     struct popup *p = &popups[level];
 
     popup_depth = level + 1;
+    if (level == 0)
+        menu_opened = now_ms();
     add_damage(p->r);
     autohide();
     printf("wm: menu %d at %d %d %d %d\n", level, p->r.x, p->r.y, p->r.width, p->r.height);
@@ -4103,7 +4312,7 @@ int main(int argc, char **argv) {
             fds[3 + i].fd = clients[i] ? clients[i]->fd : -1;
             fds[3 + i].events = clients[i] ? POLLIN | (clients[i]->out_used ? POLLOUT : 0) : 0;
         }
-        bool fading = fade_shadows() | animate();
+        bool fading = fade_shadows() | animate() | animate_flyouts() | animate_screen();
         int notice = expire_notices(); // before drawing, so those that went are gone
 
         redraw();
