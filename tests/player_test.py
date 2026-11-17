@@ -66,8 +66,10 @@ for p in heard:
         runs.append([p, 1])
 sounds = [r for r in runs if r[0]]
 # Between tracks there's a little silence. QEMU records nothing once the sound
-# card's stopped, so a pause leaves only that much.
-order = [p for i, p in enumerate(r[0] for r in sounds) if i == 0 or p != sounds[i - 1][0]]
+# card's stopped, so a pause leaves only that much. A tenth that holds the end of
+# one and the start of the next can sound like neither, so those are left out.
+steady = [r[0] for r in sounds if r[1] > 1]
+order = [p for i, p in enumerate(steady) if i == 0 or p != steady[i - 1]]
 check('440, then 660 and 880', order == [440, 660, 880], runs)
 check('the pause lost nothing of the first', 28 <= sum(r[1] for r in sounds if r[0] == 440) <= 32, runs)
 check('the second was cut short by Next', 6 <= sum(r[1] for r in sounds if r[0] == 660) <= 20, runs)

@@ -30,11 +30,25 @@ def quiet(*args):
         raise SystemExit(f'{" ".join(args)}\n{r.stdout}{r.stderr}')
 
 
+def base_disk():
+    """The built disk as make left it, without what running it by hand adds to
+    /system/etc, such as an account, which would ask for a password at boot."""
+    path = WORK + '/base.img'
+    if not os.path.exists(path):
+        quiet('cp', '--sparse=always', BUILD + '/disk.img', path)
+        shipped = set(os.listdir(ROOT + '/rootfs/system/etc'))
+        found = subprocess.run(['mdir', '-b', '-i', path, '::/system/etc'], capture_output=True, text=True).stdout.split()
+        added = [f for f in found if os.path.basename(f.rstrip('/')) not in shipped and not f.endswith('/')]
+        if added:
+            quiet('mdel', '-i', path, *added)
+    return path
+
+
 def disk_copy(name):
     """A writable copy of the built disk, for tests that read back what the OS wrote.
     Only what's been written is copied, as most of the disk is empty."""
     path = f'{WORK}/{name}.img'
-    quiet('cp', '--sparse=always', BUILD + '/disk.img', path)
+    quiet('cp', '--sparse=always', base_disk(), path)
     return path
 
 
@@ -83,7 +97,7 @@ class VM:
         Shift is held through boot for the shell, unless it's to start the desktop."""
         self.dir = tempfile.mkdtemp(dir=WORK)
         self.log, sock, qmp = self.dir + '/serial.log', self.dir + '/monitor.sock', self.dir + '/qmp.sock'
-        drive = f'file={disk},format=raw' if disk else f'file={BUILD}/disk.img,format=raw,snapshot=on'
+        drive = f'file={disk},format=raw' if disk else f'file={base_disk()},format=raw,snapshot=on'
         self.proc = subprocess.Popen(
             ['timeout', str(timeout), 'qemu-system-x86_64', '-accel', 'kvm', '-cpu', 'host', '-smp', str(smp), '-m', '256M',
              '-M', 'q35,vmport=' + ('on' if vmmouse else 'off'), '-display', 'none', '-boot', 'd', '-cdrom', BUILD + '/aximos.iso',

@@ -78,6 +78,7 @@ struct shared {
     int threads;           // how many haven't exited
     int exit_status;
     bool exiting;          // all threads are on the way out
+    bool exited;           // the last thread is done, closing files and all, so the parent can collect it
     struct shared *parent;
     uint64_t pml4;
     uint64_t heap_start;
@@ -1161,7 +1162,9 @@ int process_wait(uint64_t status_ptr, int pid, int options) {
                 continue;
 
             has_children = true;
-            if (p->s->threads == 0) {
+            // Not just when the last thread's begun exiting, as closing its files
+            // can sleep, and it needs all of this until it's done.
+            if (p->s->exited) {
                 int found = p->pid;
                 struct shared *child = p->s;
 
@@ -1543,11 +1546,12 @@ static void finish_thread(void) {
             continue;
 
         child->s->parent = init->s;
-        if (child->s->threads == 0)
+        if (child->s->exited)
             process_wakeup(init->s);
     }
 
     p->state = PROCESS_ZOMBIE;
+    s->exited = true;
     process_wakeup(s->parent);
     send_to_process(s->parent, SIGCHLD);
 
