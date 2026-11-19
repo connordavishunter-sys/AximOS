@@ -217,10 +217,10 @@ static const char *key_sequence(uint16_t code) {
         return "\x1b[A";
     case KEY_DOWN:
         return "\x1b[B";
-    case KEY_RIGHT:
-        return "\x1b[C";
+    case KEY_RIGHT: // with Ctrl, a word at a time
+        return modifiers & KEY_MOD_CTRL ? "\x1b[1;5C" : "\x1b[C";
     case KEY_LEFT:
-        return "\x1b[D";
+        return modifiers & KEY_MOD_CTRL ? "\x1b[1;5D" : "\x1b[D";
     case KEY_HOME:
         return "\x1b[H";
     case KEY_END:
@@ -249,6 +249,8 @@ static void to_console(uint16_t code) {
         tty_echo_interrupt(console);
         return;
     }
+    if (modifiers & KEY_MOD_ALT) // as terminals send it
+        push("\x1b", 1);
     push(&c, 1);
 }
 

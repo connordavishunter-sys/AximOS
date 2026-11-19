@@ -1,5 +1,6 @@
 #include <arpa/inet.h>
 #include <audio_types.h>
+#include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -110,6 +111,7 @@ static const struct theme *theme = &dark;
 #define KEY_Q 0x10
 #define KEY_R 0x13
 #define KEY_L 0x26
+#define KEY_S 0x1F
 #define TASKS_COMMAND "tasks" // Ctrl+Shift+Escape
 #define HINT "Super: apps   Super+R: run   Super+Enter: terminal   Alt+Tab: switch   Super+Q: close   Super+arrows: tile   " \
              "Super+1-4: workspaces   Super+Shift+Q: quit"
@@ -177,6 +179,7 @@ struct window {
     int64_t anim_start;
     struct rect anim_from, anim_to; // where it was going as of the last frame
     struct gui_canvas layer;
+    bool copy_stale; // changed since layer was drawn, for the overview or a preview
 };
 
 enum part { PART_NONE, PART_CONTENT, PART_TITLE, PART_CLOSE, PART_MAXIMIZE, PART_MINIMIZE, PART_RESIZE };
@@ -209,6 +212,12 @@ static int icon_count;
 static char *clipboard;
 static size_t clipboard_length;
 static int clipboard_width, clipboard_height; // a picture's, or 0 for text
+
+// What's been copied as text, newest first, which the tray's clipboard panel puts back.
+#define CLIPS_MAX 10
+static char *clips[CLIPS_MAX];
+static size_t clip_lengths[CLIPS_MAX];
+static int clip_count;
 
 static struct rect damage[MAX_DAMAGE];
 static int damage_count;
@@ -821,8 +830,10 @@ static const char *clock_text(char out[16]) {
 }
 
 // Notifications stack up from the bottom right corner, the newest lowest, until
-// they've been up NOTICE_MS or they're clicked. The last HISTORY are kept for the
-// tray, newest first, with how many came since it was last looked at.
+// they've been up NOTICE_MS or they're clicked. A new one from an app that has one
+// up takes its place, counting them. The last HISTORY are kept for the tray, newest
+// first, with how many came since it was last looked at. With do not disturb on,
+// they only go there.
 #define MAX_NOTICES 4
 #define NOTICE_MS 5000
 #define NOTICE_WIDTH 300
@@ -831,11 +842,14 @@ static const char *clock_text(char out[16]) {
 struct notice {
     char title[GUI_TITLE_MAX], text[GUI_TITLE_MAX], app[GUI_TITLE_MAX];
     char file[GUI_PATH_MAX]; // that clicking it opens, if there is one
+    char label[16], command[GUI_PATH_MAX + 32]; // its button, if it has one, and what that runs
     char time[8];
+    int count; // how many it stands for, from the same app
     int64_t until;
 };
 static struct notice notices[MAX_NOTICES], history[HISTORY];
 static int notice_count, history_count, unseen;
+static const struct client *notifier; // which program sent the newest, which may add a button
 
 static int64_t now_ms(void) {
     struct timespec t;
@@ -1089,6 +1103,14 @@ static int expire_notices(void) {
     return (int)next;
 }
 
+// A notification's button, at its right.
+static struct rect notice_button(int index) {
+    struct rect r = notice_rect(index);
+    int width = gui_text_width(notices[index].label, 1) + 16;
+
+    return (struct rect){r.x + r.width - 12 - width, r.y + (r.height - 22) / 2, width, 22};
+}
+
 static int notice_at(int x, int y) {
     for (int i = 0; i < notice_count; i++) {
         if (contains(notice_rect(i), x, y))
@@ -1108,24 +1130,35 @@ static void draw_notice(struct gui_canvas *c, struct rect r, const struct notice
 
 static void draw_notices(struct gui_canvas *c, int ox, int oy) {
     for (int i = 0; i < notice_count; i++) {
-        struct rect r = notice_rect(i);
+        struct rect r = notice_rect(i), text = r, b = notice_button(i);
+        struct notice shown = notices[i];
 
         draw_glass(c, r, ox, oy);
         gui_fill_rounded(c, r.x + 3 - ox, r.y + RADIUS - oy, 3, r.height - 2 * RADIUS, GUI_MAX_RADIUS, TITLE_FOCUSED);
-        draw_notice(c, r, &notices[i], ox, oy);
+        if (shown.count > 1)
+            snprintf(shown.title, sizeof(shown.title), "%.50s (%d)", notices[i].title, shown.count);
+        if (shown.label[0]) {
+            text.width = b.x - r.x;
+            gui_fill_rounded(c, b.x - ox, b.y - oy, b.width, b.height, SMALL_RADIUS,
+                             contains(b, cursor_x, cursor_y) ? TITLE_FOCUSED : TASKBAR_BUTTON);
+            gui_text(c, b.x + 8 - ox, b.y + (b.height - GUI_CHAR_HEIGHT) / 2 - oy, shown.label,
+                     contains(b, cursor_x, cursor_y) ? ON_ACCENT : TASKBAR_TEXT, 1);
+        }
+        draw_notice(c, text, &shown, ox, oy);
     }
 }
 
 // The tray, left of the clock: quick settings, shown by the network's and the
 // speaker's icons, and notifications, each opening a panel by it. The clock opens
 // a calendar.
-enum { TRAY_QUICK, TRAY_NOTICES, TRAY_ITEMS, TRAY_CALENDAR = TRAY_ITEMS };
-enum { TILE_AIRPLANE, TILE_NIGHT, TILE_DARK, TILES };
+enum { TRAY_QUICK, TRAY_NOTICES, TRAY_CLIPS, TRAY_ITEMS, TRAY_CALENDAR = TRAY_ITEMS };
+enum { TILE_AIRPLANE, TILE_NIGHT, TILE_DARK, TILE_QUIET, TILES };
 #define DAY_WIDTH 32
 #define DAY_HEIGHT 24
 #define TRAY_ICON 24
 #define PANEL_LINE 20
-#define QUICK_WIDTH 320
+#define CLIP_ROW 24
+#define QUICK_WIDTH 400
 #define TILE_HEIGHT 52
 #define VOLUME_FILE "/system/etc/volume"
 #define VOLUME_STEP 5
@@ -1156,11 +1189,13 @@ static struct rect tray_item(int item) {
         return (struct rect){right + 2, y, width + 16, TASKBAR_HEIGHT - 8};
     if (item == TRAY_NOTICES)
         return (struct rect){right - TRAY_ICON, y, TRAY_ICON, TASKBAR_HEIGHT - 8};
+    if (item == TRAY_CLIPS)
+        return (struct rect){right - TRAY_ICON - quick - 2 - 2 - TRAY_ICON, y, TRAY_ICON, TASKBAR_HEIGHT - 8};
     return (struct rect){right - TRAY_ICON - quick - 2, y, quick, TASKBAR_HEIGHT - 8};
 }
 
 static struct rect tray(void) {
-    struct rect first = tray_item(TRAY_QUICK), last = tray_item(TRAY_NOTICES);
+    struct rect first = tray_item(TRAY_CLIPS), last = tray_item(TRAY_NOTICES);
 
     return (struct rect){first.x, first.y, last.x + last.width - first.x, first.height};
 }
@@ -1178,9 +1213,10 @@ static int sound_height(void) {
 }
 
 static struct rect panel_rect(int item) {
-    static const int widths[] = {QUICK_WIDTH, NOTICE_WIDTH, 7 * DAY_WIDTH + 24};
+    static const int widths[] = {QUICK_WIDTH, NOTICE_WIDTH, NOTICE_WIDTH, 7 * DAY_WIDTH + 24};
     int heights[] = {12 + TILE_HEIGHT + 12 + sound_height() + 9 + 6 * PANEL_LINE + 8,
-                     40 + (history_count ? history_count : 1) * (NOTICE_HEIGHT - 8), 40 + 7 * DAY_HEIGHT};
+                     40 + (history_count ? history_count : 1) * (NOTICE_HEIGHT - 8),
+                     40 + (clip_count ? clip_count : 1) * CLIP_ROW, 40 + 7 * DAY_HEIGHT};
     struct rect t = tray_item(item);
     int x = t.x + t.width - widths[item], most = screen.width - GAP - widths[item];
 
@@ -1217,8 +1253,8 @@ static struct rect month_arrow(bool next) {
     return (struct rect){next ? p.x + p.width - 8 - 24 : p.x + 8, p.y + 6, 24, 24};
 }
 
-static struct rect clear_button(void) {
-    struct rect p = panel_rect(TRAY_NOTICES);
+static struct rect clear_button(int item) {
+    struct rect p = panel_rect(item);
 
     return (struct rect){p.x + p.width - 64, p.y + 6, 56, 22};
 }
@@ -1227,6 +1263,12 @@ static struct rect history_row(int index) {
     struct rect p = panel_rect(TRAY_NOTICES);
 
     return (struct rect){p.x + 4, p.y + 34 + index * (NOTICE_HEIGHT - 8), p.width - 8, NOTICE_HEIGHT - 8};
+}
+
+static struct rect clip_row(int index) {
+    struct rect p = panel_rect(TRAY_CLIPS);
+
+    return (struct rect){p.x + 4, p.y + 34 + index * CLIP_ROW, p.width - 8, CLIP_ROW};
 }
 
 static void damage_tray(void) {
@@ -1247,29 +1289,43 @@ static void close_panel(void) {
     autohide();
 }
 
+// Adds a notification, returning it: the one up, or with do not disturb, the one
+// in the history.
 static struct notice *add_notice(const char *title, const char *text, const char *app) {
     time_t now = time(NULL);
+    struct notice *n = &history[0];
+    int count = 1;
 
     damage_notices();
     damage_tray(); // before the history panel grows
-    if (notice_count == MAX_NOTICES) // the oldest makes way
-        memmove(notices, notices + 1, --notice_count * sizeof(*notices));
-
-    struct notice *n = &notices[notice_count++];
-
+    memmove(history + 1, history, (HISTORY - 1) * sizeof(*history));
+    history_count += history_count < HISTORY;
+    *n = (struct notice){.count = 1, .until = now_ms() + NOTICE_MS};
     snprintf(n->title, sizeof(n->title), "%.*s", GUI_TITLE_MAX - 1, title);
     snprintf(n->text, sizeof(n->text), "%.*s", GUI_TITLE_MAX - 1, text);
     snprintf(n->app, sizeof(n->app), "%s", app ? app : "");
     strftime(n->time, sizeof(n->time), "%H:%M", localtime(&now));
-    n->file[0] = '\0';
-    n->until = now_ms() + NOTICE_MS;
-    memmove(history + 1, history, (HISTORY - 1) * sizeof(*history));
-    history[0] = *n;
-    history_count += history_count < HISTORY;
     unseen += panel != TRAY_NOTICES;
-    damage_notices();
     damage_tray();
-    printf("wm: notice %s: %s\n", n->title, n->text);
+    printf("wm: notice %s: %s", n->title, n->text);
+    if (settings.quiet) {
+        printf(" (quiet)\n");
+        return n;
+    }
+    for (int i = 0; i < notice_count && app && app[0]; i++) {
+        if (!strcmp(notices[i].app, app)) {
+            count += notices[i].count;
+            remove_notice(i);
+            break;
+        }
+    }
+    if (notice_count == MAX_NOTICES) // the oldest makes way
+        memmove(notices, notices + 1, --notice_count * sizeof(*notices));
+    n = &notices[notice_count++];
+    *n = history[0];
+    n->count = count;
+    printf(count > 1 ? " (%d)\n" : "\n", count);
+    damage_notices();
     return n;
 }
 
@@ -1277,6 +1333,15 @@ static struct notice *add_notice(const char *title, const char *text, const char
 static void notice_file(struct notice *n, const char *path) {
     snprintf(n->file, sizeof(n->file), "%s", path);
     snprintf(history[0].file, sizeof(history[0].file), "%s", path);
+}
+
+// A button for the notice just added, which runs a command.
+static void notice_action(struct notice *n, const char *label, const char *command) {
+    snprintf(n->label, sizeof(n->label), "%s", label);
+    snprintf(n->command, sizeof(n->command), "%s", command);
+    snprintf(history[0].label, sizeof(history[0].label), "%s", n->label);
+    snprintf(history[0].command, sizeof(history[0].command), "%s", command);
+    damage_notices();
 }
 
 static void clear_history(void) {
@@ -1410,6 +1475,8 @@ static void open_panel(int item) {
         shown_month(&year, &month);
         printf("wm: calendar %s %d\n", month_names[month], year);
     }
+    if (item == TRAY_CLIPS)
+        printf("wm: clipboard history %d\n", clip_count);
     if (item == TRAY_NOTICES) {
         unseen = 0;
         while (notice_count)
@@ -1457,7 +1524,7 @@ static void draw_network(struct gui_canvas *c, struct rect p, int y, int ox, int
 }
 
 static void draw_history(struct gui_canvas *c, struct rect p, int ox, int oy) {
-    struct rect clear = clear_button();
+    struct rect clear = clear_button(TRAY_NOTICES);
 
     gui_text(c, p.x + 12 - ox, p.y + 10 - oy, "Notifications", TASKBAR_TEXT, 1);
     if (history_count) {
@@ -1471,7 +1538,7 @@ static void draw_history(struct gui_canvas *c, struct rect p, int ox, int oy) {
         struct rect r = history_row(i);
         const struct notice *n = &history[i];
 
-        if (contains(r, cursor_x, cursor_y) && n->file[0])
+        if (contains(r, cursor_x, cursor_y) && (n->file[0] || n->command[0]))
             gui_fill_rounded(c, r.x - ox, r.y - oy, r.width, r.height, SMALL_RADIUS, TASKBAR_BUTTON);
         gui_text(c, r.x + r.width - 8 - gui_text_width(n->time, 1) - ox, r.y + 4 - oy, n->time, TASKBAR_DIM_TEXT, 1);
         draw_notice(c, (struct rect){r.x - 4, r.y - 4, r.width - 6 * GUI_CHAR_WIDTH, r.height}, n, ox, oy);
@@ -1479,13 +1546,14 @@ static void draw_history(struct gui_canvas *c, struct rect p, int ox, int oy) {
 }
 
 static bool tile_on(int tile) {
-    return tile == TILE_AIRPLANE ? settings.airplane : tile == TILE_NIGHT ? settings.night_light : !settings.light;
+    return tile == TILE_AIRPLANE ? settings.airplane : tile == TILE_NIGHT ? settings.night_light
+         : tile == TILE_QUIET ? settings.quiet : !settings.light;
 }
 
 // The tiles, the volume and what's playing, then the network.
 static void draw_quick(struct gui_canvas *c, struct rect p, int ox, int oy) {
-    static const char *const labels[] = {"Airplane", "Night light", "Dark mode"};
-    static const char *const tile_icons[] = {"airplane", "night", "theme"};
+    static const char *const labels[] = {"Airplane", "Night light", "Dark mode", "Quiet"};
+    static const char *const tile_icons[] = {"airplane", "night", "theme", "quiet"};
     int network_y = p.y + 12 + TILE_HEIGHT + 12 + sound_height();
 
     for (int i = 0; i < TILES; i++) {
@@ -1562,6 +1630,36 @@ static void draw_calendar(struct gui_canvas *c, struct rect p, int ox, int oy) {
     }
 }
 
+// The first line of what was copied, as far as it fits, with anything that isn't
+// printable as a space.
+static void draw_clips(struct gui_canvas *c, struct rect p, int ox, int oy) {
+    struct rect clear = clear_button(TRAY_CLIPS);
+
+    gui_text(c, p.x + 12 - ox, p.y + 10 - oy, "Clipboard", TASKBAR_TEXT, 1);
+    if (!clip_count)
+        gui_text(c, p.x + 12 - ox, p.y + 44 - oy, "Nothing copied yet", TASKBAR_DIM_TEXT, 1);
+    else {
+        gui_fill_rounded(c, clear.x - ox, clear.y - oy, clear.width, clear.height, SMALL_RADIUS, TASKBAR_BUTTON);
+        gui_text(c, clear.x + (clear.width - gui_text_width("Clear", 1)) / 2 - ox,
+                 clear.y + (clear.height - GUI_CHAR_HEIGHT) / 2 - oy, "Clear", TASKBAR_TEXT, 1);
+    }
+    for (int i = 0; i < clip_count; i++) {
+        struct rect r = clip_row(i);
+        char line[GUI_TITLE_MAX];
+        size_t n = 0;
+
+        while (n < clip_lengths[i] && n < sizeof(line) - 1 && clips[i][n] != '\n') {
+            line[n] = clips[i][n] >= ' ' && clips[i][n] < 127 ? clips[i][n] : ' ';
+            n++;
+        }
+        line[n] = '\0';
+        if (contains(r, cursor_x, cursor_y))
+            gui_fill_rounded(c, r.x - ox, r.y - oy, r.width, r.height, SMALL_RADIUS, TASKBAR_BUTTON);
+        fitted_text(c, r.x + 8 - ox, r.y + (r.height - GUI_CHAR_HEIGHT) / 2 - oy, r.width - 16, line,
+                    i ? TASKBAR_TEXT : TITLE_FOCUSED);
+    }
+}
+
 static void draw_open_panel(struct gui_canvas *c, int unused, int ox, int oy) {
     struct rect p = panel_rect(panel);
 
@@ -1572,12 +1670,15 @@ static void draw_open_panel(struct gui_canvas *c, int unused, int ox, int oy) {
         draw_quick(c, p, ox, oy);
     else if (panel == TRAY_NOTICES)
         draw_history(c, p, ox, oy);
+    else if (panel == TRAY_CLIPS)
+        draw_clips(c, p, ox, oy);
     else
         draw_calendar(c, p, ox, oy);
 }
 
 static void draw_tray(struct gui_canvas *c, int ox, int oy) {
-    struct rect q = tray_item(TRAY_QUICK), b = tray_item(TRAY_NOTICES);
+    struct rect q = tray_item(TRAY_QUICK), b = tray_item(TRAY_NOTICES), k = tray_item(TRAY_CLIPS);
+    const struct gui_image *clip = gui_icon("clipboard");
     const struct gui_image *network = gui_icon(net.airplane ? "airplane" : connected() ? "network" : "offline");
     const struct gui_image *speaker = gui_icon(muted || !volume ? "muted" : "speaker"), *bell = gui_icon("bell");
     int icon_y = q.y + (q.height - ICON_SIZE) / 2;
@@ -1594,12 +1695,68 @@ static void draw_tray(struct gui_canvas *c, int ox, int oy) {
         gui_draw_image(c, q.x + q.width - 4 - ICON_SIZE - ox, icon_y - oy, speaker);
     if (bell)
         gui_draw_image(c, b.x + (b.width - ICON_SIZE) / 2 - ox, icon_y - oy, bell);
+    if (clip)
+        gui_draw_image(c, k.x + (k.width - ICON_SIZE) / 2 - ox, icon_y - oy, clip);
     if (unseen)
         gui_fill_rounded(c, b.x + b.width - 8 - ox, b.y + 1 - oy, 6, 6, GUI_MAX_RADIUS, CLOSE_COLOR);
 }
 
 static void open_file(const char *path);
+static void launch(const char *command);
 static void save_settings(const char *what);
+
+static void clear_clips(void) {
+    for (int i = 0; i < clip_count; i++)
+        free(clips[i]);
+    clip_count = 0;
+    if (panel == TRAY_CLIPS)
+        add_damage(panel_rect(TRAY_CLIPS));
+}
+
+// Text put on the clipboard goes first in its history, coming up from further
+// down if it was there already.
+static void remember_clipboard(void) {
+    char *copy;
+    int found = clip_count == CLIPS_MAX ? CLIPS_MAX - 1 : -1;
+
+    if (!clipboard || clipboard_width || !clipboard_length || !(copy = malloc(clipboard_length)))
+        return;
+    memcpy(copy, clipboard, clipboard_length);
+    if (panel == TRAY_CLIPS)
+        add_damage(panel_rect(TRAY_CLIPS));
+    for (int i = 0; i < clip_count; i++) {
+        if (clip_lengths[i] == clipboard_length && !memcmp(clips[i], clipboard, clipboard_length))
+            found = i;
+    }
+    if (found >= 0) {
+        free(clips[found]);
+        memmove(&clips[found], &clips[found + 1], (clip_count - found - 1) * sizeof(*clips));
+        memmove(&clip_lengths[found], &clip_lengths[found + 1], (clip_count - found - 1) * sizeof(*clip_lengths));
+        clip_count--;
+    }
+    memmove(&clips[1], &clips[0], clip_count * sizeof(*clips));
+    memmove(&clip_lengths[1], &clip_lengths[0], clip_count * sizeof(*clip_lengths));
+    clips[0] = copy;
+    clip_lengths[0] = clipboard_length;
+    clip_count++;
+    if (panel == TRAY_CLIPS)
+        add_damage(panel_rect(TRAY_CLIPS));
+}
+
+// Puts what was copied before back on the clipboard.
+static void use_clip(int index) {
+    char *copy = malloc(clip_lengths[index]);
+
+    if (!copy)
+        return;
+    memcpy(copy, clips[index], clip_lengths[index]);
+    free(clipboard);
+    clipboard = copy;
+    clipboard_length = clip_lengths[index];
+    clipboard_width = clipboard_height = 0;
+    printf("wm: clipboard from history %d\n", index);
+    remember_clipboard();
+}
 
 // A tile in quick settings turns what it's for on or off.
 static void toggle_tile(int tile) {
@@ -1610,6 +1767,9 @@ static void toggle_tile(int tile) {
     } else if (tile == TILE_NIGHT) {
         settings.night_light = !settings.night_light;
         save_settings(settings.night_light ? "night light on" : "night light off");
+    } else if (tile == TILE_QUIET) {
+        settings.quiet = !settings.quiet;
+        save_settings(settings.quiet ? "quiet on" : "quiet off");
     } else {
         settings.light = !settings.light;
         save_settings(settings.light ? "theme light" : "theme dark");
@@ -1630,7 +1790,7 @@ static bool panel_click(void) {
         set_volume_at(cursor_x);
     } else if (panel == TRAY_QUICK && mixer >= 0 && contains(mute_button(), cursor_x, cursor_y)) {
         set_volume(volume, !muted);
-    } else if (panel == TRAY_NOTICES && history_count && contains(clear_button(), cursor_x, cursor_y)) {
+    } else if (panel == TRAY_NOTICES && history_count && contains(clear_button(TRAY_NOTICES), cursor_x, cursor_y)) {
         clear_history();
         printf("wm: notifications cleared\n");
     } else if (panel == TRAY_CALENDAR && (contains(month_arrow(false), cursor_x, cursor_y)
@@ -1642,9 +1802,24 @@ static bool panel_click(void) {
         printf("wm: calendar %s %d\n", month_names[month], year);
         add_damage(panel_rect(TRAY_CALENDAR));
     }
+    if (panel == TRAY_CLIPS && clip_count && contains(clear_button(TRAY_CLIPS), cursor_x, cursor_y)) {
+        clear_clips();
+        printf("wm: clipboard history cleared\n");
+        return true;
+    }
+    for (int i = 0; panel == TRAY_CLIPS && i < clip_count; i++) {
+        if (contains(clip_row(i), cursor_x, cursor_y)) {
+            use_clip(i);
+            close_panel();
+            return true;
+        }
+    }
     for (int i = 0; panel == TRAY_NOTICES && i < history_count; i++) {
-        if (contains(history_row(i), cursor_x, cursor_y) && history[i].file[0]) {
-            open_file(history[i].file);
+        if (contains(history_row(i), cursor_x, cursor_y) && (history[i].file[0] || history[i].command[0])) {
+            if (history[i].file[0])
+                open_file(history[i].file);
+            else
+                launch(history[i].command);
             close_panel();
         }
     }
@@ -2218,6 +2393,298 @@ static bool animate_screen(void) {
     return false;
 }
 
+// Super+Tab shows every window on the workspace at once, side by side and smaller,
+// over the darkened desktop. Clicking one, or Enter on the one chosen with the
+// arrows, goes to it, and Escape, Super+Tab or a click elsewhere goes back. Copies
+// of windows, here and in the taskbar's previews, are drawn from their layers.
+#define OVERVIEW_GAP 24
+static bool overview;
+static int overview_choice;
+
+static void close_menu(void);
+static void show(struct window *w);
+
+// The layer of a window, drawn again if it's changed since.
+static void ready_copy(struct window *w) {
+    struct rect f = frame_of(w);
+
+    if (w->copy_stale || w->layer.width != f.width || w->layer.height != f.height)
+        w->copy_stale = !fill_layer(&w->layer, w);
+}
+
+static int overview_columns(int count) {
+    int columns = 1;
+
+    while (columns * columns < count)
+        columns++;
+    return columns;
+}
+
+// Where a window's copy goes: in a grid of cells, the last row in the middle, as
+// big as fits in its cell above its title, but no bigger than it is.
+static struct rect overview_thumb(int index, int count, const struct window *w) {
+    struct rect d = desktop(), f = frame_of(w);
+    int columns = overview_columns(count), rows = (count + columns - 1) / columns, row = index / columns;
+    int in_row = row == rows - 1 ? count - row * columns : columns;
+    int cell_width = (d.width - OVERVIEW_GAP) / columns, cell_height = (d.height - OVERVIEW_GAP) / rows;
+    int room_width = cell_width - OVERVIEW_GAP, room_height = cell_height - OVERVIEW_GAP - GUI_CHAR_HEIGHT - 8;
+    int width = f.width, height = f.height;
+    int x = d.x + OVERVIEW_GAP + (columns - in_row) * cell_width / 2 + index % columns * cell_width;
+    int y = d.y + OVERVIEW_GAP + row * cell_height;
+
+    if (width > room_width)
+        height = height * room_width / width, width = room_width;
+    if (height > room_height)
+        width = width * room_height / height, height = room_height;
+    return (struct rect){x + (room_width - width) / 2, y + (room_height - height) / 2, width, height};
+}
+
+// All a copy covers, with its highlight, shadow and title.
+static struct rect overview_area(struct rect t) {
+    return with_shadow((struct rect){t.x - 4, t.y - 4, t.width + 8, t.height + 14 + GUI_CHAR_HEIGHT});
+}
+
+static int overview_at(int x, int y) {
+    struct window *list[MAX_WINDOWS];
+    int count = windows_by_age(list);
+
+    for (int i = 0; i < count; i++) {
+        if (contains(overview_thumb(i, count, list[i]), x, y))
+            return i;
+    }
+    return -1;
+}
+
+static void draw_overview(struct gui_canvas *c, int ox, int oy) {
+    struct window *list[MAX_WINDOWS];
+    struct rect area = {ox, oy, c->width, c->height};
+    int count = windows_by_age(list);
+
+    blend_fill(c, 0, 0, c->width, c->height, 0x000000, 112);
+    for (int i = 0; i < count; i++) {
+        struct window *w = list[i];
+        struct rect t = overview_thumb(i, count, w);
+        int text_width = gui_text_width(w->title, 1) < t.width ? gui_text_width(w->title, 1) : t.width;
+
+        if (!overlaps(overview_area(t), area))
+            continue;
+        ready_copy(w);
+        if (i == overview_choice)
+            gui_fill_rounded(c, t.x - 4 - ox, t.y - 4 - oy, t.width + 8, t.height + 8, RADIUS, TITLE_FOCUSED);
+        draw_layer(c, &w->layer, t, 256, w->shadow, rounded(w), w->translucent, ox, oy);
+        fitted_text(c, t.x + (t.width - text_width) / 2 - ox, t.y + t.height + 8 - oy, t.width, w->title, TITLE_TEXT);
+    }
+}
+
+static void choose_in_overview(int index) {
+    struct window *list[MAX_WINDOWS];
+    int count = windows_by_age(list);
+
+    if (index == overview_choice || index < 0 || index >= count)
+        return;
+    add_damage(overview_area(overview_thumb(overview_choice, count, list[overview_choice])));
+    add_damage(overview_area(overview_thumb(index, count, list[index])));
+    overview_choice = index;
+}
+
+static void set_overview(bool on) {
+    struct window *list[MAX_WINDOWS];
+    int count = windows_by_age(list);
+
+    if (on == overview || (on && !count))
+        return;
+    close_menu();
+    close_panel();
+    fade_screen(false);
+    overview = on;
+    dragging = grabbed = resizing = NULL;
+    add_damage((struct rect){0, 0, screen.width, screen.height});
+    printf("wm: overview %s\n", on ? "shown" : "closed");
+    overview_choice = 0;
+    for (int i = 0; on && i < count; i++) {
+        struct rect t = overview_thumb(i, count, list[i]);
+
+        list[i]->copy_stale = true;
+        overview_choice = list[i] == focused ? i : overview_choice;
+        printf("wm: overview %s at %d %d %d %d\n", list[i]->title, t.x, t.y, t.width, t.height);
+    }
+}
+
+static void pick_in_overview(int index) {
+    struct window *list[MAX_WINDOWS];
+    int count = windows_by_age(list);
+
+    set_overview(false);
+    if (index >= 0 && index < count) {
+        printf("wm: overview picked %s\n", list[index]->title);
+        show(list[index]);
+    }
+}
+
+// Arrows move through the copies, Enter goes to the one chosen, and Escape or Super+Tab
+// goes back. Other keys do nothing meanwhile.
+static void overview_key(const struct key_event *e) {
+    struct window *list[MAX_WINDOWS];
+    int count = windows_by_age(list), columns = overview_columns(count);
+
+    if (!e->pressed)
+        return;
+    if (e->code == KEY_ESCAPE || (e->code == KEY_TAB && (e->modifiers & KEY_MOD_SUPER)))
+        set_overview(false);
+    else if (e->code == KEY_ENTER)
+        pick_in_overview(overview_choice);
+    else if (e->code == KEY_LEFT || e->code == KEY_RIGHT || e->code == KEY_TAB)
+        choose_in_overview((overview_choice + (e->code == KEY_LEFT ? count - 1 : 1)) % count);
+    else if (e->code == KEY_UP || e->code == KEY_DOWN)
+        choose_in_overview(overview_choice + (e->code == KEY_UP ? -columns : columns));
+}
+
+// Resting the mouse on a window's taskbar button shows a copy of it there, which
+// comes at once moving from one button to the next.
+#define PREVIEW_MS 400
+#define PREVIEW_WIDTH 220
+#define PREVIEW_HEIGHT 140
+static struct window *hovered; // whose button the mouse is on
+static int64_t hovered_since, preview_opened;
+static bool previewing; // hovered's preview is up
+
+static struct rect preview_rect(void) {
+    struct rect b = button_for(hovered), f = frame_of(hovered);
+    int width = f.width, height = f.height, x, most;
+
+    if (width > PREVIEW_WIDTH)
+        height = height * PREVIEW_WIDTH / width, width = PREVIEW_WIDTH;
+    if (height > PREVIEW_HEIGHT)
+        width = width * PREVIEW_HEIGHT / height, height = PREVIEW_HEIGHT;
+    width = width + 16 > 120 ? width + 16 : 120;
+    height += 24 + GUI_CHAR_HEIGHT;
+    x = b.x + (b.width - width) / 2;
+    most = screen.width - GAP - width;
+    x = x < most ? x : most;
+    return (struct rect){x > GAP ? x : GAP, beside_bar(height), width, height};
+}
+
+static void draw_preview(struct gui_canvas *c, int unused, int ox, int oy) {
+    struct rect p = preview_rect(), f = frame_of(hovered);
+    int height = p.height - 24 - GUI_CHAR_HEIGHT, width = f.width * height / f.height;
+
+    (void)unused;
+    width = width < p.width - 16 ? width : p.width - 16;
+    draw_glass(c, p, ox, oy);
+    fitted_text(c, p.x + 8 - ox, p.y + 8 - oy, p.width - 16, hovered->title, TASKBAR_TEXT);
+    ready_copy(hovered);
+    draw_layer(c, &hovered->layer, (struct rect){p.x + (p.width - width) / 2, p.y + 16 + GUI_CHAR_HEIGHT, width, height}, 256, 0,
+               rounded(hovered), hovered->translucent, ox, oy);
+}
+
+static void hide_preview(void) {
+    if (previewing)
+        flyout_leaves(preview_rect());
+    previewing = false;
+    hovered = NULL;
+}
+
+static void hover_taskbar(void) {
+    struct window *list[MAX_WINDOWS], *now = NULL;
+    int count = windows_by_age(list);
+    bool was = previewing;
+
+    for (int i = 0; i < count && bar_visible() && !popup_depth && panel < 0 && !buttons && !overview; i++) {
+        if (contains(taskbar_button(i, count), cursor_x, cursor_y))
+            now = list[i];
+    }
+    if (now == hovered)
+        return;
+    hide_preview();
+    hovered = now;
+    hovered_since = was ? 0 : now_ms();
+}
+
+// Shows the preview once the mouse has rested long enough, returning how long until
+// then, or -1.
+static int check_preview(void) {
+    int64_t wait = hovered && !previewing ? hovered_since + PREVIEW_MS - now_ms() : -1;
+
+    if (!hovered || previewing || wait > 0)
+        return (int)wait;
+    previewing = true;
+    preview_opened = now_ms();
+    hovered->copy_stale = true;
+    add_damage(with_shadow(preview_rect()));
+    printf("wm: preview %s\n", hovered->title);
+    return -1;
+}
+
+// A window's copy is drawn again when it changes.
+static void copy_changed(struct window *w) {
+    struct window *list[MAX_WINDOWS];
+    int count = windows_by_age(list);
+
+    w->copy_stale = true;
+    for (int i = 0; overview && i < count; i++) {
+        if (list[i] == w)
+            add_damage(overview_area(overview_thumb(i, count, w)));
+    }
+    if (previewing && hovered == w)
+        add_damage(preview_rect());
+}
+
+// Shift+Print Screen and Super+Shift+S choose what to save. The screen stays as it
+// was, darkened but for the area dragged out, which is saved when the mouse is let
+// go. Clicking takes the window under the mouse, or the screen, and Escape or the
+// right button stops.
+static struct {
+    uint32_t *pixels; // the screen as it was, while choosing
+    bool dragging;
+    int x, y; // where the drag started
+    struct rect shown; // the area as last drawn
+} choosing;
+
+static struct rect chosen_area(void) {
+    int x = choosing.x < cursor_x ? choosing.x : cursor_x, y = choosing.y < cursor_y ? choosing.y : cursor_y;
+
+    return (struct rect){x, y, abs(cursor_x - choosing.x) + 1, abs(cursor_y - choosing.y) + 1};
+}
+
+#define CHOOSING_HINT "Drag across an area, or click a window. Escape stops."
+
+static struct rect choosing_hint(void) {
+    int width = gui_text_width(CHOOSING_HINT, 1) + 24;
+
+    return (struct rect){(screen.width - width) / 2, 16, width, 28};
+}
+
+static void draw_choosing(struct gui_canvas *c, int ox, int oy) {
+    struct rect a = choosing.dragging ? chosen_area() : (struct rect){0}, h = choosing_hint();
+    char size[32];
+
+    for (int y = 0; y < c->height; y++) {
+        const uint32_t *from = choosing.pixels + (long)(y + oy) * screen.width + ox;
+        uint32_t *to = c->pixels + (long)y * c->stride;
+
+        for (int x = 0; x < c->width; x++)
+            to[x] = contains(a, x + ox, y + oy) ? from[x] : from[x] >> 1 & 0x7F7F7F;
+    }
+    gui_fill_rounded(c, h.x - ox, h.y - oy, h.width, h.height, RADIUS, TASKBAR_COLOR);
+    gui_text(c, h.x + 12 - ox, h.y + (h.height - GUI_CHAR_HEIGHT) / 2 - oy, CHOOSING_HINT, TASKBAR_TEXT, 1);
+    if (!choosing.dragging)
+        return;
+    gui_fill(c, a.x - ox, a.y - oy, a.width, 1, TITLE_FOCUSED);
+    gui_fill(c, a.x - ox, a.y + a.height - 1 - oy, a.width, 1, TITLE_FOCUSED);
+    gui_fill(c, a.x - ox, a.y - oy, 1, a.height, TITLE_FOCUSED);
+    gui_fill(c, a.x + a.width - 1 - ox, a.y - oy, 1, a.height, TITLE_FOCUSED);
+    snprintf(size, sizeof(size), "%d x %d", a.width, a.height);
+    gui_text(c, a.x + a.width - gui_text_width(size, 1) - ox, a.y + a.height + 6 - oy, size, 0xFFFFFF, 1);
+}
+
+static void choosing_moved(void) {
+    struct rect a = chosen_area(), grown = {a.x - 120, a.y - 4, a.width + 124, a.height + 8 + 2 * GUI_CHAR_HEIGHT};
+
+    add_damage(choosing.shown);
+    add_damage(grown);
+    choosing.shown = grown;
+}
+
 // Menus and the taskbar's panels fade in as they slide FLYOUT_SLIDE towards the
 // taskbar, and fade out sliding the other way, from a copy of how they looked.
 #define FLYOUT_MS 150
@@ -2326,6 +2793,10 @@ static bool animate_flyouts(void) {
         add_damage(with_shadow(panel_rect(panel)));
         going = true;
     }
+    if (previewing && settings.animations && now_ms() - preview_opened < FLYOUT_MS + FRAME_MS) {
+        add_damage(with_shadow(preview_rect()));
+        going = true;
+    }
     if (flyout_ghost.copy.pixels) {
         add_damage(with_shadow(flyout_ghost.r));
         if (flyout_progress(flyout_ghost.start) < 256)
@@ -2344,8 +2815,14 @@ static void draw_area(struct rect r, struct gui_canvas c) {
     int hint_y = desktop().y + desktop().height - 2 * GUI_CHAR_HEIGHT, first = -1;
     struct rect bar = taskbar();
 
+    if (choosing.pixels) {
+        draw_choosing(&c, r.x, r.y);
+        if (!no_cursor)
+            draw_cursor(&c, r.x, r.y);
+        return;
+    }
     // Nothing under a window that covers all of it can be seen.
-    for (int i = window_count - 1; i >= 0 && first < 0; i--) {
+    for (int i = window_count - 1; i >= 0 && first < 0 && !overview; i--) {
         if (covers(windows[i], r))
             first = i;
     }
@@ -2360,7 +2837,7 @@ static void draw_area(struct rect r, struct gui_canvas c) {
         }
         first = 0;
     }
-    for (int i = first; i < window_count; i++) {
+    for (int i = first; i < window_count && !overview; i++) {
         struct window *w = windows[i];
         int alpha;
 
@@ -2376,7 +2853,10 @@ static void draw_area(struct rect r, struct gui_canvas c) {
             draw_shadow(&c, w, r.x, r.y);
         draw_window(&c, w, r.x, r.y);
     }
-    draw_ghosts(&c, r.x, r.y);
+    if (overview)
+        draw_overview(&c, r.x, r.y);
+    else
+        draw_ghosts(&c, r.x, r.y);
     if (locked) {
         if (!no_cursor)
             draw_cursor(&c, r.x, r.y);
@@ -2393,6 +2873,8 @@ static void draw_area(struct rect r, struct gui_canvas c) {
         draw_popup(&c, 1, r.x, r.y);
     if (panel >= 0)
         draw_flyout(&c, panel_rect(panel), panel_opened, draw_open_panel, 0, r.x, r.y);
+    if (previewing)
+        draw_flyout(&c, preview_rect(), preview_opened, draw_preview, 0, r.x, r.y);
     draw_flyout_ghost(&c, r.x, r.y);
     if (switch_choice >= 0)
         draw_switcher(&c, r.x, r.y);
@@ -2672,6 +3154,12 @@ static void remove_window(struct window *w) {
 
     depart(w, shrunk(frame_of(w)), CLOSE_MS);
     add_damage(drawn_extent(w));
+    if (hovered == w)
+        hide_preview();
+    if (overview) {
+        add_damage((struct rect){0, 0, screen.width, screen.height});
+        overview_choice = 0;
+    }
     if (switch_choice >= 0) {
         add_damage(switcher());
         switch_choice = window_count > 1 ? switch_choice % (window_count - 1) : -1;
@@ -2845,6 +3333,7 @@ static void set_clipboard(const struct gui_message *m) {
         clipboard = NULL;
         clipboard_length = clipboard_width = clipboard_height = 0;
     }
+    remember_clipboard();
 }
 
 static void send_clipboard(struct client *client) {
@@ -2879,16 +3368,20 @@ static void handle_message(struct client *client, const struct gui_message *m) {
         create_window(client, m);
         break;
     case GUI_DAMAGE:
-        if (w)
+        if (w) {
             add_damage((struct rect){w->x + m->x, w->y + m->y, m->width, m->height});
+            copy_changed(w);
+        }
         break;
     case GUI_DESTROY:
         if (w)
             remove_window(w);
         break;
     case GUI_BUFFER:
-        if (w)
+        if (w) {
             take_buffer(w, m);
+            copy_changed(w);
+        }
         break;
     case GUI_TITLE:
         if (w) {
@@ -2896,6 +3389,7 @@ static void handle_message(struct client *client, const struct gui_message *m) {
             w->title[sizeof(w->title) - 1] = '\0';
             damage_title(w);
             damage_taskbar();
+            copy_changed(w);
         }
         break;
     case GUI_CLIPBOARD_SET:
@@ -2913,6 +3407,17 @@ static void handle_message(struct client *client, const struct gui_message *m) {
         break;
     case GUI_NOTIFY: // the %.*s in add_notice stops at the end of an unterminated title
         add_notice(m->text, m->buffer, w ? w->app : NULL);
+        notifier = client;
+        break;
+    case GUI_NOTIFY_ACTION: // for the newest, if it's still up, and in the history
+        if (client == notifier) {
+            char label[GUI_TITLE_MAX], command[GUI_TITLE_MAX];
+
+            snprintf(label, sizeof(label), "%.*s", GUI_TITLE_MAX - 1, m->text);
+            snprintf(command, sizeof(command), "%.*s", GUI_TITLE_MAX - 1, m->buffer);
+            notice_action(!settings.quiet && notice_count ? &notices[notice_count - 1] : &history[0], label, command);
+            notifier = NULL;
+        }
         break;
     case GUI_SETTINGS:
         settings_changed();
@@ -3029,7 +3534,6 @@ static void start_login(void) {
 }
 
 static void close_menu(void);
-static void launch(const char *command);
 
 // Hides the desktop behind the lock screen, or the log-in screen once logged out.
 static void lock(void) {
@@ -3059,6 +3563,7 @@ static void log_out(void) {
     free(clipboard);
     clipboard = NULL;
     clipboard_length = clipboard_width = clipboard_height = 0;
+    clear_clips();
     notice_count = 0;
     clear_history();
     logged_in = false;
@@ -3101,7 +3606,7 @@ static int edges_at(struct rect f, int x, int y) {
 // Which window is at a point, and which part of it. edges says which edges a
 // resize there would move.
 static struct window *window_at(int x, int y, enum part *part, int *edges) {
-    for (int i = window_count - 1; i >= 0; i--) {
+    for (int i = window_count - 1; i >= 0 && !overview; i--) {
         struct window *w = windows[i];
         struct rect f = frame_of(w);
         int margin = w->bare ? 0 : RESIZE_MARGIN;
@@ -3145,6 +3650,8 @@ static void open_file(const char *path) {
     if (!runs && !gui_app_path(app, program))
         return;
     printf(runs ? "wm: running %s\n" : "wm: opening %s in %s\n", path, app);
+    if (gui_kind_of(path) != GUI_KIND_FOLDER)
+        gui_recent_add(path);
     if (fork() == 0) {
         if (runs)
             execl(path, strrchr(path, '/') ? strrchr(path, '/') + 1 : path, (char *)NULL);
@@ -3171,49 +3678,115 @@ static bool copy_picture(const struct gui_canvas *from) {
     return true;
 }
 
-// Print Screen saves the screen, and with Alt the focused window, as it's shown but
-// without the cursor, in a new file in Pictures, which the notice saying so opens.
-// It's put on the clipboard as well.
-static void screenshot(bool window) {
-    struct rect r = {0, 0, screen.width, screen.height};
-    char dir[GUI_PATH_MAX], path[GUI_PATH_MAX], stamp[32];
+// The part of a rectangle on the screen.
+static struct rect on_screen(struct rect r) {
+    int right = r.x + r.width < screen.width ? r.x + r.width : screen.width;
+    int bottom = r.y + r.height < screen.height ? r.y + r.height : screen.height;
+
+    r.x = r.x > 0 ? r.x : 0;
+    r.y = r.y > 0 ? r.y : 0;
+    return (struct rect){r.x, r.y, right - r.x, bottom - r.y};
+}
+
+// Saves a picture of the screen in a new file in Pictures, which the notice saying
+// so opens, with a button to show it in Files. It's put on the clipboard as well.
+static void save_shot(const struct gui_canvas *shot) {
+    char dir[GUI_PATH_MAX], path[GUI_PATH_MAX], command[GUI_PATH_MAX + 32], stamp[32];
     const char *home = getenv("HOME");
     time_t now = time(NULL);
 
-    if (window && focused) {
-        struct rect f = frame_of(focused);
-        int right = f.x + f.width < r.width ? f.x + f.width : r.width;
-        int bottom = f.y + f.height < r.height ? f.y + f.height : r.height;
-
-        r.x = f.x > 0 ? f.x : 0;
-        r.y = f.y > 0 ? f.y : 0;
-        r = (struct rect){r.x, r.y, right - r.x, bottom - r.y};
-    }
-    if (r.width <= 0 || r.height <= 0)
-        return;
     snprintf(dir, sizeof(dir), "%s/Pictures", home && strcmp(home, "/") ? home : "");
     mkdir(dir, 0755);
     strftime(stamp, sizeof(stamp), "%Y-%m-%d-%H%M%S", localtime(&now));
     snprintf(path, sizeof(path), "%s/screenshot-%s.png", dir, stamp);
     for (int i = 2; access(path, F_OK) == 0; i++)
         snprintf(path, sizeof(path), "%s/screenshot-%s-%d.png", dir, stamp, i);
-
-    no_cursor = true;
-    compose(r);
-    no_cursor = false;
-    add_damage(r); // to put the cursor back
-
-    struct gui_canvas shot = {screen.pixels + (long)r.y * screen.stride + r.x, r.width, r.height, screen.stride};
-
-    if (!gui_image_save(path, &shot)) {
+    if (!gui_image_save(path, shot)) {
         printf("wm: screenshot %s: %s\n", path, gui_image_error());
         add_notice("Couldn't save the screenshot", gui_image_error(), NULL);
         return;
     }
-    printf("wm: screenshot %s %dx%d\n", path, r.width, r.height);
-    notice_file(add_notice(copy_picture(&shot) ? "Screenshot saved and copied" : "Screenshot saved",
-                           strrchr(path, '/') + 1, "viewer"),
-                path);
+    printf("wm: screenshot %s %dx%d\n", path, shot->width, shot->height);
+
+    struct notice *n = add_notice(copy_picture(shot) ? "Screenshot saved and copied" : "Screenshot saved",
+                                  strrchr(path, '/') + 1, "viewer");
+
+    snprintf(command, sizeof(command), "files --select '%s'", path);
+    notice_file(n, path);
+    notice_action(n, "Show", command);
+}
+
+// Print Screen saves the screen, and with Alt the focused window, as it's shown but
+// without the cursor.
+static void screenshot(bool window) {
+    struct rect r = on_screen(window && focused ? frame_of(focused) : (struct rect){0, 0, screen.width, screen.height});
+
+    if (r.width <= 0 || r.height <= 0)
+        return;
+    no_cursor = true;
+    compose(r);
+    no_cursor = false;
+    add_damage(r); // to put the cursor back
+    save_shot(&(struct gui_canvas){screen.pixels + (long)r.y * screen.stride + r.x, r.width, r.height, screen.stride});
+}
+
+static void start_choosing(void) {
+    struct rect all = {0, 0, screen.width, screen.height};
+    uint32_t *pixels;
+
+    if (choosing.pixels || !(pixels = malloc((size_t)screen.width * screen.height * sizeof(uint32_t))))
+        return;
+    close_menu();
+    close_panel();
+    hide_preview();
+    set_overview(false);
+    no_cursor = true;
+    compose(all);
+    no_cursor = false;
+    for (int y = 0; y < screen.height; y++)
+        memcpy(pixels + (long)y * screen.width, screen.pixels + (long)y * screen.stride, screen.width * sizeof(uint32_t));
+    choosing.pixels = pixels;
+    choosing.dragging = false;
+    add_damage(all);
+    printf("wm: choosing an area\n");
+}
+
+static void stop_choosing(void) {
+    free(choosing.pixels);
+    choosing.pixels = NULL;
+    add_damage((struct rect){0, 0, screen.width, screen.height});
+}
+
+// The mouse while choosing, which only this gets.
+static void choose_with_mouse(uint32_t pressed, uint32_t released, bool moved) {
+    if (pressed & MOUSE_BUTTON_RIGHT) {
+        printf("wm: screenshot stopped\n");
+        stop_choosing();
+        return;
+    }
+    if (pressed & MOUSE_BUTTON_LEFT) {
+        choosing.dragging = true;
+        choosing.x = cursor_x;
+        choosing.y = cursor_y;
+        choosing.shown = (struct rect){0};
+    }
+    if (choosing.dragging && moved)
+        choosing_moved();
+    if (!(released & MOUSE_BUTTON_LEFT) || !choosing.dragging)
+        return;
+
+    // A click, rather than a drag, takes what it's on.
+    struct rect r = chosen_area();
+    enum part part;
+    int edges;
+
+    if (r.width < 4 && r.height < 4) {
+        struct window *w = window_at(cursor_x, cursor_y, &part, &edges);
+
+        r = on_screen(w ? frame_of(w) : (struct rect){0, 0, screen.width, screen.height});
+    }
+    save_shot(&(struct gui_canvas){choosing.pixels + (long)r.y * screen.width + r.x, r.width, r.height, screen.width});
+    stop_choosing();
 }
 
 static void close_menu(void) {
@@ -3303,13 +3876,53 @@ static void show_popup(int level) {
     printf("wm: menu %d at %d %d %d %d\n", level, p->r.x, p->r.y, p->r.width, p->r.height);
 }
 
-// The apps, by the folders in APPS_DIR, listed afresh each time so new ones show up.
-static void open_start_menu(void) {
+// Typing with the start menu open searches the apps' names, in every folder.
+static char search[32];
+
+static bool has_text(const char *name, const char *text) {
+    for (; *name; name++) {
+        size_t i = 0;
+
+        while (text[i] && tolower((unsigned char)name[i]) == tolower((unsigned char)text[i]))
+            i++;
+        if (!text[i])
+            return true;
+    }
+    return !*text;
+}
+
+static void add_found(struct popup *p) {
+    char names[MAX_ITEMS][32], path[GUI_PATH_MAX], heading[GUI_TITLE_MAX];
+    int count = gui_app_names(names, MAX_ITEMS), found = 0;
+
+    snprintf(heading, sizeof(heading), "Search: %s", search);
+    add_item(p, ACT_NONE, heading, NULL, NULL);
+    for (int i = 0; i < count; i++) {
+        if (has_text(names[i], search) && gui_app_path(names[i], path)) {
+            add_item(p, ACT_APP, names[i], path, app_icon(names[i]));
+            found++;
+        }
+    }
+    if (!found)
+        add_item(p, ACT_NONE, "No apps match", NULL, NULL);
+    printf("wm: search %s: %d apps\n", search, found);
+}
+
+// The apps, by the folders in APPS_DIR, listed afresh each time so new ones show
+// up, or those a search finds.
+static void fill_start_menu(void) {
     struct popup *p = &popups[0];
 
-    close_panel();
-    close_menu();
+    add_damage(p->r);
     p->count = 0;
+    if (search[0]) {
+        add_found(p);
+        place_popup(p, GAP, 0, MENU_WIDTH);
+        p->r.y = beside_bar(p->r.height);
+        p->choice = first_choosable(p);
+        add_damage(p->r);
+        return;
+    }
     add_apps(p, APPS_DIR, true);
     if (!p->count)
         add_item(p, ACT_NONE, "No apps in " APPS_DIR, NULL, NULL);
@@ -3324,8 +3937,40 @@ static void open_start_menu(void) {
     place_popup(p, GAP, 0, MENU_WIDTH);
     p->r.y = beside_bar(p->r.height);
     p->choice = first_choosable(p);
+    add_damage(p->r);
+}
+
+static void open_start_menu(void) {
+    set_overview(false);
+    close_panel();
+    close_menu();
+    search[0] = '\0';
+    fill_start_menu();
     start_open = true;
     show_popup(0);
+}
+
+static void close_submenu(void);
+
+// Letters typed and Backspace change the search, which the menu then shows.
+static bool search_key(const struct key_event *e) {
+    size_t len = strlen(search);
+    bool typed = e->text >= ' ' && e->text < 127 && !(e->modifiers & (KEY_MOD_CTRL | KEY_MOD_ALT | KEY_MOD_SUPER));
+
+    if (!start_open || !popup_depth || popup_focus || !(typed || (e->code == KEY_BACKSPACE && len)))
+        return false;
+    if (!e->pressed)
+        return true;
+    if (typed && len < sizeof(search) - 1) {
+        search[len] = (char)e->text;
+        search[len + 1] = '\0';
+    } else if (!typed) {
+        search[len - 1] = '\0';
+    }
+    close_submenu();
+    fill_start_menu();
+    printf("wm: menu 0 at %d %d %d %d\n", popups[0].r.x, popups[0].r.y, popups[0].r.width, popups[0].r.height);
+    return true;
 }
 
 // What can be done with an icon on the desktop, as in Files, or on the desktop itself.
@@ -3480,6 +4125,7 @@ static void put_path(const char *path, bool cut) {
     clipboard = strdup(path);
     clipboard_length = clipboard ? strlen(path) : 0;
     clipboard_width = clipboard_height = 0;
+    remember_clipboard();
     unlink(CUT);
     if (cut && (f = fopen(CUT, "w"))) {
         fputs(path, f);
@@ -3684,7 +4330,7 @@ static void taskbar_click(void) {
     }
 }
 
-static void press(uint32_t changed) {
+static void press_here(uint32_t changed) {
     enum part part;
     int edges;
     struct window *w = window_at(cursor_x, cursor_y, &part, &edges);
@@ -3705,8 +4351,12 @@ static void press(uint32_t changed) {
     int notice = popup_depth || panel >= 0 ? -1 : notice_at(cursor_x, cursor_y);
 
     if (notice >= 0) {
-        if (notices[notice].file[0])
+        if (notices[notice].label[0] && contains(notice_button(notice), cursor_x, cursor_y)) {
+            printf("wm: notice action %s: %s\n", notices[notice].label, notices[notice].command);
+            launch(notices[notice].command);
+        } else if (notices[notice].file[0]) {
             open_file(notices[notice].file);
+        }
         remove_notice(notice);
         return;
     }
@@ -3779,6 +4429,24 @@ static void press(uint32_t changed) {
         drag_x = cursor_x - w->x;
         drag_y = cursor_y - w->y;
     }
+}
+
+// The gap between the taskbar and the screen's edges counts as the taskbar, so the
+// mouse can be thrown at the edge: a press there is taken as one on the bar, in line
+// with it, or at its end beside the side gaps.
+static void press(uint32_t changed) {
+    struct rect bar = taskbar();
+    enum part part;
+    int x = cursor_x, y = cursor_y, edges;
+    bool beyond = settings.taskbar_top ? y < bar.y + bar.height : y >= bar.y;
+
+    if (!locked && bar_visible() && beyond && !contains(bar, x, y) && !window_at(x, y, &part, &edges)) {
+        cursor_x = x < bar.x + 4 ? bar.x + 4 : x > bar.x + bar.width - 5 ? bar.x + bar.width - 5 : x;
+        cursor_y = bar.y + bar.height / 2;
+    }
+    press_here(changed);
+    cursor_x = x;
+    cursor_y = y;
 }
 
 // A file let go over a window's contents goes to it, which comes to the top, with
@@ -3854,8 +4522,25 @@ static void handle_mouse(const struct mouse_event *e) {
         damage_cursor();
     }
     buttons = e->buttons;
+    if (choosing.pixels) {
+        choose_with_mouse(pressed, released, moved);
+        return;
+    }
     if (moved)
         autohide();
+    if (overview) {
+        int at = overview_at(cursor_x, cursor_y);
+
+        if (moved)
+            choose_in_overview(at);
+        if (pressed & MOUSE_BUTTON_LEFT && at >= 0)
+            pick_in_overview(at);
+        else if (pressed)
+            set_overview(false);
+        return;
+    }
+    if (moved || pressed)
+        hover_taskbar();
 
     // Windows can be dragged partly off the screen, but the title bar stays on it.
     // A tiled one goes back to its own size, as far across under the mouse as it was.
@@ -4045,7 +4730,7 @@ static enum gui_cursor resize_cursor(int edges) {
 static void update_cursor(void) {
     enum part part = PART_NONE;
     int edges = 0;
-    struct window *w = resizing ? resizing : grabbed ? grabbed : window_at(cursor_x, cursor_y, &part, &edges);
+    struct window *w = resizing ? resizing : grabbed ? grabbed : choosing.pixels ? NULL : window_at(cursor_x, cursor_y, &part, &edges);
     enum gui_cursor shape = resizing                                         ? resize_cursor(resizing->resize_edges)
                           : grabbed || (w && part == PART_CONTENT && !popup_depth) ? w->cursor
                           : part == PART_RESIZE && !dragging                 ? resize_cursor(edges)
@@ -4069,16 +4754,35 @@ static void handle_key(const struct key_event *e) {
         return;
     }
     super_key(e);
+    if (choosing.pixels) {
+        if (e->pressed && e->code == KEY_ESCAPE) {
+            printf("wm: screenshot stopped\n");
+            stop_choosing();
+        }
+        return;
+    }
+    if (overview) {
+        overview_key(e);
+        return;
+    }
     if (panel >= 0 && e->code == KEY_ESCAPE) {
         if (e->pressed)
             close_panel();
         return;
     }
-    if (switch_key(e) || menu_key(e))
+    if (switch_key(e) || search_key(e) || menu_key(e))
         return;
-    if (e->code == KEY_PRINT_SCREEN || e->code == KEY_SYSRQ) { // which Alt+Print Screen is
-        if (e->pressed)
+    if (e->code == KEY_PRINT_SCREEN || e->code == KEY_SYSRQ
+        || (super && (e->modifiers & KEY_MOD_SHIFT) && e->code == KEY_S)) { // SysRq is Alt+Print Screen
+        if (e->pressed && (e->code == KEY_S || (e->modifiers & KEY_MOD_SHIFT)))
+            start_choosing();
+        else if (e->pressed)
             screenshot(e->code == KEY_SYSRQ || (e->modifiers & KEY_MOD_ALT));
+        return;
+    }
+    if (super && e->code == KEY_TAB) {
+        if (e->pressed)
+            set_overview(true);
         return;
     }
     if (super && e->code == KEY_Q) {
@@ -4353,6 +5057,7 @@ int main(int argc, char **argv) {
             fds[3 + i].fd = clients[i] ? clients[i]->fd : -1;
             fds[3 + i].events = clients[i] ? POLLIN | (clients[i]->out_used ? POLLOUT : 0) : 0;
         }
+        int preview = check_preview(); // before the flyouts, so its own starts moving
         bool fading = fade_shadows() | animate() | animate_flyouts() | animate_screen();
         int notice = expire_notices(); // before drawing, so those that went are gone
 
@@ -4369,6 +5074,7 @@ int main(int argc, char **argv) {
         timeout = until_check < timeout ? (until_check > 0 ? (int)until_check : 0) : timeout;
 
         timeout = notice >= 0 && notice < timeout ? (notice > 0 ? notice : 1) : timeout;
+        timeout = preview >= 0 && preview < timeout ? preview : timeout;
 
         int leave_wait = check_leaving();
 

@@ -334,12 +334,24 @@ bool gui_dropped_file(const struct gui_message *drop, char path[GUI_PATH_MAX]) {
     return copy;
 }
 
-bool gui_notify(struct gui_window *window, const char *title, const char *text) {
+bool gui_notify_action(struct gui_window *window, const char *title, const char *text, const char *label,
+                       const char *command) {
     struct gui_message message = {.type = GUI_NOTIFY, .window = window ? window->id : 0};
 
     snprintf(message.text, sizeof(message.text), "%s", title);
     snprintf(message.buffer, sizeof(message.buffer), "%s", text ? text : "");
+    if (!gui_send(connection, &message))
+        return false;
+    if (!label)
+        return true;
+    message.type = GUI_NOTIFY_ACTION;
+    snprintf(message.text, sizeof(message.text), "%s", label);
+    snprintf(message.buffer, sizeof(message.buffer), "%s", command);
     return gui_send(connection, &message);
+}
+
+bool gui_notify(struct gui_window *window, const char *title, const char *text) {
+    return gui_notify_action(window, title, text, NULL, NULL);
 }
 
 // What's on the clipboard, and whether it's a picture, waiting for the answer and

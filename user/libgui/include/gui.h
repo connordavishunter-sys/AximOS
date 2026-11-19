@@ -38,6 +38,8 @@ enum gui_message_type {
     GUI_UNLOCK,        // from the log-in screen wm started, once someone's logged in
     GUI_DRAG,          // while the mouse is held in a window, a file's path dragged from it, width
                        // bytes in shared memory named in buffer, like the clipboard's text
+    GUI_NOTIFY_ACTION, // straight after GUI_NOTIFY, a button for it: its label in text, and in
+                       // buffer a command to run, as Super+R would
 
     // From wm. Mouse positions are inside the window.
     GUI_CREATED,
@@ -130,6 +132,9 @@ void gui_set_translucent(struct gui_window *window, bool on);
 // Shows a notification in the corner of the screen for a few seconds, with the
 // window's icon, if it's given. What doesn't fit in GUI_TITLE_MAX is cut short.
 bool gui_notify(struct gui_window *window, const char *title, const char *text);
+// The same, with a button labelled label that runs command, as Super+R would.
+bool gui_notify_action(struct gui_window *window, const char *title, const char *text, const char *label,
+                       const char *command);
 
 // Puts text on the clipboard, returning false if memory ran out.
 bool gui_clipboard_set(const char *text, size_t length);
@@ -225,6 +230,7 @@ struct gui_settings {
     int night_strength;
     bool airplane;      // the network card sends and takes nothing
     bool animations;    // windows grow in, shrink away, and minimize to the taskbar
+    bool quiet;         // do not disturb: notifications go straight to the tray, without showing
 };
 
 // The accent colours there are, as Settings names them, and what goes on each.
@@ -253,6 +259,13 @@ int gui_app_names(char (*names)[32], int max);
 
 // Whether a file is a program: an ELF file, which opening runs.
 bool gui_is_program(const char *path);
+
+// Files opened lately, newest first, a path to a line in GUI_RECENT.
+#define GUI_RECENT "/system/etc/recent"
+#define GUI_RECENT_MAX 20
+void gui_recent_add(const char *path);
+int gui_recent_list(char (*paths)[GUI_PATH_MAX], int max);
+void gui_recent_clear(void);
 
 // The trash is GUI_TRASH, where each thing has a random name, with what it was
 // called and where it was in GUI_TRASH_DB, a line each: the name, a tab, the path.

@@ -27,18 +27,25 @@ with the dash shell.
 ### Desktop
 
 - **wm**, a compositing window manager: rounded, anti-aliased windows with shadows,
-  resizing from every edge, snapping and tiling, minimizing, four workspaces and Alt+Tab
+  resizing from every edge, snapping and tiling, minimizing, four workspaces, Alt+Tab, and
+  an overview of every window side by side
+- Resting the mouse on a taskbar button shows a live copy of its window
 - Windows grow and fade in as they open, shrink away as they close, and fly to and
   from their taskbar buttons when minimized and restored, and move smoothly into place
   when maximized, restored or tiled. Menus and the taskbar's panels
   fade and slide in and out, and locking, logging in and logging out fade the screen
   across. Settings can turn all of it off.
-- A floating, see-through taskbar at the top or bottom, which can hide itself, with a
-  start menu sorted into folders
+- A floating, see-through taskbar at the top or bottom, which can hide itself (and still
+  takes clicks at the very edge of the screen), with a start menu sorted into folders
+  that searches the apps as you type
 - Blurred glass for the taskbar, title bars, menus, panels, notifications and the
   window switcher, and for any window that asks for it (the terminal does)
-- A tray with quick settings (airplane mode, night light, dark mode, volume), the
-  network, notifications and a calendar
+- A tray with quick settings (airplane mode, night light, dark mode, do not disturb,
+  volume), the network, notifications, a calendar, and the clipboard's history, to put
+  back something copied earlier
+- Notifications that can carry a button, and stack up when one app sends several
+- Screenshots of the screen, a window, or an area dragged across, saved to Pictures
+  and copied
 - Desktop icons on a grid, drag and drop between apps, and a clipboard for text and pictures
 - A log-in screen, a lock screen and first-boot setup. Booting to text asks for the
   same account.
@@ -52,7 +59,7 @@ with the dash shell.
 
 | App        | What it does                                                          |
 |------------|-----------------------------------------------------------------------|
-| Files      | File manager: places, tabs, multi-select, thumbnails, Open with, and a trash you can restore from |
+| Files      | File manager: places, recent files, tabs, multi-select, thumbnails, Open with, and a trash you can restore from |
 | Terminal   | Tabs, scrollback, selection, find, and a see-through background       |
 | Editor     | Tabs, find and replace, go to line, colouring for C and shell scripts |
 | Paint      | Pencil, shapes, fill, text, selections, zoom, undo and redo           |
@@ -70,6 +77,10 @@ tail wc more du df free ps top kill date tz sleep env echo clear`, network tools
 (`net ping host nc fetch`, where `fetch` speaks HTTPS through mbedTLS), `volume`,
 `convert` for audio files, `notify`, `text` (an editor in the terminal) and `axfetch`.
 Run any of them with `--help`.
+
+At the prompt, the arrow keys, Home and End, Tab completion, Ctrl+W and Ctrl+arrows (or
+Alt+B, Alt+F and Alt+D) edit the line, and Ctrl+R searches the history, which is kept
+in `~/.history`.
 
 ## Building
 
@@ -130,11 +141,14 @@ username and password.
 | Super+R             | Run a program, folder or file         |
 | Super+Enter         | Terminal                              |
 | Alt+Tab             | Switch windows                        |
+| Super+Tab           | See every window, and pick one        |
 | Super+Q             | Close the window                      |
 | Super+arrows        | Maximize, or tile to a side           |
 | Super+1 to 4        | Change workspace                      |
 | Super+Shift+Q       | Leave the desktop                     |
-| Print Screen        | Copy the screen to the clipboard      |
+| Print Screen        | Save the screen, and copy it          |
+| Alt+Print Screen    | The same, of the focused window       |
+| Shift+Print Screen  | Choose an area or window to save (also Super+Shift+S) |
 
 ## Tests
 

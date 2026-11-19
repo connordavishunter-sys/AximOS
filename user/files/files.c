@@ -19,14 +19,16 @@
 #define ANSWER "##answer"
 #define SEARCH "Search##search"
 #define PLACES "##places"
-#define PLACE_COUNT 6
+#define PLACE_COUNT 7
+#define RECENT "recent" // the place listing the files opened lately, which no path can be
 #define SIDEBAR 120
 #define CUT "/tmp/files-cut" // the paths on the clipboard, when they were cut, to move them
 #define KEY_F2 (KEY_F1 + 1)
 #define KEY_F5 (KEY_F1 + 4)
 #define DRAG_DISTANCE 6 // the mouse goes, held on an item, before it's dragged
 
-// In the trash, an entry's name is its random one there, and it shows the one it had.
+// In the trash, an entry's name is its random one there, and it shows the one it
+// had. In Recent, its name is its whole path.
 struct entry {
     char name[NAME_MAX + 1], shown[NAME_MAX + 1];
     bool folder;
@@ -59,7 +61,7 @@ static bool show_hidden;
 static char search[NAME_MAX + 1];
 
 // The places down the side.
-static const char *const place_names[PLACE_COUNT] = {"Home", "Desktop", "Documents", "Pictures", "Computer", "Trash"};
+static const char *const place_names[PLACE_COUNT] = {"Home", "Desktop", "Documents", "Pictures", "Computer", "Trash", "Recent"};
 static char place_paths[PLACE_COUNT][PATH_MAX];
 
 // Each tab is a folder, and what was selected in it. The one shown is listed.
@@ -109,8 +111,15 @@ static bool in_trash(void) {
     return !strcmp(folder, GUI_TRASH);
 }
 
+static bool in_recent(void) {
+    return !strcmp(folder, RECENT);
+}
+
 static void path_of(char *out, const char *name) {
-    snprintf(out, PATH_MAX, "%s%s%s", folder, strcmp(folder, "/") ? "/" : "", name);
+    if (in_recent())
+        snprintf(out, PATH_MAX, "%s", name);
+    else
+        snprintf(out, PATH_MAX, "%s%s%s", folder, strcmp(folder, "/") ? "/" : "", name);
 }
 
 static int compare_entries(const void *a, const void *b) {
@@ -159,7 +168,8 @@ static void describe(void) {
     int picked[MAX_ENTRIES], n = chosen_items(picked);
 
     if (!count)
-        snprintf(status, sizeof(status), "%s is empty", in_trash() ? "The trash" : folder);
+        snprintf(status, sizeof(status), "%s", in_trash() ? "The trash is empty" : in_recent() ? "Nothing's been opened lately"
+                                                                                           : folder);
     else if (n > 1)
         snprintf(status, sizeof(status), "%d items chosen", n);
     else if (e->folder)
@@ -171,7 +181,10 @@ static void describe(void) {
 static void name_tab(struct tab *t) {
     const char *slash = strrchr(t->folder, '/');
 
-    snprintf(t->name, sizeof(t->name), "%s", !strcmp(t->folder, GUI_TRASH) ? "Trash" : slash && slash[1] ? slash + 1 : "/");
+    snprintf(t->name, sizeof(t->name), "%s", !strcmp(t->folder, GUI_TRASH) ? "Trash"
+                                           : !strcmp(t->folder, RECENT)    ? "Recent"
+                                           : slash && slash[1]             ? slash + 1
+                                                                           : "/");
 }
 
 static const struct gui_image *big_icon(const struct gui_image *icon) {
@@ -235,17 +248,63 @@ static void name_shown(struct entry *e) {
 
     if (in_trash() && gui_trash_origin(e->name, origin))
         snprintf(e->shown, sizeof(e->shown), "%s", strrchr(origin, '/') + 1);
+    else if (in_recent())
+        snprintf(e->shown, sizeof(e->shown), "%s", strrchr(e->name, '/') + 1);
     else
         snprintf(e->shown, sizeof(e->shown), "%s", e->name);
+}
+
+static bool listed(const char *select);
+
+// Fills in an entry for a path, if it's still there and shown, returning whether it is.
+static bool add_entry(const char *name) {
+    struct entry *e = &entries[count];
+    char full[PATH_MAX];
+    struct stat st;
+
+    snprintf(e->name, sizeof(e->name), "%s", name);
+    name_shown(e);
+    if ((e->shown[0] == '.' && !show_hidden) || !has(e->shown, search))
+        return false;
+    path_of(full, e->name);
+    if (stat(full, &st) < 0) {
+        if (in_recent()) // gone since
+            return false;
+        memset(&st, 0, sizeof(st));
+    }
+    e->folder = S_ISDIR(st.st_mode);
+    e->size = e->folder ? 0 : st.st_size;
+    e->modified = st.st_mtime;
+    count++;
+    return true;
+}
+
+// Recent, the files opened lately that are still there, newest first.
+static bool read_recent(const char *select) {
+    char paths[GUI_RECENT_MAX][GUI_PATH_MAX];
+    int n = gui_recent_list(paths, GUI_RECENT_MAX);
+
+    if (!in_recent())
+        search[0] = '\0';
+    snprintf(folder, PATH_MAX, "%s", RECENT);
+    name_tab(&tabs[current]);
+    count = 0;
+    for (int i = 0; i < n && count < MAX_ENTRIES; i++) {
+        if (strlen(paths[i]) <= NAME_MAX)
+            add_entry(paths[i]);
+    }
+    return listed(select);
 }
 
 // Lists a folder, going there in this tab, and choosing the entry called select if there is one.
 static bool read_folder(const char *path, const char *select) {
     char went[PATH_MAX];
-    DIR *dir = opendir(path);
+    DIR *dir;
     struct dirent *d;
 
-    if (!dir) {
+    if (!strcmp(path, RECENT))
+        return read_recent(select);
+    if (!(dir = opendir(path))) {
         snprintf(status, sizeof(status), "Can't open %s: %s", path, strerror(errno));
         return false;
     }
@@ -258,25 +317,16 @@ static bool read_folder(const char *path, const char *select) {
     name_tab(&tabs[current]);
     count = 0;
     while (count < MAX_ENTRIES && (d = readdir(dir))) {
-        struct entry *e = &entries[count];
-        char full[PATH_MAX];
-        struct stat st;
-
-        if (!strcmp(d->d_name, ".") || !strcmp(d->d_name, ".."))
-            continue;
-        snprintf(e->name, sizeof(e->name), "%s", d->d_name);
-        name_shown(e);
-        if ((e->shown[0] == '.' && !show_hidden) || !has(e->shown, search))
-            continue;
-        path_of(full, e->name);
-        e->folder = stat(full, &st) == 0 && S_ISDIR(st.st_mode);
-        e->size = e->folder ? 0 : st.st_size;
-        e->modified = st.st_mtime;
-        count++;
+        if (strcmp(d->d_name, ".") && strcmp(d->d_name, ".."))
+            add_entry(d->d_name);
     }
     closedir(dir);
     qsort(entries, count, sizeof(*entries), compare_entries);
+    return listed(select);
+}
 
+// Shows the entries listed, in this tab, choosing the one called select if there is one.
+static bool listed(const char *select) {
     printf("files: in %s:", folder);
     selected = 0;
     for (int i = 0; i < count; i++) {
@@ -383,6 +433,7 @@ static void open_in(const char *app) {
 
     path_of(path, chosen()->name);
     printf("files: opening %s in %s\n", path, app);
+    gui_recent_add(path);
     start_app(app, path, NULL);
 }
 
@@ -391,6 +442,7 @@ static void run_selected(void) {
 
     path_of(path, chosen()->name);
     printf("files: running %s\n", path);
+    gui_recent_add(path);
     start(path, NULL, NULL);
 }
 
@@ -689,7 +741,8 @@ static void sidebar(struct gui_ui *ui) {
     gui_column_begin(ui, SIDEBAR);
     if (gui_list_icons(ui, PLACES, place_names, place_icons, PLACE_COUNT, &at, PLACE_COUNT) && at >= 0) {
         remember();
-        mkdir(place_paths[at], 0755); // the trash, if nothing's been put there yet
+        if (strcmp(place_paths[at], RECENT))
+            mkdir(place_paths[at], 0755); // the trash, if nothing's been put there yet
         read_folder(place_paths[at], NULL);
     }
     if (gui_dropdown(ui, "##sort", sorts, 3, &by))
@@ -790,10 +843,12 @@ static void describe_properties(char *out, size_t n) {
                                          : icons[selected] == gui_icon("image") ? "Picture"
                                          : icons[selected] == gui_icon("audio") ? "Sound"
                                                                                 : "File");
-    if (!in_trash() || !gui_trash_origin(e->name, from))
-        snprintf(from, sizeof(from), "%s", folder);
-    else
+    if (in_recent() || (in_trash() && gui_trash_origin(e->name, from))) {
+        snprintf(from, sizeof(from), "%s", in_recent() ? path : from);
         *strrchr(from, '/') = '\0';
+    } else {
+        snprintf(from, sizeof(from), "%s", folder);
+    }
     snprintf(out, n, "Name:      %s\nKind:      %s\nSize:      %s\nChanged:   %s\n%s%s\nMode:      %c%c%c%c%c%c%c%c%c",
              e->shown, kind, size, when, in_trash() ? "From:      " : "In:        ", from[0] ? from : "/",
              st.st_mode & 0400 ? 'r' : '-', st.st_mode & 0200 ? 'w' : '-', st.st_mode & 0100 ? 'x' : '-',
@@ -881,7 +936,7 @@ static void context_menu(struct gui_ui *ui, struct gui_rect list) {
             copy_selected(false);
         if (gui_menu_item(ui, "Copy path"))
             copy_path();
-        if (gui_menu_item(ui, "Rename"))
+        if (!in_recent() && gui_menu_item(ui, "Rename"))
             ask(RENAMING);
         if (gui_menu_item(ui, "Delete"))
             dispose(TRASH);
@@ -891,6 +946,14 @@ static void context_menu(struct gui_ui *ui, struct gui_rect list) {
     } else if (in_trash()) {
         if (gui_menu_item(ui, "Empty trash"))
             ask(EMPTYING);
+        if (gui_menu_item(ui, "Refresh"))
+            refresh();
+    } else if (in_recent()) {
+        if (gui_menu_item(ui, "Clear recent")) {
+            gui_recent_clear();
+            printf("files: cleared recent\n");
+            refresh();
+        }
         if (gui_menu_item(ui, "Refresh"))
             refresh();
     } else {
@@ -922,7 +985,7 @@ static void list_keys(struct gui_ui *ui) {
         go_up();
     else if (gui_key(ui, KEY_F5))
         refresh();
-    else if (chosen() && gui_key(ui, KEY_F2) && !in_trash())
+    else if (chosen() && gui_key(ui, KEY_F2) && !in_trash() && !in_recent())
         ask(RENAMING);
     else if (chosen() && gui_key(ui, KEY_DELETE) && (shift || in_trash()))
         ask(DELETING);
@@ -930,7 +993,7 @@ static void list_keys(struct gui_ui *ui) {
         dispose(TRASH);
     else if (chosen() && (gui_shortcut(ui, 'c') || gui_shortcut(ui, 'x')) && !in_trash())
         copy_selected(gui_shortcut(ui, 'x'));
-    else if (gui_shortcut(ui, 'v') && !in_trash())
+    else if (gui_shortcut(ui, 'v') && !in_trash() && !in_recent())
         paste();
 }
 
@@ -1020,15 +1083,17 @@ static bool select_file(const char *path, int what) {
     snprintf(in, sizeof(in), "%.*s", (int)(slash - path), path);
     if (!read_folder(in[0] ? in : "/", slash + 1) || !count || strcmp(chosen()->name, slash + 1))
         return false;
-    ask(what);
+    if (what != NOTHING)
+        ask(what);
     return true;
 }
 
 // A window showing what's in folders, in tabs, to go about them and open what's there.
 int main(int argc, char **argv) {
-    help_option(argc, argv, "usage: files [folder | --rename file | --properties file]\n"
-                            "Opens a window showing what's in the folder, or the home folder, or asks\n"
-                            "for a file's new name or shows its properties.\n");
+    help_option(argc, argv, "usage: files [folder | --select file | --rename file | --properties file]\n"
+                            "Opens a window showing what's in the folder, or the home folder, or the\n"
+                            "file's folder with it selected, or asks for a file's new name or shows its\n"
+                            "properties.\n");
     if (!gui_connect()) {
         dprintf(STDERR_FILENO, "files: wm isn't running\n");
         return 1;
@@ -1050,13 +1115,16 @@ int main(int argc, char **argv) {
         snprintf(place_paths[i], PATH_MAX, "%s%s%s", home ? home : "", i ? "/" : "", i ? place_names[i] : "");
     snprintf(place_paths[4], PATH_MAX, "/");
     snprintf(place_paths[5], PATH_MAX, GUI_TRASH);
+    snprintf(place_paths[6], PATH_MAX, RECENT);
     app_count = gui_app_names(app_names, MAX_APPS);
     for (int i = 0; i < app_count; i++)
         apps[i] = app_names[i];
 
-    bool asked = argc > 2 && (!strcmp(argv[1], "--rename") || !strcmp(argv[1], "--properties"));
+    const char *option = argc > 2 ? argv[1] : "";
+    int what = !strcmp(option, "--rename") ? RENAMING : !strcmp(option, "--properties") ? PROPERTIES : NOTHING;
+    bool asked = what != NOTHING || !strcmp(option, "--select");
 
-    if (asked && !select_file(argv[2], !strcmp(argv[1], "--rename") ? RENAMING : PROPERTIES))
+    if (asked && !select_file(argv[2], what))
         dprintf(STDERR_FILENO, "files: there's no %s\n", argv[2]);
     else if (!asked && !read_folder(argc > 1 ? argv[1] : home ? home : "/", NULL))
         read_folder("/", NULL);

@@ -494,8 +494,8 @@ static bool send_key(int master, const struct key_event *key) {
     switch (key->code) {
     case KEY_UP: sequence = "\x1b[A"; break;
     case KEY_DOWN: sequence = "\x1b[B"; break;
-    case KEY_RIGHT: sequence = "\x1b[C"; break;
-    case KEY_LEFT: sequence = "\x1b[D"; break;
+    case KEY_RIGHT: sequence = key->modifiers & KEY_MOD_CTRL ? "\x1b[1;5C" : "\x1b[C"; break;
+    case KEY_LEFT: sequence = key->modifiers & KEY_MOD_CTRL ? "\x1b[1;5D" : "\x1b[D"; break;
     case KEY_HOME: sequence = "\x1b[H"; break;
     case KEY_END: sequence = "\x1b[F"; break;
     case KEY_INSERT: sequence = "\x1b[2~"; break;

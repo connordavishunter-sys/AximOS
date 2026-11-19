@@ -334,6 +334,20 @@ def bell(d, s):
     d.ellipse((7 * s, 0.5 * s, 9 * s, 2.5 * s), fill=grey)
 
 
+def quiet(d, s):
+    bell(d, s)
+    d.line((2 * s, 1.5 * s, 14.5 * s, 14 * s), fill=(0, 0, 0, 0), width=int(3 * s))
+    d.line((2 * s, 1.5 * s, 14.5 * s, 14 * s), fill=(150, 160, 180), width=int(1.4 * s))
+
+
+def clipboard(d, s):
+    grey = (150, 160, 180)
+    d.rounded_rectangle((2.5 * s, 2.5 * s, 13.5 * s, 15 * s), 1.5 * s, outline=grey, width=int(1.4 * s))
+    d.rounded_rectangle((5.5 * s, 1 * s, 10.5 * s, 4.5 * s), 1 * s, fill=grey)
+    for y in (7.5, 10, 12.5):
+        d.line((5 * s, y * s, 11 * s, y * s), fill=grey, width=int(1.2 * s))
+
+
 def palette_icon(d, s):
     d.ellipse((1 * s, 2 * s, 15 * s, 14 * s), fill=(235, 215, 180))
     d.ellipse((9.5 * s, 8.5 * s, 12.5 * s, 11.5 * s), fill=(0, 0, 0, 0))
@@ -358,7 +372,7 @@ for name, paint in (('folder', folder), ('file', page), ('text', lambda d, s: pa
                     ('image', picture_icon), ('program', program), ('audio', audio),
                     ('speaker', speaker), ('muted', muted), ('lock', padlock), ('reboot', restart),
                     ('shutdown', power), ('logout', log_out), ('network', bars), ('offline', offline),
-                    ('bell', bell)):
+                    ('bell', bell), ('quiet', quiet), ('clipboard', clipboard)):
     icon(paint).save(f'{SHARE}/icons/{name}.png', optimize=True)
 for name, paint in (('term', terminal), ('editor', editor), ('files', files), ('widgets', widgets),
                     ('guidemo', demo), ('fbdemo', squares), ('viewer', picture_icon), ('settings', gear), ('run', run),

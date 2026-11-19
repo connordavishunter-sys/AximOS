@@ -11,7 +11,8 @@
 
 #define BIN_DIR "/system/bin"
 #define MAX_LINE 1024
-#define HISTORY_SIZE 64
+#define HISTORY_SIZE 200
+#define HISTORY_FILE ".history" // in the home folder, which keeps it between sessions
 #define MAX_MATCHES 512
 #define CTRL(c) ((c) & 0x1F)
 
@@ -84,9 +85,9 @@ static void delete_range(size_t from, size_t to) {
     line_pos = from;
 }
 
-static void history_add(const char *text) {
+static bool history_add(const char *text) {
     if (text[0] == '\0' || (history_count > 0 && strcmp(history[history_count - 1], text) == 0))
-        return;
+        return false;
 
     if (history_count == HISTORY_SIZE) {
         free(history[0]);
@@ -97,6 +98,68 @@ static void history_add(const char *text) {
     char *copy = malloc(strlen(text) + 1);
     if (copy)
         history[history_count++] = strcpy(copy, text);
+    return copy;
+}
+
+static FILE *open_history(const char *mode) {
+    const char *home = getenv("HOME");
+    char path[256];
+
+    if (!home || !*home)
+        return NULL;
+    snprintf(path, sizeof(path), "%s/%s", strcmp(home, "/") ? home : "", HISTORY_FILE);
+    return fopen(path, mode);
+}
+
+// Reads what earlier sessions kept, writing it back shorter once it's twice what's kept.
+static void load_history(void) {
+    char text[MAX_LINE];
+    int lines = 0;
+    FILE *f = open_history("r");
+
+    if (!f)
+        return;
+    while (fgets(text, sizeof(text), f)) {
+        text[strcspn(text, "\n")] = '\0';
+        history_add(text);
+        lines++;
+    }
+    fclose(f);
+    if (lines > 2 * HISTORY_SIZE && (f = open_history("w"))) {
+        for (int i = 0; i < history_count; i++)
+            fprintf(f, "%s\n", history[i]);
+        fclose(f);
+    }
+}
+
+static void save_history(const char *text) {
+    FILE *f = open_history("a");
+
+    if (f) {
+        fprintf(f, "%s\n", text);
+        fclose(f);
+    }
+}
+
+// Where the word before or after the cursor starts or ends, words being split by spaces.
+static size_t word_before(void) {
+    size_t at = line_pos;
+
+    while (at > 0 && line[at - 1] == ' ')
+        at--;
+    while (at > 0 && line[at - 1] != ' ')
+        at--;
+    return at;
+}
+
+static size_t word_after(void) {
+    size_t at = line_pos;
+
+    while (at < line_len && line[at] == ' ')
+        at++;
+    while (at < line_len && line[at] != ' ')
+        at++;
+    return at;
 }
 
 static void clear_matches(void) {
@@ -322,11 +385,25 @@ static bool input_waiting(void) {
     return poll(&in, 1, 0) > 0;
 }
 
+// Alt+B and Alt+F move by words, Alt+D and Alt+Backspace delete them, and Ctrl
+// with the left and right arrows moves by words too.
 static void handle_escape(int *history_index, char *draft) {
-    if (read_key() != '[')
+    char c = read_key();
+
+    if (c == 'b' || c == 'f')
+        line_pos = c == 'b' ? word_before() : word_after();
+    else if (c == 'd')
+        delete_range(line_pos, word_after());
+    else if (c == 0x7F || c == '\b')
+        delete_range(word_before(), line_pos);
+    if (c != '[')
         return;
 
-    switch (read_key()) {
+    switch (c = read_key()) {
+    case '1': // 1;5C and 1;5D, the arrows with Ctrl
+        if (read_key() == ';' && read_key() == '5' && ((c = read_key()) == 'C' || c == 'D'))
+            line_pos = c == 'D' ? word_before() : word_after();
+        break;
     case 'A':
         history_move(history_index, draft, -1);
         break;
@@ -353,6 +430,59 @@ static void handle_escape(int *history_index, char *draft) {
             delete_range(line_pos, line_pos + 1);
         break;
     }
+}
+
+// Ctrl+R searches back through the history for what's typed, and again for an older
+// match. Enter runs the match, and any other key keeps it to edit, as does Escape.
+// Ctrl+G and Ctrl+C go back to the line as it was. Returns whether to run it.
+static bool search_history(int *history_index) {
+    char query[64] = "", shown[96], kept[MAX_LINE];
+    const char *was = prompt;
+    size_t length = 0;
+    int found = history_count;
+    bool run = false;
+
+    strcpy(kept, line);
+    for (;;) {
+        const char *match = found < history_count ? history[found] : "";
+
+        snprintf(shown, sizeof(shown), "(search '%s'): ", query);
+        prompt = shown;
+        prompt_len = strlen(shown);
+        set_line(match);
+        refresh();
+
+        char c = read_key();
+        int from = found;
+
+        if (c == CTRL('r'))
+            from--;
+        else if ((c == 0x7F || c == '\b') && length)
+            query[--length] = '\0', from = history_count;
+        else if (c >= 0x20 && c < 0x7F && length < sizeof(query) - 1)
+            query[length++] = c, query[length] = '\0', from = from < history_count ? from : history_count - 1;
+        else if (c == CTRL('g') || c == CTRL('c')) {
+            set_line(kept);
+            break;
+        } else {
+            if (c == '\x1b')
+                while (input_waiting())
+                    read_key();
+            run = c == '\n';
+            *history_index = found;
+            break;
+        }
+        // The newest match from there back that has what's typed.
+        for (from = from < history_count ? from : history_count - 1; from >= 0; from--) {
+            if (strstr(history[from], query))
+                break;
+        }
+        if (from >= 0)
+            found = from;
+    }
+    prompt = was;
+    prompt_len = strlen(was);
+    return run;
 }
 
 static bool edit(bool *interrupted) {
@@ -408,6 +538,16 @@ static bool edit(bool *interrupted) {
         case CTRL('k'):
             delete_range(line_pos, line_len);
             break;
+        case CTRL('w'):
+            delete_range(word_before(), line_pos);
+            break;
+        case CTRL('r'):
+            if (search_history(&history_index)) {
+                refresh();
+                printf("\n");
+                return true;
+            }
+            break;
         case CTRL('u'):
             delete_range(0, line_pos);
             break;
@@ -433,9 +573,15 @@ char *line_read(const char *text, const char *const *commands) {
     bool interrupted = false;
     int rows;
 
+    static bool loaded;
+
     prompt = text;
     prompt_len = strlen(text);
     extra_commands = commands;
+    if (!loaded) {
+        load_history();
+        loaded = true;
+    }
 
     // A program may have changed the resolution.
     if (termsize(&rows, &screen_cols) < 0 || screen_cols < 1)
@@ -462,6 +608,7 @@ char *line_read(const char *text, const char *const *commands) {
         errno = interrupted ? EINTR : 0;
         return NULL;
     }
-    history_add(line);
+    if (history_add(line))
+        save_history(line);
     return line;
 }
