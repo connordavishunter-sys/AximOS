@@ -3,6 +3,7 @@ import json, os, re, shutil, socket, subprocess, tempfile, time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BUILD = ROOT + '/build'
+OVMF = '/usr/share/edk2/x64/OVMF.4m.fd'
 WORK = tempfile.mkdtemp(prefix='aximos-test-')
 
 NAMED = {' ': 'spc', '/': 'slash', '.': 'dot', '-': 'minus', '\\': 'backslash', '=': 'equal', ',': 'comma',
@@ -100,7 +101,7 @@ class VM:
         drive = f'file={disk},format=raw' if disk else f'file={base_disk()},format=raw,snapshot=on'
         self.proc = subprocess.Popen(
             ['timeout', str(timeout), 'qemu-system-x86_64', '-accel', 'kvm', '-cpu', 'host', '-smp', str(smp), '-m', '256M',
-             '-M', 'q35,vmport=' + ('on' if vmmouse else 'off'), '-display', 'none', '-boot', 'd', '-cdrom', BUILD + '/aximos.iso',
+             '-M', 'q35,vmport=' + ('on' if vmmouse else 'off'), '-display', 'none', '-bios', OVMF, '-boot', 'd', '-cdrom', BUILD + '/aximos.iso',
              '-drive', drive + ',if=none,id=disk', '-device', 'ide-hd,drive=disk,bus=ide.1',
              '-netdev', 'user,id=net0' + net, '-device', 'e1000,netdev=net0',
              '-audiodev', 'none,id=snd0', '-device', 'ich9-intel-hda', '-device', 'hda-output,audiodev=snd0',

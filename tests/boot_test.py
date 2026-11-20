@@ -1,5 +1,5 @@
 """Checks the desktop starts at boot, behind its log-in screen, and that holding
-Shift starts the shell instead, whether the kernel sees it or only the BIOS did."""
+Shift starts the shell instead."""
 import time
 from vm import VM, check, finish
 
@@ -20,16 +20,4 @@ try:
 finally:
     v.close()
 
-# As a VM's window sends a held key once, Shift is pressed only until the kernel
-# starts, and never let go, so only the BIOS saw it.
-v = VM(desktop=True)
-try:
-    end = time.time() + 30
-    while 'kernel: started' not in v.raw() and time.time() < end:
-        v.shift(True)
-        time.sleep(0.05)
-    check('Shift held since the BIOS starts the shell', v.wait('init: Shift is held', 30), v.text())
-    check('and the prompt', v.wait('/$ ', 10), v.text())
-finally:
-    v.close()
 finish()

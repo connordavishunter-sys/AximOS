@@ -10,7 +10,7 @@ with the dash shell.
 
 ### Kernel
 
-- 64-bit, booted by [Limine](https://limine-bootloader.org) from BIOS or UEFI, on up to 64 CPUs
+- 64-bit, booted by [Limine](https://limine-bootloader.org) with UEFI, on up to 64 CPUs
 - Preemptive multitasking with processes and threads, `fork`, `exec`, signals and process groups
 - Virtual memory: demand-paged stacks, `mmap`, shared memory, and read-only ELF segments
   shared between processes
@@ -97,7 +97,7 @@ AximOS builds on Linux. You need:
 - GCC and binutils for x86-64
 - [Limine](https://limine-bootloader.org), installed in `/usr/share/limine`
 - `xorriso`, `mtools`, `curl` and the tz database (`/usr/share/zoneinfo`)
-- QEMU (`qemu-system-x86_64`) to run it, and OVMF (`/usr/share/edk2/x64/OVMF.4m.fd`) for UEFI
+- QEMU (`qemu-system-x86_64`) and OVMF, its UEFI firmware (`/usr/share/edk2/x64/OVMF.4m.fd`), to run it
 - Python 3 with Pillow and NumPy for the tests
 - `gperf`, `flex`, `bison` and `pkg-config` to build NetSurf
 
@@ -127,9 +127,7 @@ make run
 | Target             | What it does                                       |
 |--------------------|----------------------------------------------------|
 | `make run`         | Run what's built, on an AHCI drive                 |
-| `make run-uefi`    | The same, booting with UEFI                        |
 | `make run-ide`     | Run on the older (and slower) IDE controller       |
-| `make run-ide-uefi`| The same, booting with UEFI                        |
 | `make build-run`   | Rebuild what changed, then run                     |
 | `make test`        | Run the tests                                      |
 | `make clean`       | Delete everything built                            |

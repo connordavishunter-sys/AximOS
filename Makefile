@@ -108,7 +108,7 @@ install_stripped = strip -s -o $(BUILD)/stripped $(1) && mcopy -i $@ $(BUILD)/st
 # of sound to keep going with while a redraw holds that up, rather than about 46.
 AUDIO ?= pipewire
 AUDIO_OPTIONS := $(if $(filter pipewire,$(AUDIO)),$(comma)out.latency=100000)
-QEMU_BASE := qemu-system-x86_64 -accel kvm -accel tcg -cpu max -smp 4 -m 256M -serial stdio -boot d -cdrom $(ISO) \
+QEMU_BASE := qemu-system-x86_64 -accel kvm -accel tcg -cpu max -smp 4 -m 256M -serial stdio -bios $(OVMF) -boot d -cdrom $(ISO) \
 	-vga none -device VGA,vgamem_mb=64 -netdev user,id=net0 -device e1000,netdev=net0 \
 	-audiodev $(AUDIO),id=snd0$(AUDIO_OPTIONS) -device ich9-intel-hda -device hda-output,audiodev=snd0
 
@@ -117,7 +117,7 @@ QEMU := $(QEMU_BASE) -M pc -drive file=$(DISK),format=raw,if=ide,index=0
 QEMU_Q35 := $(QEMU_BASE) -M q35 -drive file=$(DISK),format=raw,if=none,id=disk \
 	-device ide-hd,drive=disk,bus=ide.1
 
-.PHONY: all help built run run-uefi run-ide run-ide-uefi build-run test clean
+.PHONY: all help built run run-ide build-run test clean
 
 # A recipe that fails leaves nothing behind that looks up to date.
 .DELETE_ON_ERROR:
@@ -292,15 +292,10 @@ $(ISO): $(KERNEL) limine.conf
 	rm -rf $(ISO_ROOT)
 	mkdir -p $(ISO_ROOT)/boot/limine $(ISO_ROOT)/EFI/BOOT
 	cp $(KERNEL) $(ISO_ROOT)/boot/
-	cp limine.conf $(LIMINE_DIR)/limine-bios.sys $(LIMINE_DIR)/limine-bios-cd.bin \
-		$(LIMINE_DIR)/limine-uefi-cd.bin $(ISO_ROOT)/boot/limine/
+	cp limine.conf $(LIMINE_DIR)/limine-uefi-cd.bin $(ISO_ROOT)/boot/limine/
 	cp $(LIMINE_DIR)/BOOTX64.EFI $(ISO_ROOT)/EFI/BOOT/
-	xorriso -as mkisofs -R -r -J -b boot/limine/limine-bios-cd.bin \
-		-no-emul-boot -boot-load-size 4 -boot-info-table -hfsplus \
-		-apm-block-size 2048 --efi-boot boot/limine/limine-uefi-cd.bin \
-		-efi-boot-part --efi-boot-image --protective-msdos-label \
-		$(ISO_ROOT) -o $@
-	limine bios-install $@
+	xorriso -as mkisofs -R -r -J --efi-boot boot/limine/limine-uefi-cd.bin \
+		-efi-boot-part --efi-boot-image --protective-msdos-label $(ISO_ROOT) -o $@
 
 # These run what's already built. make build-run rebuilds what changed first.
 built:
@@ -309,15 +304,9 @@ built:
 run: built
 	$(QEMU_Q35)
 
-run-uefi: built
-	$(QEMU_Q35) -bios $(OVMF)
-
 # The old IDE controller, which KVM makes much slower at writing.
 run-ide: built
 	$(QEMU)
-
-run-ide-uefi: built
-	$(QEMU) -bios $(OVMF)
 
 build-run: all
 	$(QEMU_Q35)
@@ -330,9 +319,7 @@ test: built
 help:
 	@echo "make                build whatever has changed (same as make all)"
 	@echo "make run            run what's already built, using AHCI"
-	@echo "make run-uefi       the same, booting with UEFI"
 	@echo "make run-ide        run what's already built, using the slower IDE controller"
-	@echo "make run-ide-uefi   the same, booting with UEFI"
 	@echo "make build-run      build whatever has changed, then run"
 	@echo "make test           run the tests in tests/ against what's already built"
 	@echo "make clean          delete everything that was built"
