@@ -1,5 +1,6 @@
 """Checks curl and NetSurf against a web server on the host: a page with a PNG and a
-JPEG in it shows in NetSurf's window, with both pictures, and it closes cleanly."""
+JPEG in it shows in NetSurf's window, with both pictures, which can be maximized, and it
+closes cleanly."""
 import http.server, os, threading, time
 from PIL import Image
 from vm import VM, WORK, check, finish
@@ -55,6 +56,12 @@ try:
             break
     check('NetSurf shows the page with its PNG', reds > 500, reds)
     check('and its JPEG', blues > 500, blues)
+
+    # Maximizing resizes its window, which is drawn again at the new size.
+    v.key('meta_l-up'); time.sleep(3)
+    w, h, px = v.screenshot()
+    check('it can be maximized', count(px, w, h, red) > 500 and count(px, w, h, lambda p: p == 0xFFFFFF) > 20000,
+          count(px, w, h, red))
     v.key('meta_l-q')
     check('and closes cleanly', v.wait('netsurf exited 0', 10, at), v.text(at))
     v.key('meta_l-shift-q'); time.sleep(1)

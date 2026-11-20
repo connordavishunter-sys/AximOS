@@ -81,3 +81,36 @@
  	return error;
  }
  
+--- a/netsurf/frontends/framebuffer/gui.h
++++ b/netsurf/frontends/framebuffer/gui.h
+@@ -55,7 +55,7 @@
+ 
+ extern struct gui_window *window_list;
+ 
+-void gui_resize(struct fbtk_widget_s *root, int width, int height);
++void fb_gui_resize(struct fbtk_widget_s *root, int width, int height);
+ 
+ #endif /* NETSURF_FB_GUI_H */
+ 
+--- a/netsurf/frontends/framebuffer/gui.c
++++ b/netsurf/frontends/framebuffer/gui.c
+@@ -2287,7 +2287,7 @@
+ 	return 0;
+ }
+ 
+-void gui_resize(fbtk_widget_t *root, int width, int height)
++void fb_gui_resize(fbtk_widget_t *root, int width, int height)
+ {
+ 	struct gui_window *gw;
+ 	nsfb_t *nsfb = fbtk_get_nsfb(root);
+--- a/netsurf/frontends/framebuffer/fbtk/event.c
++++ b/netsurf/frontends/framebuffer/fbtk/event.c
+@@ -248,7 +248,7 @@
+ 
+ 		case NSFB_EVENT_RESIZE:
+ 			/* Try to resize framebuffer */
+-			gui_resize(root,
++			fb_gui_resize(root,
+ 					event->value.resize.w,
+ 					event->value.resize.h);
+ 			break;
