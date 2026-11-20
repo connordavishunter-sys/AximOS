@@ -54,11 +54,9 @@ void gui_copy(struct gui_canvas *canvas, int x, int y, const struct gui_canvas *
                from->pixels + (long)(sy + row) * from->stride + sx, width * sizeof(uint32_t));
 }
 
-// Each glyph that's on the canvas, and of it only the rows and columns that are,
-// pixel by pixel when it isn't scaled.
-void gui_text(struct gui_canvas *canvas, int x, int y, const char *text, uint32_t color, int scale) {
-    if (font_text(canvas, x, y, text, color, scale))
-        return;
+// The bitmap font: each glyph that's on the canvas, and of it only the rows and
+// columns that are, pixel by pixel when it isn't scaled.
+static void bitmap_text(struct gui_canvas *canvas, int x, int y, const char *text, uint32_t color, int scale) {
 
     int width = GUI_CHAR_WIDTH * scale, height = GUI_CHAR_HEIGHT * scale;
     int first_row = y < 0 ? -y / scale : 0;
@@ -89,8 +87,36 @@ void gui_text(struct gui_canvas *canvas, int x, int y, const char *text, uint32_
     }
 }
 
+void gui_text(struct gui_canvas *canvas, int x, int y, const char *text, uint32_t color, int scale) {
+    if (!font_sans_text(canvas, x, y, text, color, scale))
+        bitmap_text(canvas, x, y, text, color, scale);
+}
+
+void gui_mono_text(struct gui_canvas *canvas, int x, int y, const char *text, uint32_t color, int scale) {
+    if (!font_text(canvas, x, y, text, color, scale))
+        bitmap_text(canvas, x, y, text, color, scale);
+}
+
+static int advance(unsigned char c, int scale) {
+    int width = font_sans_advance(c, scale);
+
+    return width >= 0 ? width : GUI_CHAR_WIDTH * scale;
+}
+
 int gui_text_width(const char *text, int scale) {
-    return (int)strlen(text) * GUI_CHAR_WIDTH * scale;
+    int width = 0;
+
+    for (; *text; text++)
+        width += advance((unsigned char)*text, scale);
+    return width;
+}
+
+size_t gui_text_fit(const char *text, size_t length, int width) {
+    size_t fits = 0;
+
+    for (int used = 0; fits < length && text[fits] && (used += advance((unsigned char)text[fits], 1)) <= width; fits++)
+        ;
+    return fits;
 }
 
 // How much of a pixel, from 0 to 256, is inside a rounded corner: the pixel x, y

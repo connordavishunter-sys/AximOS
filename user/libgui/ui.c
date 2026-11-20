@@ -120,6 +120,13 @@ static void text(struct gui_ui *ui, int x, int y, const char *s, uint32_t color,
     gui_text(&c, x - ui->layout.clip.x, y - ui->layout.clip.y, s, color, scale);
 }
 
+// Monospaced, for what's edited, where the cursor goes between columns.
+static void mono_text(struct gui_ui *ui, int x, int y, const char *s, uint32_t color) {
+    struct gui_canvas c = clipped(ui);
+
+    gui_mono_text(&c, x - ui->layout.clip.x, y - ui->layout.clip.y, s, color, 1);
+}
+
 // What a label shows: everything before any "##".
 static int shown_length(const char *label) {
     const char *hidden = strstr(label, "##");
@@ -127,13 +134,29 @@ static int shown_length(const char *label) {
     return hidden ? (int)(hidden - label) : (int)strlen(label);
 }
 
+// How wide a label is, as shown.
+static int label_width(const char *label) {
+    char shown[256];
+
+    snprintf(shown, sizeof(shown), "%.*s", shown_length(label), label);
+    return gui_text_width(shown, 1);
+}
+
 // Text cut to fit a width.
 static void draw_fitted(struct gui_ui *ui, int x, int y, int width, const char *s, int length, uint32_t color) {
+    char shown[256];
+
+    snprintf(shown, sizeof(shown), "%.*s", width > 0 ? (int)gui_text_fit(s, length, width) : 0, s);
+    text(ui, x, y, shown, color, 1);
+}
+
+// The same, monospaced.
+static void draw_fitted_mono(struct gui_ui *ui, int x, int y, int width, const char *s, int length, uint32_t color) {
     char shown[256];
     int fits = width / GUI_CHAR_WIDTH;
 
     snprintf(shown, sizeof(shown), "%.*s", length < fits ? length : fits > 0 ? fits : 0, s);
-    text(ui, x, y, shown, color, 1);
+    mono_text(ui, x, y, shown, color);
 }
 
 static void draw_label(struct gui_ui *ui, int x, int y, const char *label, uint32_t color) {
@@ -530,8 +553,8 @@ void gui_progress(struct gui_ui *ui, float fraction) {
 // A label centred in a button width by height, or as wide as the label if width is 0.
 bool gui_button_sized(struct gui_ui *ui, const char *label, int width, int height) {
     uint32_t id = id_of(label);
-    int label_width = shown_length(label) * GUI_CHAR_WIDTH;
-    struct gui_rect r = place(ui, width ? width : label_width + 2 * PADDING + 4, height ? height : FRAME_HEIGHT);
+    int shown = label_width(label);
+    struct gui_rect r = place(ui, width ? width : shown + 2 * PADDING + 4, height ? height : FRAME_HEIGHT);
     bool clicked = interact(ui, id, r);
     bool focused = focusable(ui, id);
 
@@ -539,7 +562,7 @@ bool gui_button_sized(struct gui_ui *ui, const char *label, int width, int heigh
     bool pressed = ui->active == id && ui->hot == id;
 
     round_fill(ui, r.x, r.y, r.width, r.height, ROUND, pressed ? ACCENT : ui->hot == id ? FRAME_HOT : FRAME);
-    draw_label(ui, r.x + (r.width - label_width) / 2, r.y + (r.height - GUI_CHAR_HEIGHT) / 2, label,
+    draw_label(ui, r.x + (r.width - shown) / 2, r.y + (r.height - GUI_CHAR_HEIGHT) / 2, label,
                pressed ? ON_ACCENT : TEXT);
     if (focused)
         draw_focus(ui, r);
@@ -579,7 +602,7 @@ bool gui_image_button(struct gui_ui *ui, const char *label, const struct gui_ima
     round_fill(ui, picture.x + 2, picture.y + 2, width + 2, height + 2, ROUND - 2, BACKGROUND);
     if (image)
         draw_image(ui, picture.x + 3, picture.y + 3, image);
-    draw_fitted(ui, r.x + (r.width - shown_length(label) * GUI_CHAR_WIDTH) / 2, r.y + picture.height + 4, r.width, label,
+    draw_fitted(ui, r.x + (r.width - label_width(label)) / 2, r.y + picture.height + 4, r.width, label,
                 shown_length(label), selected ? TEXT : DIM_TEXT);
     if (focused)
         draw_focus(ui, picture);
@@ -588,7 +611,7 @@ bool gui_image_button(struct gui_ui *ui, const char *label, const struct gui_ima
 
 bool gui_checkbox(struct gui_ui *ui, const char *label, bool *value) {
     uint32_t id = id_of(label);
-    struct gui_rect r = place(ui, CHECK_SIZE + 8 + shown_length(label) * GUI_CHAR_WIDTH, CHECK_SIZE);
+    struct gui_rect r = place(ui, CHECK_SIZE + 8 + label_width(label), CHECK_SIZE);
     bool toggled = interact(ui, id, r);
     bool focused = focusable(ui, id);
 
@@ -606,11 +629,11 @@ bool gui_checkbox(struct gui_ui *ui, const char *label, bool *value) {
 
 // The frame stretches, with the label after it as ImGui puts it.
 static void framed(struct gui_ui *ui, const char *label, int height, struct gui_rect *frame) {
-    int label_width = shown_length(label) * GUI_CHAR_WIDTH;
+    int shown = label_width(label);
     int width = room(ui);
     struct gui_rect r = place(ui, width, height);
 
-    *frame = (struct gui_rect){r.x, r.y, width - (label_width ? label_width + SPACING : 0), height};
+    *frame = (struct gui_rect){r.x, r.y, width - (shown ? shown + SPACING : 0), height};
     draw_label(ui, frame->x + frame->width + SPACING, r.y + PADDING, label, TEXT);
 }
 
@@ -1041,7 +1064,7 @@ static bool text_box(struct gui_ui *ui, const char *label, char *s, size_t size,
         memset(stars, '*', n);
         stars[n] = '\0';
     }
-    draw_fitted(ui, frame.x + PADDING, frame.y + PADDING, frame.width - 2 * PADDING, secret ? stars : s + first, 255,
+    draw_fitted_mono(ui, frame.x + PADDING, frame.y + PADDING, frame.width - 2 * PADDING, secret ? stars : s + first, 255,
                 TEXT);
     if (focused) {
         int caret = frame.x + PADDING + (int)(ui->text_cursor - first) * GUI_CHAR_WIDTH;
@@ -1140,7 +1163,7 @@ static void draw_code(struct gui_ui *ui, int x, int y, const char *s, const uint
         for (n = 0; i + n < length && kinds[i + n] == kinds[i] && n < (int)sizeof(run) - 1; n++)
             run[n] = s[i + n];
         run[n] = '\0';
-        text(ui, x + i * GUI_CHAR_WIDTH, y, run, theme->syntax[kinds[i] < GUI_SYNTAX_KINDS ? kinds[i] : 0], 1);
+        mono_text(ui, x + i * GUI_CHAR_WIDTH, y, run, theme->syntax[kinds[i] < GUI_SYNTAX_KINDS ? kinds[i] : 0]);
     }
 }
 
@@ -1450,7 +1473,7 @@ bool gui_code_area(struct gui_ui *ui, const char *label, char *s, size_t size, i
             char number[16];
 
             snprintf(number, sizeof(number), "%d", line);
-            text(ui, inner.x + gutter - 6 - gui_text_width(number, 1), y, number, r == row ? TEXT : DIM_TEXT, 1);
+            mono_text(ui, inner.x + gutter - 6 - (int)strlen(number) * GUI_CHAR_WIDTH, y, number, r == row ? TEXT : DIM_TEXT);
         }
 
         // A selected line break shows as a space at the end of its line.
@@ -1464,7 +1487,7 @@ bool gui_code_area(struct gui_ui *ui, const char *label, char *s, size_t size, i
         if (length > 0 && highlight)
             draw_code(ui, left, y, s + w->start + first, kinds + w->start + first, length);
         else if (length > 0)
-            draw_fitted(ui, left, y, fits * GUI_CHAR_WIDTH, s + w->start + first, length, TEXT);
+            draw_fitted_mono(ui, left, y, fits * GUI_CHAR_WIDTH, s + w->start + first, length, TEXT);
         line += ends_line;
     }
     if (focused) {
@@ -1831,8 +1854,9 @@ int gui_grid(struct gui_ui *ui, const char *label, const char *const *items, con
         struct gui_rect r = {inner.x + 2 + i % columns * CELL_WIDTH, inner.y + 2 + i / columns * CELL_HEIGHT - scroll->offset,
                              CELL_WIDTH - 4, CELL_HEIGHT - 4};
         const struct gui_image *image = images ? images[i] : NULL;
-        int length = (int)strlen(items[i]), fits = (r.width - 8) / GUI_CHAR_WIDTH;
-        int shown = length < fits ? length : fits;
+        char shown[256];
+
+        snprintf(shown, sizeof(shown), "%.*s", (int)gui_text_fit(items[i], strlen(items[i]), r.width - 8), items[i]);
 
         if (r.y >= inner.y + inner.height)
             break;
@@ -1851,8 +1875,7 @@ int gui_grid(struct gui_ui *ui, const char *label, const char *const *items, con
             round_fill(ui, r.x, r.y, r.width, r.height, ROUND_SMALL + 1, on ? ACCENT : FRAME_HOT);
         if (image)
             draw_image(ui, r.x + (r.width - image->width) / 2, r.y + 6 + (GUI_THUMBNAIL - image->height) / 2, image);
-        draw_fitted(ui, r.x + (r.width - shown * GUI_CHAR_WIDTH) / 2, r.y + GUI_THUMBNAIL + 10, shown * GUI_CHAR_WIDTH,
-                    items[i], shown, on ? ON_ACCENT : TEXT);
+        text(ui, r.x + (r.width - gui_text_width(shown, 1)) / 2, r.y + GUI_THUMBNAIL + 10, shown, on ? ON_ACCENT : TEXT, 1);
     }
     ui->layout.clip = was;
     if (focused)
@@ -1906,7 +1929,7 @@ void gui_menu_bar(struct gui_ui *ui) {
 
 bool gui_menu(struct gui_ui *ui, const char *label) {
     uint32_t id = id_of(label);
-    struct gui_rect r = {ui->bar_x, 0, shown_length(label) * GUI_CHAR_WIDTH + 2 * (PADDING + 3), FRAME_HEIGHT};
+    struct gui_rect r = {ui->bar_x, 0, label_width(label) + 2 * (PADDING + 3), FRAME_HEIGHT};
     bool is_over = over(ui, r);
 
     ui->bar_x += r.width;
@@ -1989,19 +2012,22 @@ bool gui_context_menu(struct gui_ui *ui, const char *label, struct gui_rect area
 // everything after it in the frame, and leaves the rest dimmed.
 int gui_dialog(struct gui_ui *ui, const char *message, const char *const *buttons, int count) {
     struct gui_rect all = whole(ui);
-    int lines = 1, widest = 0, row = 0, buttons_width = 0, result = 0;
+    int lines = 1, widest = 0, buttons_width = 0, result = 0;
 
-    for (const char *p = message; *p; p++, row++) {
-        if (*p == '\n') {
+    for (const char *p = message; *p; p++) {
+        if (*p == '\n')
             lines++;
-            row = -1;
-        }
-        widest = row + 1 > widest ? row + 1 : widest;
+    }
+    for (const char *line = message; *line; line += strcspn(line, "\n") + (line[strcspn(line, "\n")] == '\n')) {
+        char shown[256];
+
+        snprintf(shown, sizeof(shown), "%.*s", (int)strcspn(line, "\n"), line);
+        widest = gui_text_width(shown, 1) > widest ? gui_text_width(shown, 1) : widest;
     }
     for (int i = 0; i < count; i++)
-        buttons_width += (shown_length(buttons[i]) * GUI_CHAR_WIDTH + 24 > 80 ? shown_length(buttons[i]) * GUI_CHAR_WIDTH + 24 : 80) + SPACING;
+        buttons_width += (label_width(buttons[i]) + 24 > 80 ? label_width(buttons[i]) + 24 : 80) + SPACING;
 
-    int width = widest * GUI_CHAR_WIDTH > buttons_width ? widest * GUI_CHAR_WIDTH : buttons_width;
+    int width = widest > buttons_width ? widest : buttons_width;
     struct gui_rect r = {0, 0, width + 2 * 20 < 320 ? 320 : width + 2 * 20, lines * GUI_CHAR_HEIGHT + 2 * 20 + FRAME_HEIGHT + 16};
 
     r.x = (all.width - r.width) / 2;
@@ -2043,8 +2069,7 @@ int gui_dialog(struct gui_ui *ui, const char *message, const char *const *button
     int x = r.x + r.width - 20 + SPACING, y = r.y + r.height - 20 - FRAME_HEIGHT;
 
     for (int i = count - 1; i >= 0; i--) {
-        int label_width = shown_length(buttons[i]) * GUI_CHAR_WIDTH;
-        int w = label_width + 24 > 80 ? label_width + 24 : 80;
+        int shown = label_width(buttons[i]), w = shown + 24 > 80 ? shown + 24 : 80;
         struct gui_rect b = {x -= w + SPACING, y, w, FRAME_HEIGHT};
         bool is_over = contains(b, ui->mouse_x, ui->mouse_y);
 
@@ -2053,7 +2078,7 @@ int gui_dialog(struct gui_ui *ui, const char *message, const char *const *button
         if (is_over && ui->mouse_released && ui->dialog_choice == i)
             result = i + 1;
         round_fill(ui, b.x, b.y, b.width, b.height, ROUND, i == ui->dialog_choice ? ACCENT : is_over ? FRAME_HOT : FRAME);
-        draw_label(ui, b.x + (w - label_width) / 2, b.y + PADDING, buttons[i], i == ui->dialog_choice ? ON_ACCENT : TEXT);
+        draw_label(ui, b.x + (w - shown) / 2, b.y + PADDING, buttons[i], i == ui->dialog_choice ? ON_ACCENT : TEXT);
     }
     ui->layout.clip = was;
 
@@ -2133,7 +2158,7 @@ int gui_tabs(struct gui_ui *ui, const char *const *names, int count, int *active
         if (on_close)
             round_fill(ui, x.x, x.y, x.width, x.height, ROUND_SMALL, i == *active ? FRAME : SEPARATOR);
         if (closing)
-            text(ui, x.x + (TAB_CLOSE - GUI_CHAR_WIDTH) / 2, x.y, "x", on_close ? TEXT : DIM_TEXT, 1);
+            text(ui, x.x + (TAB_CLOSE - gui_text_width("x", 1)) / 2, x.y, "x", on_close ? TEXT : DIM_TEXT, 1);
     }
 
     struct gui_rect add = {4 + count * tab + 2, top + 4 + (TAB_BAR - plus) / 2, plus, plus - 4};
@@ -2143,7 +2168,7 @@ int gui_tabs(struct gui_ui *ui, const char *const *names, int count, int *active
     if (closing && ui->hot == id)
         round_fill(ui, add.x, add.y, add.width, add.height, ROUND_SMALL, FRAME_HOT);
     if (closing)
-        text(ui, add.x + (plus - GUI_CHAR_WIDTH) / 2, add.y + (add.height - GUI_CHAR_HEIGHT) / 2, "+", TEXT, 1);
+        text(ui, add.x + (plus - gui_text_width("+", 1)) / 2, add.y + (add.height - GUI_CHAR_HEIGHT) / 2, "+", TEXT, 1);
 
     for (int i = 0; i < ui->key_count; i++) {
         const struct key_event *k = &ui->keys[i];

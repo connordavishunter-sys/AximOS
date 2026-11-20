@@ -205,11 +205,16 @@ void gui_round_corners(struct gui_canvas *canvas, int x, int y, int width, int h
 // in from the corner.
 int gui_corner_coverage(int x, int y, int radius);
 
-// Text in the 8x16 font, scaled up by scale. Each character is 8 * scale wide.
+// Text 16 pixels high, scaled up by scale, in DejaVu Sans, each character as wide
+// as it is, or with sharp text, the 8x16 bitmap font. Monospaced text, for what's
+// in columns, has every character GUI_CHAR_WIDTH * scale wide.
 #define GUI_CHAR_WIDTH 8
 #define GUI_CHAR_HEIGHT 16
 void gui_text(struct gui_canvas *canvas, int x, int y, const char *text, uint32_t color, int scale);
+void gui_mono_text(struct gui_canvas *canvas, int x, int y, const char *text, uint32_t color, int scale);
 int gui_text_width(const char *text, int scale);
+// How many of the first length bytes of text fit in width, at scale 1.
+size_t gui_text_fit(const char *text, size_t length, int width);
 
 // Files by what they hold, each opened in an app the settings choose.
 enum { GUI_KIND_FOLDER, GUI_KIND_PICTURE, GUI_KIND_SOUND, GUI_KIND_PAGE, GUI_KIND_TEXT, GUI_KINDS };

@@ -779,7 +779,7 @@ static void draw_window(struct gui_canvas *c, const struct window *w, int ox, in
     title.width = right < 0 ? 0 : right < c->width ? right : c->width;
     gui_text(&title, w->x + 10 + ICON_SIZE - ox, text_y, w->title, w == focused ? ON_ACCENT : TITLE_TEXT_UNFOCUSED, 1);
     gui_fill_rounded(c, close.x - ox, close.y - oy, BUTTON_SIZE, BUTTON_SIZE, SMALL_RADIUS, CLOSE_COLOR);
-    gui_text(c, close.x + (BUTTON_SIZE - GUI_CHAR_WIDTH) / 2 - ox, text_y, "x", TITLE_TEXT, 1);
+    gui_text(c, close.x + (BUTTON_SIZE - gui_text_width("x", 1)) / 2 - ox, text_y, "x", TITLE_TEXT, 1);
     gui_fill_rounded(c, maximize.x - ox, maximize.y - oy, BUTTON_SIZE, BUTTON_SIZE, SMALL_RADIUS, BUTTON_COLOR);
     gui_fill(c, maximize.x + 4 - ox, maximize.y + 4 - oy, 8, 8, TITLE_TEXT);
     gui_fill(c, maximize.x + 5 - ox, maximize.y + 6 - oy, 6, 5, BUTTON_COLOR);
@@ -822,9 +822,8 @@ static struct rect taskbar_button(int index, int count) {
 // Text cut to fit a width, which is how titles go on the taskbar.
 static void fitted_text(struct gui_canvas *c, int x, int y, int width, const char *text, uint32_t color) {
     char shown[GUI_TITLE_MAX];
-    int fits = width / GUI_CHAR_WIDTH;
 
-    snprintf(shown, sizeof(shown), "%.*s", fits > 0 ? fits : 0, text);
+    snprintf(shown, sizeof(shown), "%.*s", width > 0 ? (int)gui_text_fit(text, strlen(text), width) : 0, text);
     gui_text(c, x, y, shown, color, 1);
 }
 
@@ -1664,7 +1663,7 @@ static void draw_quick(struct gui_canvas *c, struct rect p, int ox, int oy) {
         if (now_playing[0]) {
             char shown[GUI_TITLE_MAX + 16];
 
-            snprintf(shown, sizeof(shown), "%.*s", (p.width - 24) / GUI_CHAR_WIDTH, now_playing);
+            snprintf(shown, sizeof(shown), "%.*s", (int)gui_text_fit(now_playing, strlen(now_playing), p.width - 24), now_playing);
             gui_text(c, p.x + 12 - ox, m.y + 28 - oy, shown, TASKBAR_DIM_TEXT, 1);
         }
     }

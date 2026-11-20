@@ -26,6 +26,8 @@ with the dash shell.
 
 ### Desktop
 
+- Smooth text in DejaVu Sans, and DejaVu Sans Mono in the terminal, the editor and text
+  boxes, or the 8x16 bitmap font for those who'd rather have it sharp
 - **wm**, a compositing window manager: rounded, anti-aliased windows with shadows,
   resizing from every edge, snapping to halves and quarters, layouts on the maximize
   button, minimizing, four workspaces, Alt+Tab, and an overview of every window side by side

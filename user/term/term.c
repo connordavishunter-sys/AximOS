@@ -353,7 +353,7 @@ static void draw_cell(int r, int c) {
         bg = swap;
     }
     gui_fill(&window->canvas, x, y, CELL_WIDTH, CELL_HEIGHT, bg);
-    gui_text(&window->canvas, x, y, (char[]){(char)(cell.c & 0x7F), '\0'}, fg, 1);
+    gui_mono_text(&window->canvas, x, y, (char[]){(char)(cell.c & 0x7F), '\0'}, fg, 1);
     if (cursor && !focused) {
         gui_fill(&window->canvas, x, y, CELL_WIDTH, 1, fg);
         gui_fill(&window->canvas, x, y + CELL_HEIGHT - 1, CELL_WIDTH, 1, fg);
@@ -378,7 +378,7 @@ static uint32_t panel_colour(void) {
 }
 
 static void box_text(int x, int y, const char *s, uint32_t colour) {
-    gui_text(&window->canvas, x, y, s, colour, 1);
+    gui_mono_text(&window->canvas, x, y, s, colour, 1);
 }
 
 // The tabs, across the top when there's more than one, each with an x to close it.

@@ -8,74 +8,108 @@
 #define STBTT_STATIC
 #include <stb_truetype.h>
 
-// Text drawn smoothly from a TrueType font, sized so each character fills the
-// same 8x16 cell, times scale, as the bitmap font's, so nothing else moves. Only
-// monospaced fonts will do: one whose characters aren't all as wide is refused,
-// and the bitmap font used instead.
-#define FONT "/system/share/fonts/mono.ttf"
+// Text drawn smoothly from TrueType fonts, 16 pixels high, times scale, as the
+// bitmap font is. The monospaced one fills the bitmap font's 8 pixel wide cells, so
+// what's laid out in columns stays as it is, and only a font whose characters are
+// all as wide will do for it. DejaVu Sans is for everything else, each character
+// as wide as it is. Without a font, the bitmap one is used.
+#define MONO_FONT "/system/share/fonts/mono.ttf"
+#define SANS_FONT "/system/share/fonts/DejaVuSans.ttf"
+#define SANS_EM 13 // pixels to its em, which makes it look the size of the monospaced one
 #define MAX_FONT (4 * 1024 * 1024)
 #define MAX_SCALE 4
 
 struct glyph {
     uint8_t *coverage; // how much of each pixel the glyph covers, out of 255
-    int width, height, x, y; // where it goes from the cell's left edge and baseline
+    int width, height, x, y; // where it goes from the pen and the baseline
+    int advance;             // how far the pen goes after it
     bool made;
 };
 
 struct size {
     float scale;  // from font units to pixels
-    int baseline; // down from the top of the cell
+    int baseline; // down from the top of the line
     struct glyph glyphs[128];
 };
 
-bool font_smooth = true;
-static enum { UNTRIED, LOADED, FAILED } state;
-static stbtt_fontinfo font;
-static uint8_t *data;
-static struct size sizes[MAX_SCALE + 1];
+struct face {
+    const char *path;
+    bool mono;
+    enum { UNTRIED, LOADED, FAILED } state;
+    uint8_t *data;
+    stbtt_fontinfo info;
+    struct size sizes[MAX_SCALE + 1];
+};
 
-static bool load(void) {
-    int fd = open(FONT, O_RDONLY | O_CLOEXEC), advance, other, unused;
+bool font_smooth = true;
+static bool settings_read;
+static struct face faces[] = {{.path = MONO_FONT, .mono = true}, {.path = SANS_FONT}};
+
+static bool load(struct face *f) {
+    int fd = open(f->path, O_RDONLY | O_CLOEXEC), advance, other, unused;
     struct stat st;
     bool ok = fd >= 0 && fstat(fd, &st) == 0 && st.st_size > 0 && st.st_size <= MAX_FONT
-           && (data = malloc(st.st_size)) && read(fd, data, st.st_size) == st.st_size
-           && stbtt_InitFont(&font, data, stbtt_GetFontOffsetForIndex(data, 0));
+           && (f->data = malloc(st.st_size)) && read(fd, f->data, st.st_size) == st.st_size
+           && stbtt_InitFont(&f->info, f->data, stbtt_GetFontOffsetForIndex(f->data, 0));
 
     if (fd >= 0)
         close(fd);
-    if (ok) {
-        stbtt_GetCodepointHMetrics(&font, 'M', &advance, &unused);
-        stbtt_GetCodepointHMetrics(&font, 'i', &other, &unused);
+    if (ok && f->mono) {
+        stbtt_GetCodepointHMetrics(&f->info, 'M', &advance, &unused);
+        stbtt_GetCodepointHMetrics(&f->info, 'i', &other, &unused);
         ok = advance > 0 && advance == other;
     }
     if (!ok) {
-        free(data);
-        data = NULL;
+        free(f->data);
+        f->data = NULL;
     }
     return ok;
 }
 
-static struct size *size_of(int scale) {
-    struct size *s = &sizes[scale];
+// The face, if text is smooth and it could be loaded. The first time, the settings,
+// which say whether to use them, are loaded for programs that don't load them themselves.
+static struct face *face_for(bool mono, int scale) {
+    struct face *f = &faces[mono ? 0 : 1];
+
+    if (!settings_read) {
+        struct gui_settings settings;
+
+        settings_read = true;
+        gui_settings_load(&settings);
+    }
+    if (!font_smooth || scale < 1 || scale > MAX_SCALE)
+        return NULL;
+    if (f->state == UNTRIED)
+        f->state = load(f) ? LOADED : FAILED;
+    return f->state == LOADED ? f : NULL;
+}
+
+static struct size *size_of(struct face *f, int scale) {
+    struct size *s = &f->sizes[scale];
     int advance, unused, ascent, descent;
 
     if (s->scale)
         return s;
-    stbtt_GetCodepointHMetrics(&font, 'M', &advance, &unused);
-    stbtt_GetFontVMetrics(&font, &ascent, &descent, &unused);
-    s->scale = (float)(GUI_CHAR_WIDTH * scale) / advance;
-    // Centred in the cell's height, from the top of the tallest to the bottom of
+    stbtt_GetCodepointHMetrics(&f->info, 'M', &advance, &unused);
+    stbtt_GetFontVMetrics(&f->info, &ascent, &descent, &unused);
+    s->scale = f->mono ? (float)(GUI_CHAR_WIDTH * scale) / advance : stbtt_ScaleForMappingEmToPixels(&f->info, SANS_EM * scale);
+    // Centred in the line's height, from the top of the tallest to the bottom of
     // the lowest.
     s->baseline = (int)((GUI_CHAR_HEIGHT * scale - (ascent - descent) * s->scale) / 2 + ascent * s->scale + 0.5f);
     return s;
 }
 
-static const struct glyph *glyph_of(struct size *s, unsigned char c) {
-    struct glyph *g = &s->glyphs[c];
+static const struct glyph *glyph_of(struct face *f, struct size *s, unsigned char c) {
+    struct glyph *g = &s->glyphs[c < 128 ? c : '?'];
 
     if (!g->made) {
+        int advance, unused;
+
         g->made = true;
-        g->coverage = stbtt_GetCodepointBitmap(&font, s->scale, s->scale, c, &g->width, &g->height, &g->x, &g->y);
+        stbtt_GetCodepointHMetrics(&f->info, c, &advance, &unused);
+        g->advance = (int)(advance * s->scale + 0.5f);
+        if (c > ' ')
+            g->coverage = stbtt_GetCodepointBitmap(&f->info, s->scale, s->scale, c, &g->width, &g->height, &g->x, &g->y);
     }
     return g;
 }
@@ -93,45 +127,53 @@ static uint32_t blend(uint32_t under, uint32_t color, uint32_t a) {
          | ((((color & 0x00FF00) * a + (under & 0x00FF00) * keep) >> 8) & 0x00FF00);
 }
 
-// The first time, the font is loaded, and the settings, which say whether to use
-// it, for programs that don't load them themselves.
-bool font_text(struct gui_canvas *canvas, int x, int y, const char *text, uint32_t color, int scale) {
-    if (state == UNTRIED) {
-        struct gui_settings settings;
+static bool draw(bool mono, struct gui_canvas *canvas, int x, int y, const char *text, uint32_t color, int scale) {
+    struct face *f = face_for(mono, scale);
 
-        gui_settings_load(&settings);
-        state = load() ? LOADED : FAILED;
-    }
-    if (!font_smooth || state == FAILED || scale < 1 || scale > MAX_SCALE)
+    if (!f)
         return false;
 
-    struct size *s = size_of(scale);
-    int width = GUI_CHAR_WIDTH * scale;
+    struct size *s = size_of(f, scale);
 
     if (y >= canvas->height || y + GUI_CHAR_HEIGHT * scale <= 0)
         return true;
-    for (; *text && x < canvas->width; text++, x += width) {
+    for (; *text && x < canvas->width; text++) {
         unsigned char c = (unsigned char)*text < 128 ? (unsigned char)*text : '?';
-        const struct glyph *g = c > ' ' ? glyph_of(s, c) : NULL;
+        const struct glyph *g = glyph_of(f, s, c);
 
-        if (!g || !g->coverage || x + width <= 0)
-            continue;
-        for (int row = 0; row < g->height; row++) {
-            int py = y + s->baseline + g->y + row;
+        if (g->coverage && x + g->x + g->width > 0) {
+            for (int row = 0; row < g->height; row++) {
+                int py = y + s->baseline + g->y + row;
 
-            if (py < 0 || py >= canvas->height)
-                continue;
+                if (py < 0 || py >= canvas->height)
+                    continue;
 
-            uint32_t *line = canvas->pixels + (long)py * canvas->stride;
-            const uint8_t *cover = g->coverage + row * g->width;
+                uint32_t *line = canvas->pixels + (long)py * canvas->stride;
+                const uint8_t *cover = g->coverage + row * g->width;
 
-            for (int col = 0; col < g->width; col++) {
-                int px = x + g->x + col;
+                for (int col = 0; col < g->width; col++) {
+                    int px = x + g->x + col;
 
-                if (cover[col] && px >= 0 && px < canvas->width)
-                    line[px] = cover[col] == 255 ? color : blend(line[px], color, cover[col]);
+                    if (cover[col] && px >= 0 && px < canvas->width)
+                        line[px] = cover[col] == 255 ? color : blend(line[px], color, cover[col]);
+                }
             }
         }
+        x += mono ? GUI_CHAR_WIDTH * scale : g->advance;
     }
     return true;
+}
+
+bool font_text(struct gui_canvas *canvas, int x, int y, const char *text, uint32_t color, int scale) {
+    return draw(true, canvas, x, y, text, color, scale);
+}
+
+bool font_sans_text(struct gui_canvas *canvas, int x, int y, const char *text, uint32_t color, int scale) {
+    return draw(false, canvas, x, y, text, color, scale);
+}
+
+int font_sans_advance(unsigned char c, int scale) {
+    struct face *f = face_for(false, scale);
+
+    return f ? glyph_of(f, size_of(f, scale), c < 128 ? c : '?')->advance : -1;
 }

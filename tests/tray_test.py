@@ -5,11 +5,13 @@ notifications until cleared."""
 import re, time
 from vm import VM, check, finish
 
-# The clock, 5 letters 8 wide, ends 12 from the right of the taskbar, 32 tall and 8 from the edges.
-# 8 before it is the bell, 24 wide, and 2 before that the network and speaker together, 44 wide.
+# The clock, 36 wide in DejaVu Sans (four digits 8 wide and a colon 4), ends 12 from the right
+# of the taskbar, 32 tall and 8 from the edges. 8 before it is the bell, 24 wide, and 2 before
+# that the network and speaker together, 44 wide.
 W, H = 1280, 800
 BAR = 32
-BELL = (W - 8 - 40 - 12 - 8 - 24, H - 8 - BAR + 4)
+CLOCK = 36
+BELL = (W - 8 - CLOCK - 12 - 8 - 24, H - 8 - BAR + 4)
 QUICK = (BELL[0] - 2 - 44, BELL[1])
 DESKTOP = 0x1E2430
 
