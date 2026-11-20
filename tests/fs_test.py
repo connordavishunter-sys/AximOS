@@ -39,6 +39,8 @@ try:
     v.run('mkdir /gone; rmdir /gone')
     o = v.run('ls /'); check('rmdir', 'gone' not in o, o)
     o = v.run('rmdir /d1'); check('rmdir refuses a full directory', 'not empty' in o.lower(), o)
+    o = v.run('mkdir -p /p/q/r && mkdir -p /p/q && echo made; ls /p/q'); check('mkdir -p makes the folders along the way', 'made\nr/\n' in o, o)
+    o = v.run('mkdir /p; rm -r /p'); check('but plain mkdir says it is there', 'exists' in o.lower(), o)
 
     o = v.run('ls /'); check('journal hidden from ls', '.metadata' not in o, o)
     o = v.run('ls -a /'); check('ls -a shows the journal', '.metadata' in o, o)

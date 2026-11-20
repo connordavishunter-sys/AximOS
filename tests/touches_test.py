@@ -31,7 +31,7 @@ v = VM(vmmouse=True)
 try:
     check('prompt at boot', v.wait('/$ ', 30), v.text())
     v.run('echo none > /system/etc/wallpaper; rm -f /system/etc/gui.conf; '
-          'mkdir /tmp/s /tmp/s/a /tmp/s/a/b; echo x > /tmp/s/a/b/deep-note.txt; echo x > /tmp/s/top-note.txt; echo x > /tmp/s/other.txt')
+          'mkdir -p /tmp/s/a/b; echo x > /tmp/s/a/b/deep-note.txt; echo x > /tmp/s/top-note.txt; echo x > /tmp/s/other.txt')
 
     def click(x, y):
         v.pointer(x, y, 1); v.pointer(x, y, 0)
