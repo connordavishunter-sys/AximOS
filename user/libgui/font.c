@@ -80,13 +80,16 @@ static const struct glyph *glyph_of(struct size *s, unsigned char c) {
     return g;
 }
 
-// Mixes color over a pixel by a out of 255, as 256ths so it's a shift.
+// Mixes color over a pixel by a out of 255, as 256ths so it's a shift. The top
+// bytes, how see-through each is in a translucent window, mix too, so the edges of
+// letters show as much of what's behind as the background around them.
 static uint32_t blend(uint32_t under, uint32_t color, uint32_t a) {
     uint32_t keep;
 
     a += a >> 7;
     keep = 256 - a;
-    return ((((color & 0xFF00FF) * a + (under & 0xFF00FF) * keep) >> 8) & 0xFF00FF)
+    return ((((color >> 24) * a + (under >> 24) * keep) >> 8) << 24)
+         | ((((color & 0xFF00FF) * a + (under & 0xFF00FF) * keep) >> 8) & 0xFF00FF)
          | ((((color & 0x00FF00) * a + (under & 0x00FF00) * keep) >> 8) & 0x00FF00);
 }
 
