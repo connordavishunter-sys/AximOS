@@ -58,6 +58,7 @@ ZONES := $(BUILD)/zoneinfo
 
 # Programs from elsewhere, built by ports/build.sh.
 DASH := $(BUILD)/ports/dash-0.5.12/src/dash
+LUA := $(BUILD)/ports/lua-5.4.7/src/lua
 MBEDTLS := $(BUILD)/ports/mbedtls-3.6.7
 MBEDTLS_LIBS := $(MBEDTLS)/library/libmbedtls.a $(MBEDTLS)/library/libmbedx509.a $(MBEDTLS)/library/libmbedcrypto.a
 
@@ -234,12 +235,15 @@ $(MBEDTLS_LIBS) &: $(LIBC) $(CRT0) ports/build.sh ports/aximos-cc ports/mbedtls_
 $(DASH): $(LIBC_SO) $(CRT0) ports/build.sh ports/aximos-cc ports/dash.patch
 	ports/build.sh dash
 
+$(LUA): $(LIBC_SO) $(CRT0) ports/build.sh ports/aximos-cc ports/lua_aximos.h
+	ports/build.sh lua
+
 $(ZONES):
 	mkdir -p $@
 	tar -C $(ZONEINFO) -chf - --exclude=./posix --exclude=./right . | tar -C $@ -xf -
 	find $@ -type f | while read -r f; do [ "$$(head -c 4 "$$f")" = TZif ] || rm "$$f"; done
 
-$(DISK): $(PROGRAM_ELFS) $(LIBC_SO) $(LIBGUI_SO) $(LIBAUDIO_SO) $(LIBOGG_SO) $(CODEC_SOS) $(ROOTFS_FILES) $(DASH) \
+$(DISK): $(PROGRAM_ELFS) $(LIBC_SO) $(LIBGUI_SO) $(LIBAUDIO_SO) $(LIBOGG_SO) $(CODEC_SOS) $(ROOTFS_FILES) $(DASH) $(LUA) \
 		| $(ZONES)
 	rm -f $@
 	mkfs.fat -F 32 -C $@ $$(($(DISK_SIZE_MB) * 1024))
@@ -254,6 +258,7 @@ $(DISK): $(PROGRAM_ELFS) $(LIBC_SO) $(LIBGUI_SO) $(LIBAUDIO_SO) $(LIBOGG_SO) $(C
 	for p in $(filter-out init $(GUI_APPS),$(PROGRAMS)); do $(call install_stripped,$(BUILD)/user/$$p.elf,/system/bin/$$p); done
 	$(foreach p,$(GUI_APPS),$(call install_stripped,$(BUILD)/user/$(p).elf,/system/bin/gui/$(strip $(call app_dir,$(p)))$(p)) &&) true
 	$(call install_stripped,$(DASH),/system/bin/dash)
+	$(call install_stripped,$(LUA),/system/bin/lua)
 	rm $(BUILD)/stripped
 
 $(ISO): $(KERNEL) limine.conf

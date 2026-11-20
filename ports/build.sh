@@ -67,6 +67,13 @@ dash)
 	rm -f src/dash
 	make -j"$(nproc)" CC_FOR_BUILD=gcc
 	;;
+lua)
+	fetch https://www.lua.org/ftp lua-5.4.7.tar.gz 9fbf5e28ef86c69858f6d3d34eccc32e911c1a28b4120ff3e84aaa70cfbf1e30
+	[ -d lua-5.4.7 ] || tar xf "$root/ports/dist/lua-5.4.7.tar.gz"
+	rm -f lua-5.4.7/src/lua
+	make -j"$(nproc)" -C lua-5.4.7/src generic CC="$cc" MYCFLAGS="-include $root/ports/lua_aximos.h" \
+		SYSCFLAGS=-DLUA_USE_POSIX
+	;;
 ogg)
 	fetch https://downloads.xiph.org/releases/ogg libogg-1.3.6.tar.xz \
 		5c8253428e181840cd20d41f3ca16557a9cc04bad4a3d04cce84808677fa1061

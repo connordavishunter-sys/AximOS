@@ -231,6 +231,7 @@ struct gui_settings {
     bool airplane;      // the network card sends and takes nothing
     bool animations;    // windows grow in, shrink away, and minimize to the taskbar
     bool quiet;         // do not disturb: notifications go straight to the tray, without showing
+    bool sounds;        // wm's own: a chime for notifications, logging in and out, the volume
 };
 
 // The accent colours there are, as Settings names them, and what goes on each.

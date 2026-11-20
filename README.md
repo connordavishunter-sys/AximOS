@@ -27,8 +27,8 @@ with the dash shell.
 ### Desktop
 
 - **wm**, a compositing window manager: rounded, anti-aliased windows with shadows,
-  resizing from every edge, snapping and tiling, minimizing, four workspaces, Alt+Tab, and
-  an overview of every window side by side
+  resizing from every edge, snapping to halves and quarters, layouts on the maximize
+  button, minimizing, four workspaces, Alt+Tab, and an overview of every window side by side
 - Resting the mouse on a taskbar button shows a live copy of its window
 - Windows grow and fade in as they open, shrink away as they close, and fly to and
   from their taskbar buttons when minimized and restored, and move smoothly into place
@@ -44,6 +44,8 @@ with the dash shell.
   volume), the network, notifications, a calendar, and the clipboard's history, to put
   back something copied earlier
 - Notifications that can carry a button, and stack up when one app sends several
+- Soft sounds of its own for notifications, logging in and out, the volume and
+  screenshots, made as they play, which Settings can turn off
 - Screenshots of the screen, a window, or an area dragged across, saved to Pictures
   and copied
 - Desktop icons on a grid, drag and drop between apps, and a clipboard for text and pictures
@@ -59,7 +61,7 @@ with the dash shell.
 
 | App        | What it does                                                          |
 |------------|-----------------------------------------------------------------------|
-| Files      | File manager: places, recent files, tabs, multi-select, thumbnails, Open with, and a trash you can restore from |
+| Files      | File manager: places, recent files, search through folders, tabs, multi-select, thumbnails, Open with, and a trash you can restore from |
 | Terminal   | Tabs, scrollback, selection, find, and a see-through background       |
 | Editor     | Tabs, find and replace, go to line, colouring for C and shell scripts |
 | Paint      | Pencil, shapes, fill, text, selections, zoom, undo and redo           |
@@ -74,13 +76,13 @@ with the dash shell.
 
 `dash`, plus `ls cat cp mv rm mkdir rmdir touch rename stat find grep sort head
 tail wc more du df free ps top kill date tz sleep env echo clear`, network tools
-(`net ping host nc fetch`, where `fetch` speaks HTTPS through mbedTLS), `volume`,
+(`net ping host nc fetch`, where `fetch` speaks HTTPS through mbedTLS), `lua` (Lua 5.4), `volume`,
 `convert` for audio files, `notify`, `text` (an editor in the terminal) and `axfetch`.
 Run any of them with `--help`.
 
 At the prompt, the arrow keys, Home and End, Tab completion, Ctrl+W and Ctrl+arrows (or
 Alt+B, Alt+F and Alt+D) edit the line, and Ctrl+R searches the history, which is kept
-in `~/.history`.
+in `~/.history`. Lua's prompt edits lines the same way.
 
 ## Building
 
@@ -105,7 +107,7 @@ make
 ```
 
 This builds `build/aximos.iso` (the kernel and bootloader) and `build/disk.img` (a 512 MB
-FAT32 disk with everything else). The first build downloads the source of dash, mbedTLS,
+FAT32 disk with everything else). The first build downloads the source of dash, Lua, mbedTLS,
 stb_truetype and the audio codecs into `ports/dist`, checks their SHA-256 sums, and builds
 them against AximOS's own libc.
 
@@ -143,7 +145,7 @@ username and password.
 | Alt+Tab             | Switch windows                        |
 | Super+Tab           | See every window, and pick one        |
 | Super+Q             | Close the window                      |
-| Super+arrows        | Maximize, or tile to a side           |
+| Super+arrows        | Maximize, or tile to a side, then Up or Down for a quarter |
 | Super+1 to 4        | Change workspace                      |
 | Super+Shift+Q       | Leave the desktop                     |
 | Print Screen        | Save the screen, and copy it          |
@@ -173,7 +175,7 @@ user/libaudio/   reading and writing sound files, through user/codecs/
 user/wm/         the window manager
 user/<name>/     every other folder is a program
 rootfs/          copied onto the disk as it is: settings, icons, fonts, wallpapers
-ports/           downloads and builds dash, mbedTLS, stb_truetype and the codecs
+ports/           downloads and builds dash, Lua, mbedTLS, stb_truetype and the codecs
 tests/           the tests, and vm.py, which drives QEMU for them
 ```
 
@@ -188,7 +190,7 @@ AximOS is developed and tested in QEMU. It hasn't been tried on real hardware ye
 ## Credits
 
 AximOS uses [Limine](https://github.com/limine-bootloader/limine),
-[dash](http://gondor.apana.org.au/~herbert/dash/),
+[dash](http://gondor.apana.org.au/~herbert/dash/), [Lua](https://www.lua.org),
 [Mbed TLS](https://github.com/Mbed-TLS/mbedtls),
 [stb_truetype](https://github.com/nothings/stb), the
 [DejaVu](https://dejavu-fonts.github.io) fonts, and for sound

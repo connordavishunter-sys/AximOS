@@ -12,7 +12,6 @@
 #define BIN_DIR "/system/bin"
 #define MAX_LINE 1024
 #define HISTORY_SIZE 200
-#define HISTORY_FILE ".history" // in the home folder, which keeps it between sessions
 #define MAX_MATCHES 512
 #define CTRL(c) ((c) & 0x1F)
 
@@ -31,6 +30,7 @@ static int screen_cols = 80;
 static int cursor_row;
 
 static char *history[HISTORY_SIZE];
+static const char *history_file = ".history"; // in the home folder, which keeps it between sessions
 static int history_count;
 
 struct match {
@@ -107,7 +107,7 @@ static FILE *open_history(const char *mode) {
 
     if (!home || !*home)
         return NULL;
-    snprintf(path, sizeof(path), "%s/%s", strcmp(home, "/") ? home : "", HISTORY_FILE);
+    snprintf(path, sizeof(path), "%s/%s", strcmp(home, "/") ? home : "", history_file);
     return fopen(path, mode);
 }
 
@@ -563,6 +563,10 @@ static bool edit(bool *interrupted) {
         last_was_tab = is_tab;
         refresh();
     }
+}
+
+void line_history(const char *file) {
+    history_file = file;
 }
 
 char *line_read(const char *text, const char *const *commands) {

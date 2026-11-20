@@ -483,6 +483,9 @@ static void sound(struct gui_ui *ui) {
         gui_settings_changed();
     }
     close(mixer);
+    if (gui_checkbox(ui, "System sounds", &settings.sounds))
+        save(settings.sounds ? "sounds on" : "sounds off");
+    report(ui, 31, "sounds");
     gui_separator(ui);
     char player[GUI_PATH_MAX];
 

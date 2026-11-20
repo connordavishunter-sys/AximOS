@@ -48,7 +48,7 @@ static const char *const help = "Enter         Open\n"
                                 "Delete        Move to the trash\n"
                                 "Shift+Delete  Delete for good\n"
                                 "F5            Refresh\n"
-                                "Ctrl+F        Search this folder\n"
+                                "Ctrl+F        Search this folder and those in it\n"
                                 "Ctrl+H        Show hidden files\n"
                                 "Ctrl+Q        Quit\n"
                                 "F1            This help";
@@ -150,6 +150,12 @@ static const struct entry *chosen(void) {
     return count ? &entries[selected] : NULL;
 }
 
+// Only what's in the folder shown can be renamed there, not what Recent or a search
+// found elsewhere.
+static bool can_rename(void) {
+    return !in_recent() && chosen() && !strchr(chosen()->name, '/');
+}
+
 // What's chosen, by index: those marked, or else the selected one.
 static int chosen_items(int out[MAX_ENTRIES]) {
     int n = 0;
@@ -168,8 +174,10 @@ static void describe(void) {
     int picked[MAX_ENTRIES], n = chosen_items(picked);
 
     if (!count)
-        snprintf(status, sizeof(status), "%s", in_trash() ? "The trash is empty" : in_recent() ? "Nothing's been opened lately"
-                                                                                           : folder);
+        snprintf(status, sizeof(status), "%s", in_trash()    ? "The trash is empty"
+                                             : in_recent() ? "Nothing's been opened lately"
+                                             : search[0]   ? "Nothing here or in its folders has that in its name"
+                                                           : folder);
     else if (n > 1)
         snprintf(status, sizeof(status), "%d items chosen", n);
     else if (e->folder)
@@ -264,7 +272,9 @@ static bool add_entry(const char *name) {
 
     snprintf(e->name, sizeof(e->name), "%s", name);
     name_shown(e);
-    if ((e->shown[0] == '.' && !show_hidden) || !has(e->shown, search))
+    const char *base = strrchr(e->shown, '/') ? strrchr(e->shown, '/') + 1 : e->shown;
+
+    if ((base[0] == '.' && !show_hidden) || !has(base, search))
         return false;
     path_of(full, e->name);
     if (stat(full, &st) < 0) {
@@ -296,6 +306,30 @@ static bool read_recent(const char *select) {
     return listed(select);
 }
 
+// Searching looks in the folders inside too, as far as SEARCH_DEPTH down, listing
+// what it finds by its path from here. /proc and /dev are left out.
+#define SEARCH_DEPTH 8
+static void search_below(const char *inside, int depth) {
+    char path[PATH_MAX], name[PATH_MAX];
+    DIR *dir;
+    struct dirent *d;
+
+    path_of(path, inside);
+    if (depth > SEARCH_DEPTH || !strcmp(path, "/proc") || !strcmp(path, "/dev") || !(dir = opendir(path)))
+        return;
+    while (count < MAX_ENTRIES && (d = readdir(dir))) {
+        if (!strcmp(d->d_name, ".") || !strcmp(d->d_name, "..") || (d->d_name[0] == '.' && !show_hidden))
+            continue;
+        snprintf(name, sizeof(name), "%s%s%s", inside, *inside ? "/" : "", d->d_name);
+        if (strlen(name) > NAME_MAX)
+            continue;
+        add_entry(name);
+        if (d->d_type == DT_DIR)
+            search_below(name, depth + 1);
+    }
+    closedir(dir);
+}
+
 // Lists a folder, going there in this tab, and choosing the entry called select if there is one.
 static bool read_folder(const char *path, const char *select) {
     char went[PATH_MAX];
@@ -316,7 +350,9 @@ static bool read_folder(const char *path, const char *select) {
     snprintf(folder, PATH_MAX, "%s", went);
     name_tab(&tabs[current]);
     count = 0;
-    while (count < MAX_ENTRIES && (d = readdir(dir))) {
+    if (search[0] && !in_trash())
+        search_below("", 0);
+    while (!search[0] && count < MAX_ENTRIES && (d = readdir(dir))) {
         if (strcmp(d->d_name, ".") && strcmp(d->d_name, ".."))
             add_entry(d->d_name);
     }
@@ -843,8 +879,8 @@ static void describe_properties(char *out, size_t n) {
                                          : icons[selected] == gui_icon("image") ? "Picture"
                                          : icons[selected] == gui_icon("audio") ? "Sound"
                                                                                 : "File");
-    if (in_recent() || (in_trash() && gui_trash_origin(e->name, from))) {
-        snprintf(from, sizeof(from), "%s", in_recent() ? path : from);
+    if (!in_trash() || gui_trash_origin(e->name, from)) {
+        snprintf(from, sizeof(from), "%s", in_trash() ? from : path);
         *strrchr(from, '/') = '\0';
     } else {
         snprintf(from, sizeof(from), "%s", folder);
@@ -936,7 +972,7 @@ static void context_menu(struct gui_ui *ui, struct gui_rect list) {
             copy_selected(false);
         if (gui_menu_item(ui, "Copy path"))
             copy_path();
-        if (!in_recent() && gui_menu_item(ui, "Rename"))
+        if (can_rename() && gui_menu_item(ui, "Rename"))
             ask(RENAMING);
         if (gui_menu_item(ui, "Delete"))
             dispose(TRASH);
@@ -985,7 +1021,7 @@ static void list_keys(struct gui_ui *ui) {
         go_up();
     else if (gui_key(ui, KEY_F5))
         refresh();
-    else if (chosen() && gui_key(ui, KEY_F2) && !in_trash() && !in_recent())
+    else if (chosen() && gui_key(ui, KEY_F2) && !in_trash() && can_rename())
         ask(RENAMING);
     else if (chosen() && gui_key(ui, KEY_DELETE) && (shift || in_trash()))
         ask(DELETING);

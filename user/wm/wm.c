@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <gui.h>
+#include <math.h>
 #include <mouse_event.h>
 #include <netdb.h>
 #include <poll.h>
@@ -125,7 +126,10 @@ static const struct theme *theme = &dark;
 
 // Dragging a window to the left or right edge of the screen tiles it on that half,
 // and to the top maximizes it, as an outline shows while it's held there.
-enum snap { SNAP_NONE, SNAP_LEFT, SNAP_RIGHT, SNAP_TOP };
+enum snap { SNAP_NONE, SNAP_LEFT, SNAP_RIGHT, SNAP_TOP, SNAP_TOP_LEFT, SNAP_TOP_RIGHT, SNAP_BOTTOM_LEFT, SNAP_BOTTOM_RIGHT };
+static const char *const snap_names[] = {"", "left", "right", "maximized", "top left", "top right", "bottom left",
+                                         "bottom right"};
+#define SNAP_CORNER 64 // how far along a side edge from a corner a dragged window takes a quarter
 #define SNAP_BORDER 3
 
 struct rect {
@@ -159,6 +163,7 @@ struct window {
 
     // Where it was before being maximized or tiled, to go back to.
     bool tiled;
+    enum snap snapped; // which, while tiled, or SNAP_NONE for a layout's part
     struct rect restore;
 
     // The edges being dragged by a resize. When the left or top one moves, the
@@ -388,8 +393,14 @@ static struct rect workspace_box(int index) {
 static struct rect snap_rect(enum snap to) {
     struct rect d = desktop();
 
-    return to == SNAP_LEFT    ? (struct rect){0, d.y, d.width / 2, d.height}
-         : to == SNAP_RIGHT ? (struct rect){d.width / 2, d.y, d.width / 2, d.height}
+    int half = d.width / 2, top = d.height / 2;
+
+    return to == SNAP_LEFT           ? (struct rect){0, d.y, half, d.height}
+         : to == SNAP_RIGHT        ? (struct rect){half, d.y, d.width - half, d.height}
+         : to == SNAP_TOP_LEFT     ? (struct rect){0, d.y, half, top}
+         : to == SNAP_TOP_RIGHT    ? (struct rect){half, d.y, d.width - half, top}
+         : to == SNAP_BOTTOM_LEFT  ? (struct rect){0, d.y + top, half, d.height - top}
+         : to == SNAP_BOTTOM_RIGHT ? (struct rect){half, d.y + top, d.width - half, d.height - top}
                             : d;
 }
 
@@ -1289,6 +1300,59 @@ static void close_panel(void) {
     autohide();
 }
 
+// Short sounds of wm's own, made as they're played by a child, so wm never waits
+// for the sound card: notes that each start at once and fade away, a sine with a
+// little of its octave so they're softer than beeps, or for the shutter, a hiss.
+enum sound { SOUND_NOTICE, SOUND_LOG_IN, SOUND_LOG_OUT, SOUND_VOLUME, SOUND_SHUTTER };
+#define SOUND_RATE 48000
+#define SOUND_NOTES 3
+
+static void play_sound(enum sound which) {
+    static const struct { float hz; int start, length; } notes[][SOUND_NOTES] = { // the times in ms
+        [SOUND_NOTICE] = {{880, 0, 300}, {1318.5f, 90, 450}},
+        [SOUND_LOG_IN] = {{523.3f, 0, 500}, {659.3f, 110, 500}, {784, 220, 800}},
+        [SOUND_LOG_OUT] = {{784, 0, 500}, {659.3f, 110, 500}, {523.3f, 220, 800}},
+        [SOUND_VOLUME] = {{1046.5f, 0, 60}},
+        [SOUND_SHUTTER] = {{0, 0, 120}},
+    };
+    long frames = 0;
+    int rate = SOUND_RATE, fd;
+    float *mixed;
+    int16_t *out;
+
+    if (!settings.sounds || mixer < 0 || fork() != 0)
+        return;
+    for (int i = 0; i < SOUND_NOTES; i++) {
+        long end = (long)(notes[which][i].start + notes[which][i].length) * SOUND_RATE / 1000;
+
+        frames = end > frames ? end : frames;
+    }
+    mixed = calloc(frames, sizeof(*mixed));
+    out = malloc(frames * 2 * sizeof(*out));
+    if (!mixed || !out || (fd = open("/dev/audio", O_WRONLY)) < 0)
+        _exit(1);
+    for (int i = 0; i < SOUND_NOTES && notes[which][i].length; i++) {
+        float hz = notes[which][i].hz, step = 2 * (float)M_PI * hz / SOUND_RATE;
+        long start = (long)notes[which][i].start * SOUND_RATE / 1000, length = (long)notes[which][i].length * SOUND_RATE / 1000;
+
+        for (long f = 0; f < length; f++) {
+            float fade = expf(-6.0f * f / length) * (f < 96 ? f / 96.0f : 1); // 2 ms in, so it doesn't click
+            float wave = hz ? sinf(step * f) + 0.3f * sinf(2 * step * f) : (float)rand() / RAND_MAX * 2 - 1;
+
+            mixed[start + f] += 0.2f * fade * wave;
+        }
+    }
+    for (long f = 0; f < frames; f++) {
+        float v = mixed[f] > 1 ? 1 : mixed[f] < -1 ? -1 : mixed[f];
+
+        out[2 * f] = out[2 * f + 1] = (int16_t)(v * 32767);
+    }
+    ioctl(fd, AUDIO_SET_RATE, &rate);
+    write(fd, out, frames * 2 * sizeof(*out));
+    close(fd); // which waits for it to play
+    _exit(0);
+}
+
 // Adds a notification, returning it: the one up, or with do not disturb, the one
 // in the history.
 static struct notice *add_notice(const char *title, const char *text, const char *app) {
@@ -1790,6 +1854,7 @@ static bool panel_click(void) {
         set_volume_at(cursor_x);
     } else if (panel == TRAY_QUICK && mixer >= 0 && contains(mute_button(), cursor_x, cursor_y)) {
         set_volume(volume, !muted);
+        play_sound(SOUND_VOLUME);
     } else if (panel == TRAY_NOTICES && history_count && contains(clear_button(TRAY_NOTICES), cursor_x, cursor_y)) {
         clear_history();
         printf("wm: notifications cleared\n");
@@ -2629,6 +2694,149 @@ static void copy_changed(struct window *w) {
         add_damage(preview_rect());
 }
 
+// Resting the mouse on a window's maximize button offers layouts under it, each a
+// small picture of the desktop split into parts. Clicking a part puts the window
+// there. They're in sixths across and halves down.
+#define LAYOUT_MS 400
+#define LAYOUT_WIDTH 64
+#define LAYOUT_HEIGHT 40
+struct zone {
+    int x, y, width, height;
+};
+static const struct {
+    int count;
+    struct zone zones[4];
+} layouts[] = {
+    {2, {{0, 0, 3, 2}, {3, 0, 3, 2}}},
+    {4, {{0, 0, 3, 1}, {3, 0, 3, 1}, {0, 1, 3, 1}, {3, 1, 3, 1}}},
+    {3, {{0, 0, 2, 2}, {2, 0, 2, 2}, {4, 0, 2, 2}}},
+    {2, {{0, 0, 4, 2}, {4, 0, 2, 2}}},
+};
+#define LAYOUTS (int)(sizeof(layouts) / sizeof(layouts[0]))
+static struct window *layout_for; // whose maximize button the mouse is on, or was
+static int64_t layout_since, layout_opened;
+static bool layout_shown;
+
+static void place(struct window *w, struct rect frame);
+static struct window *window_at(int x, int y, enum part *part, int *edges);
+static void set_focus(struct window *w);
+static void raise_window(struct window *w);
+
+static struct rect layout_rect(void) {
+    struct rect b = button_of(layout_for, 1);
+    int width = LAYOUTS * (LAYOUT_WIDTH + 8) + 8, height = LAYOUT_HEIGHT + 16;
+    int x = b.x + BUTTON_SIZE / 2 - width / 2, y = b.y + BUTTON_SIZE + 6;
+
+    x = x + width > screen.width - GAP ? screen.width - GAP - width : x;
+    return (struct rect){x > GAP ? x : GAP, y + height > screen.height ? b.y - 6 - height : y, width, height};
+}
+
+// A part of a rectangle, as a zone of it, less gap all round.
+static struct rect zone_in(struct rect r, struct zone z, int gap) {
+    int x = r.x + r.width * z.x / 6, y = r.y + r.height * z.y / 2;
+
+    return (struct rect){x + gap, y + gap, r.x + r.width * (z.x + z.width) / 6 - x - 2 * gap,
+                         r.y + r.height * (z.y + z.height) / 2 - y - 2 * gap};
+}
+
+static struct rect layout_picture(int layout) {
+    struct rect p = layout_rect();
+
+    return (struct rect){p.x + 8 + layout * (LAYOUT_WIDTH + 8), p.y + 8, LAYOUT_WIDTH, LAYOUT_HEIGHT};
+}
+
+// The layout and part under the mouse, if there is one.
+static bool layout_part_at(int *layout, int *part) {
+    for (int i = 0; i < LAYOUTS; i++) {
+        for (int j = 0; j < layouts[i].count; j++) {
+            if (contains(zone_in(layout_picture(i), layouts[i].zones[j], 1), cursor_x, cursor_y)) {
+                *layout = i, *part = j;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+static void draw_layouts(struct gui_canvas *c, int unused, int ox, int oy) {
+    int over_layout = -1, over_part = -1;
+
+    (void)unused;
+    layout_part_at(&over_layout, &over_part);
+    draw_glass(c, layout_rect(), ox, oy);
+    for (int i = 0; i < LAYOUTS; i++) {
+        for (int j = 0; j < layouts[i].count; j++) {
+            struct rect z = zone_in(layout_picture(i), layouts[i].zones[j], 1);
+
+            gui_fill_rounded(c, z.x - ox, z.y - oy, z.width, z.height, SMALL_RADIUS,
+                             i == over_layout && j == over_part ? TITLE_FOCUSED : TASKBAR_BUTTON);
+        }
+    }
+}
+
+static void hide_layouts(void) {
+    if (layout_shown)
+        flyout_leaves(layout_rect());
+    layout_shown = false;
+    layout_for = NULL;
+}
+
+// Follows the mouse onto a maximize button, and off it and the layouts.
+static void hover_layouts(void) {
+    enum part part;
+    int edges;
+    struct window *w = buttons || overview ? NULL : window_at(cursor_x, cursor_y, &part, &edges);
+
+    if (layout_shown && contains(layout_rect(), cursor_x, cursor_y) && !buttons) {
+        add_damage(layout_rect());
+        return;
+    }
+    if (w && part == PART_MAXIMIZE && !w->bare) {
+        if (w != layout_for) {
+            hide_layouts();
+            layout_for = w;
+            layout_since = now_ms();
+        }
+        return;
+    }
+    hide_layouts();
+}
+
+// Shows the layouts once the mouse has rested long enough, returning how long
+// until then, or -1.
+static int check_layouts(void) {
+    int64_t wait = layout_for && !layout_shown ? layout_since + LAYOUT_MS - now_ms() : -1;
+
+    if (!layout_for || layout_shown || wait > 0)
+        return (int)wait;
+    layout_shown = true;
+    layout_opened = now_ms();
+    add_damage(with_shadow(layout_rect()));
+    printf("wm: layouts for %s at %d %d\n", layout_for->title, layout_rect().x, layout_rect().y);
+    return -1;
+}
+
+// A click on the layouts puts the window in the part it's on, returning whether it was on them.
+static bool layouts_click(void) {
+    int layout, part;
+
+    if (!layout_shown || !contains(layout_rect(), cursor_x, cursor_y))
+        return false;
+    if (layout_part_at(&layout, &part)) {
+        struct window *w = layout_for;
+        struct rect was = frame_of(w), r = zone_in(desktop(), layouts[layout].zones[part], 0);
+
+        hide_layouts();
+        place(w, r);
+        w->snapped = SNAP_NONE;
+        reframe(w, was);
+        set_focus(w);
+        raise_window(w);
+        printf("wm: layout %s at %d %d %d %d\n", w->title, r.x, r.y, r.width, r.height);
+    }
+    return true;
+}
+
 // Shift+Print Screen and Super+Shift+S choose what to save. The screen stays as it
 // was, darkened but for the area dragged out, which is saved when the mouse is let
 // go. Clicking takes the window under the mouse, or the screen, and Escape or the
@@ -2797,6 +3005,10 @@ static bool animate_flyouts(void) {
         add_damage(with_shadow(preview_rect()));
         going = true;
     }
+    if (layout_shown && settings.animations && now_ms() - layout_opened < FLYOUT_MS + FRAME_MS) {
+        add_damage(with_shadow(layout_rect()));
+        going = true;
+    }
     if (flyout_ghost.copy.pixels) {
         add_damage(with_shadow(flyout_ghost.r));
         if (flyout_progress(flyout_ghost.start) < 256)
@@ -2875,6 +3087,8 @@ static void draw_area(struct rect r, struct gui_canvas c) {
         draw_flyout(&c, panel_rect(panel), panel_opened, draw_open_panel, 0, r.x, r.y);
     if (previewing)
         draw_flyout(&c, preview_rect(), preview_opened, draw_preview, 0, r.x, r.y);
+    if (layout_shown)
+        draw_flyout(&c, layout_rect(), layout_opened, draw_layouts, 0, r.x, r.y);
     draw_flyout_ghost(&c, r.x, r.y);
     if (switch_choice >= 0)
         draw_switcher(&c, r.x, r.y);
@@ -3156,6 +3370,8 @@ static void remove_window(struct window *w) {
     add_damage(drawn_extent(w));
     if (hovered == w)
         hide_preview();
+    if (layout_for == w)
+        hide_layouts();
     if (overview) {
         add_damage((struct rect){0, 0, screen.width, screen.height});
         overview_choice = 0;
@@ -3408,6 +3624,8 @@ static void handle_message(struct client *client, const struct gui_message *m) {
     case GUI_NOTIFY: // the %.*s in add_notice stops at the end of an unterminated title
         add_notice(m->text, m->buffer, w ? w->app : NULL);
         notifier = client;
+        if (!settings.quiet)
+            play_sound(SOUND_NOTICE);
         break;
     case GUI_NOTIFY_ACTION: // for the newest, if it's still up, and in the history
         if (client == notifier) {
@@ -3569,6 +3787,7 @@ static void log_out(void) {
     logged_in = false;
     workspace = 0;
     printf("wm: logged out\n");
+    play_sound(SOUND_LOG_OUT);
     lock();
 }
 
@@ -3581,6 +3800,7 @@ static void unlock(void) {
         printf("wm: unlocked\n");
     if (!logged_in) {
         logged_in = true;
+        play_sound(SOUND_LOG_IN);
         for (int i = 0; i < command_count; i++)
             launch(commands[i]);
         command_count = 0; // only the first time
@@ -3707,6 +3927,7 @@ static void save_shot(const struct gui_canvas *shot) {
         return;
     }
     printf("wm: screenshot %s %dx%d\n", path, shot->width, shot->height);
+    play_sound(SOUND_SHUTTER);
 
     struct notice *n = add_notice(copy_picture(shot) ? "Screenshot saved and copied" : "Screenshot saved",
                                   strrchr(path, '/') + 1, "viewer");
@@ -4293,21 +4514,32 @@ static void untile(struct window *w) {
     ask_size(w, r.width - 2 * BORDER, r.height - TITLE_HEIGHT - 2 * BORDER);
 }
 
-static void toggle_maximized(struct window *w) {
+// Moves a window, smoothly, to a part of the desktop, or back where it was for SNAP_NONE.
+static void snap_to(struct window *w, enum snap to) {
     struct rect was = frame_of(w);
 
-    if (w->tiled)
+    if (to == SNAP_NONE)
         untile(w);
     else
-        place(w, desktop());
+        place(w, snap_rect(to));
+    w->snapped = to;
     reframe(w, was);
 }
 
-static void tile_half(struct window *w, bool right) {
-    struct rect d = desktop(), was = frame_of(w);
+static void toggle_maximized(struct window *w) {
+    snap_to(w, w->tiled ? SNAP_NONE : SNAP_TOP);
+}
 
-    place(w, (struct rect){right ? d.width / 2 : 0, 0, d.width / 2, d.height});
-    reframe(w, was);
+// Super+Up and Down take a window on one side to its top or bottom quarter, and
+// from a quarter back to the side.
+static enum snap snap_up(enum snap from) {
+    return from == SNAP_LEFT ? SNAP_TOP_LEFT : from == SNAP_RIGHT ? SNAP_TOP_RIGHT
+         : from == SNAP_BOTTOM_LEFT ? SNAP_LEFT : from == SNAP_BOTTOM_RIGHT ? SNAP_RIGHT : SNAP_NONE;
+}
+
+static enum snap snap_down(enum snap from) {
+    return from == SNAP_LEFT ? SNAP_BOTTOM_LEFT : from == SNAP_RIGHT ? SNAP_BOTTOM_RIGHT
+         : from == SNAP_TOP_LEFT ? SNAP_LEFT : from == SNAP_TOP_RIGHT ? SNAP_RIGHT : SNAP_NONE;
 }
 
 static void taskbar_click(void) {
@@ -4346,6 +4578,10 @@ static void press_here(uint32_t changed) {
         }
         return;
     }
+
+    if (layouts_click())
+        return;
+    hide_layouts();
 
     // Clicking a notification puts it away.
     int notice = popup_depth || panel >= 0 ? -1 : notice_at(cursor_x, cursor_y);
@@ -4539,15 +4775,22 @@ static void handle_mouse(const struct mouse_event *e) {
             set_overview(false);
         return;
     }
-    if (moved || pressed)
+    if (moved || pressed) {
         hover_taskbar();
+        if (!(pressed && layout_shown)) // which the press may be on
+            hover_layouts();
+    }
 
     // Windows can be dragged partly off the screen, but the title bar stays on it.
     // A tiled one goes back to its own size, as far across under the mouse as it was.
     if (dragging && moved) {
         int top = cursor_y - drag_y, bottom = desktop().y + desktop().height - BORDER, least = desktop().y + TITLE_HEIGHT;
-        enum snap to = cursor_x <= 0 ? SNAP_LEFT : cursor_x >= screen.width - 1 ? SNAP_RIGHT : cursor_y <= 0 ? SNAP_TOP
-                                                                                                              : SNAP_NONE;
+        struct rect d = desktop();
+        bool high = cursor_y < d.y + SNAP_CORNER, low = cursor_y >= d.y + d.height - SNAP_CORNER;
+        enum snap to = cursor_x <= 0             ? (high ? SNAP_TOP_LEFT : low ? SNAP_BOTTOM_LEFT : SNAP_LEFT)
+                     : cursor_x >= screen.width - 1 ? (high ? SNAP_TOP_RIGHT : low ? SNAP_BOTTOM_RIGHT : SNAP_RIGHT)
+                     : cursor_y <= 0               ? SNAP_TOP
+                                                   : SNAP_NONE;
 
         if (dragging->tiled) {
             struct rect r = dragging->restore;
@@ -4585,12 +4828,15 @@ static void handle_mouse(const struct mouse_event *e) {
     // changes it over the speaker or the sound menu.
     if (setting_volume && moved)
         set_volume_at(cursor_x);
-    if (released & MOUSE_BUTTON_LEFT)
+    if ((released & MOUSE_BUTTON_LEFT) && setting_volume) {
         setting_volume = false;
+        play_sound(SOUND_VOLUME); // to hear how loud it is now
+    }
     if (e->wheel && mixer >= 0 && !locked
         && ((bar_visible() && contains(tray_item(TRAY_QUICK), cursor_x, cursor_y))
             || (panel == TRAY_QUICK && contains(panel_rect(TRAY_QUICK), cursor_x, cursor_y)))) {
         set_volume(volume - e->wheel * VOLUME_STEP, muted);
+        play_sound(SOUND_VOLUME);
         wheel = 0; // so no window gets it
     }
 
@@ -4612,11 +4858,8 @@ static void handle_mouse(const struct mouse_event *e) {
     if (!buttons && drag_file[0])
         drop_file();
     if (!buttons && dragging && snap) {
-        struct rect was = frame_of(dragging);
-
-        place(dragging, snap_rect(snap));
-        reframe(dragging, was);
-        printf("wm: snapped %s %s\n", dragging->title, snap == SNAP_TOP ? "maximized" : snap == SNAP_LEFT ? "left" : "right");
+        snap_to(dragging, snap);
+        printf("wm: snapped %s %s\n", dragging->title, snap_names[snap]);
         stop_snap();
     }
     if (!buttons) {
@@ -4815,22 +5058,26 @@ static void handle_key(const struct key_event *e) {
         return;
     }
 
-    // Up maximizes, left and right take half the screen, and down goes back or minimizes.
+    // Up maximizes, left and right take half the screen, up and down from a side
+    // take a quarter of it, and down goes back or minimizes.
     if (super && (e->code == KEY_UP || e->code == KEY_DOWN || e->code == KEY_LEFT || e->code == KEY_RIGHT)) {
+        enum snap now = focused && focused->tiled ? focused->snapped : SNAP_NONE;
+        enum snap to = e->code == KEY_UP ? snap_up(now) : e->code == KEY_DOWN ? snap_down(now) : SNAP_NONE;
+
         if (!e->pressed || !focused)
             return;
-        if (e->code == KEY_UP)
+        if (to)
+            snap_to(focused, to);
+        else if (e->code == KEY_UP)
             toggle_maximized(focused);
-        else if (e->code == KEY_DOWN && focused->tiled) {
-            struct rect was = frame_of(focused);
-
-            untile(focused);
-            reframe(focused, was);
-        }
+        else if (e->code == KEY_DOWN && focused->tiled)
+            snap_to(focused, SNAP_NONE);
         else if (e->code == KEY_DOWN)
             minimize(focused);
         else
-            tile_half(focused, e->code == KEY_RIGHT);
+            snap_to(focused, e->code == KEY_RIGHT ? SNAP_RIGHT : SNAP_LEFT);
+        if (to)
+            printf("wm: snapped %s %s\n", focused->title, snap_names[to]);
         return;
     }
     if (focused)
@@ -5057,7 +5304,8 @@ int main(int argc, char **argv) {
             fds[3 + i].fd = clients[i] ? clients[i]->fd : -1;
             fds[3 + i].events = clients[i] ? POLLIN | (clients[i]->out_used ? POLLOUT : 0) : 0;
         }
-        int preview = check_preview(); // before the flyouts, so its own starts moving
+        int preview = check_preview(); // before the flyouts, so their own start moving
+        int layout_wait = check_layouts();
         bool fading = fade_shadows() | animate() | animate_flyouts() | animate_screen();
         int notice = expire_notices(); // before drawing, so those that went are gone
 
@@ -5075,6 +5323,7 @@ int main(int argc, char **argv) {
 
         timeout = notice >= 0 && notice < timeout ? (notice > 0 ? notice : 1) : timeout;
         timeout = preview >= 0 && preview < timeout ? preview : timeout;
+        timeout = layout_wait >= 0 && layout_wait < timeout ? layout_wait : timeout;
 
         int leave_wait = check_leaving();
 

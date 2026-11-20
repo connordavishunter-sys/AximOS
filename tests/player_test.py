@@ -31,7 +31,7 @@ def pitches(path):
 v = VM(disk=img)
 try:
     check('prompt at boot', v.wait('/$ ', 30), v.text())
-    v.run('echo none > /system/etc/wallpaper; rm -f /system/etc/gui.conf')
+    v.run('echo none > /system/etc/wallpaper; echo sounds off > /system/etc/gui.conf') # only the player's
     recording = f'{v.dir}/heard.wav'
     v.record(recording)
     at = v.mark()
