@@ -1,5 +1,5 @@
-"""Checks what processes cost: shared code, stacks given memory as they're used, and
-running out of memory."""
+"""Checks what processes cost: shared code, stacks given memory as they're used, malloc,
+and running out of memory."""
 import os, re
 from vm import VM, WORK, check, compile_program, disk_copy, finish, program_checks, put
 
@@ -7,6 +7,7 @@ P = os.path.dirname(os.path.abspath(__file__)) + '/programs/'
 img = disk_copy('memory')
 put(img, compile_program(P + 'hog.c', WORK + '/hog'), '/system/bin/hog')
 put(img, compile_program(P + 'stack.c', WORK + '/stack'), '/system/bin/stack')
+put(img, compile_program(P + 'heap.c', WORK + '/heap'), '/system/bin/heap')
 
 v = VM(disk=img)
 try:
@@ -21,6 +22,7 @@ try:
     v.run('kill %1 %2 %3 %4 %5 %6 %7 %8 %9 %10; wait', 2)
 
     program_checks(v, 'stack', 'stack: ')
+    program_checks(v, 'heap', 'heap: done')
     o = v.run('stack overflow; echo st=$?', 3)
     check('stack overflow is a segfault', 'st=139' in o, o)
 

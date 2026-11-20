@@ -142,9 +142,11 @@ static struct block *find_free(size_t size) {
 
 void *malloc(size_t size) {
     HEAP_LOCKED;
-    if (size == 0 || size > SIZE_MAX - ALIGNMENT - sizeof(struct block))
+    if (size > SIZE_MAX - ALIGNMENT - sizeof(struct block))
         return NULL;
-    size = (size + ALIGNMENT - 1) & ~(size_t)(ALIGNMENT - 1);
+    // Nothing still gets a block of its own, as glibc and musl give, since
+    // programs take NULL to mean memory has run out.
+    size = size ? (size + ALIGNMENT - 1) & ~(size_t)(ALIGNMENT - 1) : ALIGNMENT;
 
     struct block *b = find_free(size);
 
