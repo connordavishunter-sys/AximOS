@@ -5,7 +5,7 @@ notifications until cleared."""
 import re, time
 from vm import VM, check, finish
 
-# The clock, 36 wide in DejaVu Sans (four digits 8 wide and a colon 4), ends 12 from the right
+# The clock, set to 24 hours, 36 wide in DejaVu Sans (four digits 8 wide and a colon 4), ends 12 from the right
 # of the taskbar, 32 tall and 8 from the edges. 8 before it is the bell, 24 wide, and 2 before
 # that the network and speaker together, 44 wide.
 W, H = 1280, 800
@@ -18,7 +18,7 @@ DESKTOP = 0x1E2430
 v = VM(vmmouse=True)
 try:
     check('prompt at boot', v.wait('/$ ', 30), v.text())
-    v.run('echo none > /system/etc/wallpaper; rm -f /system/etc/gui.conf /system/etc/volume')
+    v.run('echo none > /system/etc/wallpaper; echo clock 24 > /system/etc/gui.conf; rm -f /system/etc/volume')
     at = v.mark()
     v.type('wm\n')
     check('wm sets the volume it had', v.wait('wm: volume 100', 10, at), v.text(at))

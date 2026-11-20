@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <unistd.h>
 
 #define MAX_WALLPAPERS 12
@@ -11,12 +12,12 @@
 #define THUMB_HEIGHT 85
 #define THUMBS_ACROSS 3
 
-// The first time, it asks how the desktop should look and then for an account.
-// After that, it logs in, or unlocks for whoever's logged in.
-enum page { WELCOME, CREATE, LOG_IN, LOCKED };
-static const char *const page_names[] = {"welcome", "create", "log in", "locked"};
-static const int sizes[][2] = {{480, 410}, {360, 290}, {360, 230}, {360, 200}};
-static const char *const themes[] = {"Dark", "Light"};
+// The first time, it asks how the desktop should look, where in the world it is,
+// and then for an account. After that, it logs in, or unlocks for whoever's logged in.
+enum page { WELCOME, TIME, CREATE, LOG_IN, LOCKED };
+static const char *const page_names[] = {"welcome", "time zone", "create", "log in", "locked"};
+static const int sizes[][2] = {{480, 410}, {420, 420}, {360, 290}, {360, 230}, {360, 200}};
+static const char *const themes[] = {"Dark", "Light"}, *const clocks[] = {"24 hour", "12 hour"};
 
 static enum page page;
 static struct gui_window *window;
@@ -29,6 +30,9 @@ static struct {
 } wallpapers[MAX_WALLPAPERS];
 static int wallpaper_count;
 static char wallpaper[GUI_PATH_MAX];
+static char **zones, search[64], zone[GUI_PATH_MAX];
+static const char **shown; // the zones the search matches
+static int zone_count, shown_count, chosen;
 
 // The wallpapers that come with the system, the default first.
 static int compare_wallpapers(const void *a, const void *b) {
@@ -64,6 +68,25 @@ static void load_wallpapers(void) {
     gui_wallpaper_get(wallpaper);
 }
 
+// The zones whose names have the search in them, keeping the chosen one chosen if it still is.
+static void filter(void) {
+    const char *was = shown_count ? shown[chosen] : zone;
+    size_t n = strlen(search);
+
+    shown_count = chosen = 0;
+    for (int i = 0; i < zone_count; i++) {
+        bool match = !n;
+
+        for (const char *p = zones[i]; *p && !match; p++)
+            match = !strncasecmp(p, search, n);
+        if (!match)
+            continue;
+        if (!strcmp(zones[i], was))
+            chosen = shown_count;
+        shown[shown_count++] = zones[i];
+    }
+}
+
 // Says where a widget is when that changes, for the tests to find it.
 static void report(struct gui_ui *ui, int index, const char *what) {
     static struct gui_rect places[8 + MAX_WALLPAPERS];
@@ -79,7 +102,7 @@ static void go_to(struct gui_ui *ui, enum page to) {
     message[0] = '\0';
     password[0] = again[0] = '\0';
     gui_resize(window, sizes[page][0], sizes[page][1]);
-    gui_set_focus(ui, page == LOCKED ? "##password" : page == WELCOME ? "Theme" : "##name", NULL);
+    gui_set_focus(ui, page == LOCKED ? "##password" : page == WELCOME ? "Theme" : page == TIME ? "##search" : "##name", NULL);
     ui->again = true;
     printf("login: %s, %dx%d\n", page_names[page], sizes[page][0], sizes[page][1]);
 }
@@ -114,8 +137,42 @@ static void welcome(struct gui_ui *ui) {
         report(ui, 8 + i, label);
     }
     if (gui_button(ui, "Next"))
-        go_to(ui, CREATE);
+        go_to(ui, TIME);
     report(ui, 1, "next");
+}
+
+// The time zone, found by searching, and whether the clock shows 12 or 24 hours.
+static void time_zone(struct gui_ui *ui) {
+    int clock = settings.clock_12_hour;
+    bool next;
+
+    gui_heading(ui, "Where are you?");
+    gui_label(ui, "Choose your time zone, and how the clock shows the time.");
+    if (gui_dropdown(ui, "Clock", clocks, 2, &clock)) {
+        settings.clock_12_hour = clock;
+        if (gui_settings_save(&settings))
+            gui_settings_changed();
+        printf("login: clock %s\n", clocks[clock]);
+    }
+    report(ui, 5, "clock");
+    if (gui_textbox(ui, "##search", search, sizeof(search)))
+        filter();
+    report(ui, 6, "search");
+    next = gui_list(ui, "##zones", shown, shown_count, &chosen, 9) == GUI_LIST_ACTIVATED;
+    report(ui, 7, "zones");
+    if (message[0])
+        gui_label(ui, "%s", message);
+    next |= gui_button(ui, "Next");
+    report(ui, 1, "next");
+    if (!next)
+        return;
+    if (!shown_count || !gui_time_zone_set(shown[chosen])) {
+        snprintf(message, sizeof(message), shown_count ? "Couldn't set the time zone." : "No time zone has that in its name.");
+        return;
+    }
+    printf("login: zone %s\n", shown[chosen]);
+    gui_settings_changed(); // for the taskbar's clock
+    go_to(ui, CREATE);
 }
 
 // Returns whether the account was made.
@@ -132,7 +189,7 @@ static bool create(struct gui_ui *ui) {
     if (message[0])
         gui_label(ui, "%s", message);
     if (gui_button(ui, "Back")) {
-        go_to(ui, WELCOME);
+        go_to(ui, TIME);
         return false;
     }
     report(ui, 2, "back");
@@ -200,6 +257,8 @@ static bool frame(struct gui_ui *ui) {
     gui_ui_begin(ui);
     if (page == WELCOME)
         welcome(ui);
+    else if (page == TIME)
+        time_zone(ui);
     else if (page == CREATE)
         done = create(ui);
     else
@@ -212,7 +271,8 @@ static bool frame(struct gui_ui *ui) {
 // What wm shows until someone logs in: started by wm, and nothing else can unlock it.
 int main(int argc, char **argv) {
     help_option(argc, argv, "usage: login [--lock]\n"
-                            "The log-in screen, which wm starts. The first time, it sets up the desktop and an account.\n");
+                            "The log-in screen, which wm starts. The first time, it sets up the desktop, the time\n"
+                            "zone and an account.\n");
     if (!getenv("GUI_FD") || !gui_connect()) {
         dprintf(STDERR_FILENO, "login: only wm starts this\n");
         return 1;
@@ -226,6 +286,10 @@ int main(int argc, char **argv) {
     if (page == WELCOME) {
         gui_settings_load(&settings);
         load_wallpapers();
+        gui_time_zone_get(zone);
+        zone_count = gui_time_zones(&zones);
+        shown = calloc(zone_count + 1, sizeof(*shown));
+        filter();
     }
     if (!(window = gui_create_window("Log in", sizes[page][0], sizes[page][1]))) {
         dprintf(STDERR_FILENO, "login: couldn't make its window\n");

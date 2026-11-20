@@ -320,6 +320,12 @@ const struct gui_screen *gui_screen(void);
 void gui_wallpaper_get(char path[GUI_PATH_MAX]);
 bool gui_wallpaper_set(const char *path);
 
+// The time zones there are, sorted, from malloc, returning how many; the one
+// chosen, or UTC if none is; and choosing one, returning false if it couldn't be.
+int gui_time_zones(char ***names);
+void gui_time_zone_get(char name[GUI_PATH_MAX]);
+bool gui_time_zone_set(const char *name);
+
 // Images, as pixels of 0xAARRGGBB, from PNG, JPEG, BMP, GIF (its first frame) and
 // WebP files. Each returns false if it couldn't, with gui_image_error saying why.
 struct gui_image {

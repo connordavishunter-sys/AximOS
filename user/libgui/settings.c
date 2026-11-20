@@ -62,7 +62,7 @@ void gui_settings_load(struct gui_settings *s) {
     char line[64], value[32], kind[16];
     int width, height;
 
-    *s = (struct gui_settings){.shadows = true, .animations = true, .sounds = true, .transparency = true, .blur = true, .corners = GUI_CORNERS, .repeat_delay = KEYBOARD_REPEAT_DELAY_DEFAULT,
+    *s = (struct gui_settings){.shadows = true, .animations = true, .sounds = true, .transparency = true, .blur = true, .corners = GUI_CORNERS, .clock_12_hour = true, .repeat_delay = KEYBOARD_REPEAT_DELAY_DEFAULT,
                                .repeat_rate = KEYBOARD_REPEAT_RATE_DEFAULT, .mouse_speed = 5,
                                .apps = {"files", "viewer", "player", "netsurf", "editor"}, .night_strength = 50};
     while (f && fgets(line, sizeof(line), f)) {
@@ -247,4 +247,89 @@ bool gui_is_program(const char *path) {
     if (fd >= 0)
         close(fd);
     return elf;
+}
+
+// Time zones are set as tz sets them: the zone's rules copied to LOCALTIME, and its
+// name kept in ZONE_NAME.
+#define ZONES "/system/share/zoneinfo"
+#define LOCALTIME "/system/etc/localtime"
+#define ZONE_NAME "/system/etc/timezone"
+
+static void collect_zones(const char *relative, char ***names, int *count, int *room) {
+    char path[GUI_PATH_MAX];
+    DIR *dir;
+    struct dirent *entry;
+
+    snprintf(path, sizeof(path), "%s%s%s", ZONES, *relative ? "/" : "", relative);
+    if (!(dir = opendir(path)))
+        return;
+    while ((entry = readdir(dir))) {
+        char name[GUI_PATH_MAX];
+        struct stat st;
+
+        if (entry->d_name[0] == '.')
+            continue;
+        snprintf(name, sizeof(name), "%s%s%s", relative, *relative ? "/" : "", entry->d_name);
+        snprintf(path, sizeof(path), "%s/%s", ZONES, name);
+        if (stat(path, &st) < 0)
+            continue;
+        if (S_ISDIR(st.st_mode)) {
+            collect_zones(name, names, count, room);
+            continue;
+        }
+        if (*count == *room) {
+            char **bigger = realloc(*names, (*room = *room ? 2 * *room : 256) * sizeof(char *));
+
+            if (!bigger)
+                break;
+            *names = bigger;
+        }
+        (*names)[(*count)++] = strdup(name);
+    }
+    closedir(dir);
+}
+
+static int compare_zones(const void *a, const void *b) {
+    return strcmp(*(char *const *)a, *(char *const *)b);
+}
+
+int gui_time_zones(char ***names) {
+    int count = 0, room = 0;
+
+    *names = NULL;
+    collect_zones("", names, &count, &room);
+    if (count)
+        qsort(*names, count, sizeof(char *), compare_zones);
+    return count;
+}
+
+void gui_time_zone_get(char name[GUI_PATH_MAX]) {
+    FILE *f = fopen(ZONE_NAME, "r");
+
+    snprintf(name, GUI_PATH_MAX, "UTC");
+    if (f && fgets(name, GUI_PATH_MAX, f))
+        name[strcspn(name, "\n")] = '\0';
+    if (f)
+        fclose(f);
+}
+
+bool gui_time_zone_set(const char *name) {
+    char path[GUI_PATH_MAX], buf[4096];
+    int in, out;
+    ssize_t n = 0;
+    FILE *f;
+
+    snprintf(path, sizeof(path), "%s/%s", ZONES, name);
+    if ((in = open(path, O_RDONLY)) < 0)
+        return false;
+    out = open(LOCALTIME, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    while (out >= 0 && (n = read(in, buf, sizeof(buf))) > 0) {
+        if (write(out, buf, n) != n)
+            n = -1;
+    }
+    close(in);
+    if (out < 0 || close(out) < 0 || n != 0 || !(f = fopen(ZONE_NAME, "w")))
+        return false;
+    fprintf(f, "%s\n", name);
+    return fclose(f) == 0;
 }

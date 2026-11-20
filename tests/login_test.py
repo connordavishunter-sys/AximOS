@@ -1,6 +1,6 @@
-"""Checks the first boot asks how the desktop should look and for an account, that
-locking and logging out need the password to get back in, and that the next boot
-only asks to log in."""
+"""Checks the first boot asks how the desktop should look, for the time zone and for an
+account, that locking and logging out need the password to get back in, and that the
+next boot only asks to log in."""
 import re, time
 from vm import VM, WORK, check, disk_copy, finish, get
 
@@ -33,6 +33,12 @@ try:
     click(v, 'wallpaper Dunes')
     check('and the wallpaper', v.wait('login: wallpaper /system/share/wallpapers/dunes.jpg', 5, at), v.text(at))
     click(v, 'next')
+    check('then where it is', v.wait('login: time zone', 5, at), v.text(at))
+    time.sleep(0.5)
+    v.type('paris')
+    time.sleep(0.5)
+    click(v, 'next')
+    check('a time zone found by searching', v.wait('login: zone Europe/Paris', 5, at), v.text(at))
     check('then the account', v.wait('login: create', 5, at), v.text(at))
     v.key('meta_l-ret') # only Enter, for the log-in screen, while it's locked
     check('which needs a username', v.wait('login: A username is', 5, at), v.text(at))
@@ -88,6 +94,9 @@ account = open(f'{WORK}/account').read()
 check('the account keeps a hash, not the password', account.startswith('tester ') and 'secret1' not in account
       and len(account.split()) == 3, account)
 check('and the theme is kept', 'theme light' in open(f'{WORK}/gui.conf').read(), open(f'{WORK}/gui.conf').read())
+check('with a 12 hour clock to start with', 'clock 12' in open(f'{WORK}/gui.conf').read(), open(f'{WORK}/gui.conf').read())
+get(img, '/system/etc/timezone', f'{WORK}/timezone')
+check('and the time zone chosen', open(f'{WORK}/timezone').read() == 'Europe/Paris\n', open(f'{WORK}/timezone').read())
 
 v = VM(disk=img, desktop=True)
 try:

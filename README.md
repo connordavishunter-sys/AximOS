@@ -138,7 +138,8 @@ QEMU uses KVM when the host has it. Sound goes to PipeWire; pass another backend
 `make run AUDIO=pa`, for example. The serial port goes to the terminal you ran it from,
 where the kernel and wm log what they're doing.
 
-The first boot asks you to make an account. After that it starts at the log-in screen.
+The first boot asks for your time zone (the clock starts out showing 12 hour time) and
+to make an account. After that it starts at the log-in screen.
 Hold **Shift** while it boots to get the text console instead, which asks for the same
 username and password.
 

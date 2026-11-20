@@ -13,12 +13,6 @@
 #include <time.h>
 #include <unistd.h>
 
-// The time zone is set as tz sets it: the zone's rules copied to LOCALTIME, and
-// its name kept in NAME_FILE.
-#define ZONE_DIR "/system/share/zoneinfo"
-#define LOCALTIME "/system/etc/localtime"
-#define NAME_FILE "/system/etc/timezone"
-#define MAX_ZONES 1024
 #define MAX_WALLPAPERS 12
 #define THUMB_WIDTH 136 // 16:10, like the wallpapers
 #define THUMB_HEIGHT 85
@@ -51,10 +45,10 @@ static struct gui_settings settings;
 static int tab;
 static char status[PATH_MAX + 64];
 
-static char *zones[MAX_ZONES];
-static const char *shown[MAX_ZONES]; // the zones the search matches
+static char **zones;
+static const char **shown; // the zones the search matches
 static int zone_count, shown_count, chosen;
-static char search[64], zone[PATH_MAX] = "UTC";
+static char search[64], zone[GUI_PATH_MAX];
 
 static struct {
     char path[GUI_PATH_MAX], name[32];
@@ -72,37 +66,6 @@ static int resolution_count, picked = -1, wanted_width, wanted_height; // picked
 // in case the screen can't show it.
 #define KEEP_SECONDS 15
 static int keep_left, keep_timer, old_width, old_height;
-
-static int compare(const void *a, const void *b) {
-    return strcmp(*(char *const *)a, *(char *const *)b);
-}
-
-// Every zone below a folder, named from ZONE_DIR, like Europe/London.
-static void collect(const char *relative) {
-    char path[PATH_MAX];
-    DIR *dir;
-    struct dirent *entry;
-
-    snprintf(path, sizeof(path), "%s%s%s", ZONE_DIR, *relative ? "/" : "", relative);
-    if (!(dir = opendir(path)))
-        return;
-    while ((entry = readdir(dir)) && zone_count < MAX_ZONES) {
-        char name[PATH_MAX];
-        struct stat st;
-
-        if (entry->d_name[0] == '.')
-            continue;
-        snprintf(name, sizeof(name), "%s%s%s", relative, *relative ? "/" : "", entry->d_name);
-        snprintf(path, sizeof(path), "%s/%s", ZONE_DIR, name);
-        if (stat(path, &st) < 0)
-            continue;
-        if (S_ISDIR(st.st_mode))
-            collect(name);
-        else
-            zones[zone_count++] = strdup(name);
-    }
-    closedir(dir);
-}
 
 static bool contains(const char *text, const char *part) {
     size_t n = strlen(part);
@@ -128,33 +91,11 @@ static void filter(void) {
     }
 }
 
-static bool copy_file(const char *from, const char *to) {
-    char buf[4096];
-    int in = open(from, O_RDONLY), out = in >= 0 ? open(to, O_WRONLY | O_CREAT | O_TRUNC, 0644) : -1;
-    ssize_t n = 0;
-
-    while (out >= 0 && (n = read(in, buf, sizeof(buf))) > 0) {
-        if (write(out, buf, n) != n)
-            n = -1;
-    }
-    if (in >= 0)
-        close(in);
-    if (out >= 0 && close(out) < 0)
-        n = -1;
-    return out >= 0 && n == 0;
-}
-
 static void set_zone(const char *name) {
-    char path[PATH_MAX];
-    FILE *f;
-
-    snprintf(path, sizeof(path), "%s/%s", ZONE_DIR, name);
-    if (!copy_file(path, LOCALTIME) || !(f = fopen(NAME_FILE, "w"))) {
+    if (!gui_time_zone_set(name)) {
         snprintf(status, sizeof(status), "Couldn't set the time zone to %s", name);
         return;
     }
-    fprintf(f, "%s\n", name);
-    fclose(f);
     snprintf(zone, sizeof(zone), "%s", name);
     snprintf(status, sizeof(status), "The time zone is now %s", name);
     printf("settings: zone %s\n", name);
@@ -615,7 +556,6 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    FILE *name = fopen(NAME_FILE, "r");
     struct gui_window *window = gui_create_window("Settings", 680, 540);
     struct gui_ui ui;
     struct gui_message e;
@@ -624,13 +564,10 @@ int main(int argc, char **argv) {
         dprintf(STDERR_FILENO, "settings: couldn't make a window\n");
         return 1;
     }
-    if (name && fgets(zone, sizeof(zone), name))
-        zone[strcspn(zone, "\n")] = '\0';
-    if (name)
-        fclose(name);
+    gui_time_zone_get(zone);
     gui_settings_load(&settings);
-    collect("");
-    qsort(zones, zone_count, sizeof(*zones), compare);
+    zone_count = gui_time_zones(&zones);
+    shown = calloc(zone_count + 1, sizeof(*shown));
     filter();
     load_wallpapers();
     load_apps();
