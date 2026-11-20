@@ -4,7 +4,7 @@ resolution, all kept for next time."""
 import re, time
 from vm import VM, check, finish
 
-DESKTOP, DARK_BACKGROUND, LIGHT_BACKGROUND, LIGHT_TASKBAR = 0x1E2430, 0x1E2129, 0xF3F4F7, 0xEDEFF3
+DESKTOP, DARK_BACKGROUND, LIGHT_BACKGROUND, LIGHT_TASKBAR, LIGHT_DESKTOP = 0x1E2430, 0x1E2129, 0xF3F4F7, 0xEDEFF3, 0xD5DBE6
 SETTINGS_X, SETTINGS_Y = 112, 116 # the second window's contents, after widgets'
 # The taskbar shows a little of what's under it, which for the light one over the
 # dark desktop is a good way from its own colour.
@@ -132,6 +132,18 @@ try:
     mouse.to(1270, 700); time.sleep(1)
     w, h, px = v.screenshot()
     check('makes them square', corner(px)[0] == corner(px)[1], [hex(p) for p in corner(px)])
+
+    # No wallpaper leaves the desktop the theme's colour, a light one in the light theme.
+    for name, path in (('None', 'none'), ('Ocean', '/system/share/wallpapers/ocean.jpg')):
+        x, y, tw, th = where(f'wallpaper {name}')
+        at = v.mark()
+        mouse.click(SETTINGS_X + x + tw // 2, SETTINGS_Y + y + 40)
+        check(f'choosing {name}', v.wait(f'settings: wallpaper {path}\n', 5, at), v.text(at))
+        mouse.to(1270, 700); time.sleep(1)
+        if name == 'None':
+            w, h, px = v.screenshot()
+            check('leaves the desktop light', px(900, 100) == LIGHT_DESKTOP and px(900, 600) == LIGHT_DESKTOP,
+                  f'{px(900, 100):x} {px(900, 600):x}')
 
     # A 24 hour clock, 01:23, ends 12 pixels from the right, starting 52 from it,
     # and a 12 hour one, 1:23 AM, is wider. It's dark text, in the light theme.

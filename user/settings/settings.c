@@ -62,6 +62,7 @@ static struct {
 } wallpapers[MAX_WALLPAPERS];
 static int wallpaper_count;
 static char wallpaper[GUI_PATH_MAX];
+static uint32_t none_pixels[THUMB_WIDTH * THUMB_HEIGHT]; // no wallpaper's thumbnail
 
 static char resolution_names[MAX_RESOLUTIONS][16];
 static const char *resolutions[MAX_RESOLUTIONS];
@@ -263,7 +264,7 @@ static void screen_changed(void) {
 
 // Says where a widget is when that changes, for the tests to find it.
 static void report(struct gui_ui *ui, int index, const char *what) {
-    static struct gui_rect places[40 + MAX_WALLPAPERS];
+    static struct gui_rect places[41 + MAX_WALLPAPERS];
     struct gui_rect r = gui_last_rect(ui);
 
     if (memcmp(&places[index], &r, sizeof(r)))
@@ -320,21 +321,27 @@ static void appearance(struct gui_ui *ui) {
     report(ui, 10, "smooth");
     gui_separator(ui);
     gui_label(ui, "Wallpaper");
-    for (int i = 0; i < wallpaper_count; i++) {
+
+    // None first, which leaves the desktop the theme's colour, as wm has it.
+    struct gui_image none = {none_pixels, THUMB_WIDTH, THUMB_HEIGHT};
+
+    for (int i = 0; i < THUMB_WIDTH * THUMB_HEIGHT; i++)
+        none_pixels[i] = settings.light ? 0xFFD5DBE6 : 0xFF1E2430;
+    for (int i = -1; i < wallpaper_count; i++) {
+        const char *path = i < 0 ? "none" : wallpapers[i].path, *name = i < 0 ? "None" : wallpapers[i].name;
+        const struct gui_image *thumb = i < 0 ? &none : wallpapers[i].thumb.pixels ? &wallpapers[i].thumb : NULL;
         char label[64];
 
-        if (i % THUMBS_ACROSS)
+        if ((i + 1) % THUMBS_ACROSS)
             gui_same_line(ui);
-        snprintf(label, sizeof(label), "%s##wallpaper", wallpapers[i].name);
-        if (gui_image_button(ui, label, wallpapers[i].thumb.pixels ? &wallpapers[i].thumb : NULL,
-                             !strcmp(wallpaper, wallpapers[i].path))
-            && gui_wallpaper_set(wallpapers[i].path)) {
-            snprintf(wallpaper, sizeof(wallpaper), "%s", wallpapers[i].path);
+        snprintf(label, sizeof(label), "%s##wallpaper", name);
+        if (gui_image_button(ui, label, thumb, !strcmp(wallpaper, path)) && gui_wallpaper_set(path)) {
+            snprintf(wallpaper, sizeof(wallpaper), "%s", path);
             printf("settings: wallpaper %s\n", wallpaper);
             gui_settings_changed();
         }
-        snprintf(label, sizeof(label), "wallpaper %s", wallpapers[i].name);
-        report(ui, 32 + i, label);
+        snprintf(label, sizeof(label), "wallpaper %s", name);
+        report(ui, 41 + i, label);
     }
 }
 
