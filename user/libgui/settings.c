@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -63,7 +64,7 @@ void gui_settings_load(struct gui_settings *s) {
 
     *s = (struct gui_settings){.shadows = true, .animations = true, .sounds = true, .transparency = true, .blur = true, .corners = GUI_CORNERS, .repeat_delay = KEYBOARD_REPEAT_DELAY_DEFAULT,
                                .repeat_rate = KEYBOARD_REPEAT_RATE_DEFAULT, .mouse_speed = 5,
-                               .apps = {"files", "viewer", "player", "editor"}, .night_strength = 50};
+                               .apps = {"files", "viewer", "player", "netsurf", "editor"}, .night_strength = 50};
     while (f && fgets(line, sizeof(line), f)) {
         if (sscanf(line, "theme %31s", value) == 1)
             s->light = !strcmp(value, "light");
@@ -138,14 +139,18 @@ bool gui_settings_save(const struct gui_settings *s) {
     return fclose(f) == 0;
 }
 
-const char *const gui_kinds[GUI_KINDS] = {"folder", "picture", "sound", "text"};
+const char *const gui_kinds[GUI_KINDS] = {"folder", "picture", "sound", "page", "text"};
 
 int gui_kind_of(const char *path) {
     struct stat st;
     const struct gui_image *icon;
 
+    const char *dot = strrchr(path, '.');
+
     if (stat(path, &st) == 0 && S_ISDIR(st.st_mode))
         return GUI_KIND_FOLDER;
+    if (dot && (!strcasecmp(dot, ".html") || !strcasecmp(dot, ".htm")))
+        return GUI_KIND_PAGE;
     icon = gui_file_icon(path, false);
     return icon == gui_icon("image") ? GUI_KIND_PICTURE : icon == gui_icon("audio") ? GUI_KIND_SOUND : GUI_KIND_TEXT;
 }

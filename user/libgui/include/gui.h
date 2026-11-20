@@ -212,7 +212,7 @@ void gui_text(struct gui_canvas *canvas, int x, int y, const char *text, uint32_
 int gui_text_width(const char *text, int scale);
 
 // Files by what they hold, each opened in an app the settings choose.
-enum { GUI_KIND_FOLDER, GUI_KIND_PICTURE, GUI_KIND_SOUND, GUI_KIND_TEXT, GUI_KINDS };
+enum { GUI_KIND_FOLDER, GUI_KIND_PICTURE, GUI_KIND_SOUND, GUI_KIND_PAGE, GUI_KIND_TEXT, GUI_KINDS };
 extern const char *const gui_kinds[GUI_KINDS]; // their names in the settings
 
 // The desktop's settings, kept in /system/etc/gui.conf.
@@ -315,8 +315,8 @@ const struct gui_screen *gui_screen(void);
 void gui_wallpaper_get(char path[GUI_PATH_MAX]);
 bool gui_wallpaper_set(const char *path);
 
-// Images, as pixels of 0xAARRGGBB, from PNG, JPEG and BMP files. Each returns
-// false if it couldn't, with gui_image_error saying why.
+// Images, as pixels of 0xAARRGGBB, from PNG, JPEG, BMP, GIF (its first frame) and
+// WebP files. Each returns false if it couldn't, with gui_image_error saying why.
 struct gui_image {
     uint32_t *pixels;
     int width, height;

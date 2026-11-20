@@ -34,6 +34,14 @@ listed() {
 	awk -v name="$2" '$1 == name { on = 1 } on { for (i = 1; i <= NF; i++) if ($i ~ /\.c$/) print $i; on = $NF == "\\" }' "$1"
 }
 
+# The objects a makefile lists under variables' names, as their sources.
+objects() {
+	file=$1; shift
+	for name; do
+		awk -v name="$name" '$1 == name { on = 1 } on { for (i = 1; i <= NF; i++) if ($i ~ /\.o$/) print $i; on = $NF == "\\" }' "$file"
+	done | sed 's/\.o$/.c/'
+}
+
 mkdir -p "$root/build/ports" "$root/ports/dist"
 cd "$root/build/ports"
 
@@ -105,6 +113,14 @@ curl) # after zlib and mbedtls
 		"$PWD" "$PWD/lib/.libs/libcurl.a" "$mbedtls/library/libmbedtls.a $mbedtls/library/libmbedx509.a $mbedtls/library/libmbedcrypto.a $sysroot/lib/libz.a" \
 		> "$sysroot/lib/pkgconfig/libcurl.pc"
 	;;
+dejavu) # the fonts NetSurf shows pages in
+	fetch https://github.com/dejavu-fonts/dejavu-fonts/releases/download/version_2_37 dejavu-fonts-ttf-2.37.tar.bz2 \
+		fa9ca4d13871dd122f61258a80d01751d603b4d3ee14095d65453b4e846e17d7
+	rm -rf fonts && mkdir fonts
+	tar xjf "$root/ports/dist/dejavu-fonts-ttf-2.37.tar.bz2" -C fonts --strip-components=2 \
+		$(for f in Sans Sans-Bold Sans-Oblique Sans-BoldOblique Serif Serif-Bold SansMono SansMono-Bold; do
+			echo dejavu-fonts-ttf-2.37/ttf/DejaVu$f.ttf; done)
+	;;
 netsurf) # after curl, with libgui built
 	fetch https://download.netsurf-browser.org/netsurf/releases/source-full netsurf-all-3.11.tar.gz \
 		4dea880ff3c2f698bfd62c982b259340f9abcd7f67e6c8eb2b32c61f71644b7b
@@ -115,13 +131,16 @@ netsurf) # after curl, with libgui built
 	cd netsurf-all-3.11
 	cp "$root/ports/netsurf/nsfb_aximos.c" libnsfb/src/surface/aximos.c
 	cp "$root/ports/netsurf/aximos_image.c" "$root/ports/netsurf/aximos_image.h" netsurf/content/handlers/image/
+	cp "$root/ports/netsurf/font_aximos.c" "$root/ports/netsurf/font_aximos.h" netsurf/frontends/framebuffer/
+	cp "$root/ports/netsurf/download_aximos.c" netsurf/frontends/framebuffer/
+	cp "$root/ports/netsurf/clipboard_aximos.c" netsurf/frontends/framebuffer/clipboard.c
 	# NetSurf's build finds a cross compiler by the target's name.
 	mkdir -p tools
 	printf '#!/bin/sh\nexec %s "$@"\n' "$cc" > tools/x86_64-aximos-gcc
 	chmod +x tools/x86_64-aximos-gcc
 	ln -sf "$(command -v ar)" tools/x86_64-aximos-ar
 	export PATH=$PWD/tools:$sysroot/bin:$PATH PKG_CONFIG_LIBDIR=$sysroot/lib/pkgconfig PKG_CONFIG_PATH=
-	export CFLAGS="-I$root/user/libgui/include" LDFLAGS="-L$sysroot/lib $root/build/user/libgui.so"
+	export CFLAGS="-I$root/user/libgui/include -isystem $root/ports/dist" LDFLAGS="-L$sysroot/lib $root/build/user/libgui.so"
 	for lib in buildsystem libnslog libwapcaplet libparserutils libcss libhubbub libdom libnsbmp libnsgif \
 		libnsutils libutf8proc libnspsl libnsfb; do
 		make -j"$(nproc)" install --directory=$lib HOST=x86_64-aximos PREFIX="$sysroot" NSSHARED="$PWD/buildsystem" \
@@ -132,7 +151,14 @@ netsurf) # after curl, with libgui built
 	make -j"$(nproc)" --directory=netsurf HOST=x86_64-aximos CC=x86_64-aximos-gcc BUILD_CC=cc TARGET=framebuffer \
 		WARNFLAGS=-w NETSURF_USE_PNG=NO NETSURF_USE_JPEG=NO NETSURF_USE_WEBP=NO NETSURF_USE_JPEGXL=NO \
 		NETSURF_USE_NSSVG=NO NETSURF_USE_ROSPRITE=NO NETSURF_USE_LIBICONV_PLUG=NO NETSURF_USE_OPENSSL=NO \
-		NETSURF_FB_RESPATH=/system/share/netsurf NETSURF_FB_FONTPATH=/system/share/fonts
+		NETSURF_FB_FONTLIB=aximos NETSURF_FB_RESPATH=/system/share/netsurf NETSURF_FB_FONTPATH=/system/share/fonts
+	;;
+webp) # the decoder, which libgui loads for WebP pictures
+	fetch https://storage.googleapis.com/downloads.webmproject.org/releases/webp libwebp-1.5.0.tar.gz \
+		7d6fab70cf844bf6769077bd5d7a74893f8ffd4dfb42861745750c63c2a5c92c
+	[ -d libwebp-1.5.0 ] || tar xf "$root/ports/dist/libwebp-1.5.0.tar.gz"
+	cd libwebp-1.5.0
+	archive webp -I. -- $(objects makefile.unix DEC_OBJS DSP_DEC_OBJS UTILS_DEC_OBJS)
 	;;
 ogg)
 	fetch https://downloads.xiph.org/releases/ogg libogg-1.3.6.tar.xz \

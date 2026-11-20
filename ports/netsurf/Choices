@@ -1,3 +1,4 @@
 window_width:1000
 window_height:700
 ca_bundle:/system/etc/ca-certificates.crt
+homepage_url:https://html.duckduckgo.com/html/

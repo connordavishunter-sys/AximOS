@@ -12,3 +12,5 @@ bool image_fail(const char *why);
 
 // Pixels for an image of a size, refusing ones too big to be real.
 bool image_alloc(struct gui_image *image, long width, long height);
+bool gif_decode(const uint8_t *data, size_t size, struct gui_image *image);
+bool webp_decode(const uint8_t *data, size_t size, struct gui_image *image);

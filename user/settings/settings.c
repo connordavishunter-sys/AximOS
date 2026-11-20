@@ -30,7 +30,7 @@
 
 enum { APPEARANCE, DISPLAY, KEYBOARD, TIME, SOUND, APPS, TASKBAR, TABS };
 static const char *const tabs[] = {"Appearance", "Display", "Keyboard", "Date & time", "Sound", "Apps", "Taskbar"};
-static const char *const kind_names[GUI_KINDS] = {"Folders", "Pictures", "Sounds", "Other files"};
+static const char *const kind_names[GUI_KINDS] = {"Folders", "Pictures", "Sounds", "Web pages", "Other files"};
 
 // The apps there are, to open each kind of file in.
 static char app_names[MAX_APPS][32];

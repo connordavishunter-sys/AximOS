@@ -39,8 +39,8 @@ try:
     check('a click under Apps opens the menu', v.wait('wm: menu 0 at', 5, at), v.text(at))
     v.key('esc'); time.sleep(0.3)
     at = v.mark()
-    click(W - 1, H - 1)
-    check('and in the corner, the calendar', v.wait('wm: calendar', 5, at), v.text(at))
+    click(W - 30, H - 1)
+    check('and under the clock, the calendar', v.wait('wm: calendar', 5, at), v.text(at))
     v.key('esc'); time.sleep(0.3)
 
     # Two things copied in the run box are both in the clipboard's history, newest

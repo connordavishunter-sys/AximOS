@@ -1,4 +1,4 @@
-"""Checks libgui's PNG, JPEG and BMP decoders on the host, against Pillow, on images
+"""Checks libgui's PNG, JPEG, BMP and GIF decoders on the host, against Pillow, on images
 of every kind they read: compiled natively, they decode each file to raw pixels."""
 import io, os, struct, subprocess, zlib
 from PIL import Image, ImageDraw
@@ -24,7 +24,7 @@ int main(int argc, char **argv) {
 }
 ''')
 subprocess.run(['gcc', '-std=gnu2x', '-O2', '-Wall', '-I', LIBGUI + '/include', '-I', ROOT + '/abi', '-o', PROGRAM,
-                HARNESS] + [f'{LIBGUI}/{n}.c' for n in ('image', 'png', 'jpeg', 'bmp')], check=True)
+                HARNESS] + [f'{LIBGUI}/{n}.c' for n in ('image', 'png', 'jpeg', 'bmp', 'gif', 'webp')], check=True)
 
 
 def decode(path):
@@ -130,6 +130,15 @@ path = saved('rgbx.bmp', picture(mode='RGBA'))
 same('BMP 32 bit', path, Image.open(path))
 same('BMP 8 bit palette', saved('p8.bmp', base.quantize(200)), base.quantize(200))
 same('BMP 1 bit', saved('one.bmp', base.convert('1')), base.convert('1'))
+
+palette = base.quantize(200)
+same('GIF', saved('p.gif', palette), palette)
+same('GIF interlaced', saved('interlaced.gif', palette, interlace=True), palette)
+small = base.quantize(16)
+path = saved('see_through.gif', small, transparency=3)
+want = small.convert('RGBA')
+want.putdata([(0, 0, 0, 0) if i == 3 else p for i, p in zip(small.getdata(), want.getdata())])
+same('GIF with a see-through colour', path, want)
 path = converted('p4.bmp', base, '-colors', '16', '-type', 'Palette', '-compress', 'None')
 same('BMP 4 bit or 8 bit palette', path, Image.open(path))
 
@@ -165,6 +174,7 @@ same('BMP 32 bit with an alpha mask', bmp('alpha.bmp', w, h, 32, rows32, (0xFF00
 for name, data in (('truncated.png', open(f'{WORK}/rgb.png', 'rb').read()[:300]),
                    ('truncated.jpg', open(f'{WORK}/sub2.jpg', 'rb').read()[:400]),
                    ('truncated.bmp', open(f'{WORK}/rgb.bmp', 'rb').read()[:500]),
+                   ('truncated.gif', open(f'{WORK}/p.gif', 'rb').read()[:900]),
                    ('garbage.png', b'\x89PNG\r\n\x1a\n' + bytes(range(256)) * 4),
                    ('not_an_image', b'hello')):
     open(f'{WORK}/{name}', 'wb').write(data)

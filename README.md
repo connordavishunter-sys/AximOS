@@ -37,7 +37,8 @@ with the dash shell.
   across. Settings can turn all of it off.
 - A floating, see-through taskbar at the top or bottom, which can hide itself (and still
   takes clicks at the very edge of the screen), with a start menu sorted into folders
-  that searches the apps as you type
+  that searches the apps as you type, opened by throwing the mouse into the corner, and a
+  show desktop corner at the other end
 - Blurred glass for the taskbar, title bars, menus, panels, notifications and the
   window switcher, and for any window that asks for it (the terminal does). Settings
   can turn off the blur, or the transparency altogether, and set how round corners are, down
@@ -46,8 +47,8 @@ with the dash shell.
   volume), the network, notifications, a calendar, and the clipboard's history, to put
   back something copied earlier
 - Notifications that can carry a button, and stack up when one app sends several
-- Soft sounds of its own for notifications, logging in and out, the volume and
-  screenshots, made as they play, which Settings can turn off
+- Soft sounds of its own for notifications, logging in and out, the volume, snapping
+  windows and screenshots, made as they play, which Settings can turn off
 - Screenshots of the screen, a window, or an area dragged across, saved to Pictures
   and copied
 - Desktop icons on a grid, drag and drop between apps, and a clipboard for text and pictures
@@ -63,12 +64,12 @@ with the dash shell.
 
 | App        | What it does                                                          |
 |------------|-----------------------------------------------------------------------|
-| NetSurf    | Web browser, with HTTPS, CSS, PNG and JPEG pictures, and some JavaScript |
+| NetSurf    | Web browser, with HTTPS, CSS, smooth text, PNG, JPEG, GIF and WebP pictures, some JavaScript, downloads to ~/Downloads, and the system clipboard |
 | Files      | File manager: places, recent files, search through folders, tabs, multi-select, thumbnails, Open with, and a trash you can restore from |
 | Terminal   | Tabs, scrollback, selection, find, and a see-through background       |
 | Editor     | Tabs, find and replace, go to line, colouring for C and shell scripts |
 | Paint      | Pencil, shapes, fill, text, selections, zoom, undo and redo           |
-| Viewer     | Pictures, with zoom and turning                                       |
+| Viewer     | PNG, JPEG, BMP, GIF and WebP pictures, with zoom and turning          |
 | Player     | WAV, MP3, FLAC, Vorbis, Opus and AAC, with shuffle and repeat         |
 | Calculator | With a history                                                        |
 | Tasks      | What's running, sortable, with a graph of CPU and memory use          |
@@ -112,7 +113,7 @@ make
 
 This builds `build/aximos.iso` (the kernel and bootloader) and `build/disk.img` (a 512 MB
 FAT32 disk with everything else). The first build downloads the source of dash, Lua, mbedTLS,
-zlib, curl, NetSurf, stb_truetype and the audio codecs into `ports/dist`, checks their SHA-256 sums, and builds
+zlib, curl, NetSurf, libwebp, the DejaVu fonts, stb_truetype and the audio codecs into `ports/dist`, checks their SHA-256 sums, and builds
 them against AximOS's own libc.
 
 ## Running
@@ -179,7 +180,7 @@ user/libaudio/   reading and writing sound files, through user/codecs/
 user/wm/         the window manager
 user/<name>/     every other folder is a program
 rootfs/          copied onto the disk as it is: settings, icons, fonts, wallpapers
-ports/           downloads and builds dash, Lua, mbedTLS, zlib, curl, NetSurf, stb_truetype and the codecs
+ports/           downloads and builds dash, Lua, mbedTLS, zlib, curl, NetSurf, libwebp, stb_truetype and the codecs
 tests/           the tests, and vm.py, which drives QEMU for them
 ```
 
@@ -196,7 +197,7 @@ AximOS is developed and tested in QEMU. It hasn't been tried on real hardware ye
 AximOS uses [Limine](https://github.com/limine-bootloader/limine),
 [dash](http://gondor.apana.org.au/~herbert/dash/), [Lua](https://www.lua.org),
 [Mbed TLS](https://github.com/Mbed-TLS/mbedtls), [zlib](https://zlib.net), [curl](https://curl.se),
-[NetSurf](https://www.netsurf-browser.org),
+[NetSurf](https://www.netsurf-browser.org), [libwebp](https://chromium.googlesource.com/webm/libwebp),
 [stb_truetype](https://github.com/nothings/stb), the
 [DejaVu](https://dejavu-fonts.github.io) fonts, and for sound
 [libogg, libvorbis, Opus, FLAC](https://xiph.org), [minimp3](https://github.com/lieff/minimp3),

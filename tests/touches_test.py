@@ -1,6 +1,6 @@
-"""Checks wm's sounds for logging in and notifications, snapping windows to quarters
-with the keys and by dragging to a corner, the layouts on the maximize button, and
-Files searching the folders inside the one it shows."""
+"""Checks wm's sounds for logging in, notifications and snapping, snapping windows to
+quarters with the keys and by dragging to a corner, the show desktop corner, the layouts
+on the maximize button, and Files searching the folders inside the one it shows."""
 import re, time, wave
 import numpy as np
 from vm import VM, check, finish
@@ -60,6 +60,24 @@ try:
     v.key('meta_l-down')
     check('and again takes the bottom quarter', v.wait('wm: snapped Calculator bottom left', 5, at), v.text(at))
     time.sleep(0.5)
+
+    # Snapping has a sound of its own, G then C.
+    recording = f'{v.dir}/snap.wav'
+    v.record(recording)
+    v.key('meta_l-up'); time.sleep(0.8)
+    v.command('stopcapture 0'); time.sleep(0.3)
+    heard = pitches(recording)
+    check('snapping sounds G and C', near(heard, [784, 1046]), heard)
+    v.key('meta_l-down'); time.sleep(0.5)
+
+    # The corner past the taskbar's right end puts the windows away, and again brings them back.
+    at = v.mark()
+    click(W - 2, H - 2)
+    check('the show desktop corner minimizes the windows', v.wait('wm: desktop shown', 5, at), v.text(at))
+    time.sleep(0.5)
+    click(W - 2, H - 2)
+    check('and brings them back', v.wait('wm: desktop covered again', 5, at), v.text(at))
+    time.sleep(0.8)
 
     # Dragged to the right edge near the bottom, it takes the bottom right quarter.
     at = v.mark()

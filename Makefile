@@ -46,8 +46,9 @@ CODECS := wav mp3 flac vorbis opus aac
 CODEC_SOS := $(CODECS:%=$(BUILD)/user/lib%.so)
 LIBOGG_SO := $(BUILD)/user/libogg.so
 CODEC_DIR := $(BUILD)/ports/codecs
-CODEC_PORTS := ogg vorbis opus flac mp3 aac
-CODEC_ARCHIVES := $(addprefix $(CODEC_DIR)/,ogg.a vorbis.a opus.a flac.a shine.a faad.a faac.a)
+CODEC_PORTS := ogg vorbis opus flac mp3 aac webp
+CODEC_ARCHIVES := $(addprefix $(CODEC_DIR)/,ogg.a vorbis.a opus.a flac.a shine.a faad.a faac.a webp.a)
+LIBWEBP_SO := $(BUILD)/user/libwebp.so # which libgui loads for WebP pictures
 AUDIO_APPS := convert player
 LIBGCC := $(shell $(CC) -print-libgcc-file-name)
 
@@ -64,6 +65,7 @@ ZLIB := $(BUILD)/ports/sysroot/lib/libz.a
 CURL := $(BUILD)/ports/curl-8.11.1/src/curl
 NETSURF := $(BUILD)/ports/netsurf-all-3.11/netsurf/nsfb
 NETSURF_RES := $(BUILD)/ports/netsurf-all-3.11/netsurf/frontends/framebuffer/res
+FONTS := $(BUILD)/ports/fonts/DejaVuSans.ttf # and the rest of the DejaVu fonts NetSurf uses
 MBEDTLS_LIBS := $(MBEDTLS)/library/libmbedtls.a $(MBEDTLS)/library/libmbedx509.a $(MBEDTLS)/library/libmbedcrypto.a
 
 # Every folder in user/ but the libraries is a program. init goes in /system/boot, the
@@ -173,6 +175,9 @@ $(LIBAUDIO_SO): $(patsubst user/libaudio/%.c,$(BUILD)/user/libaudio_pic/%.o,$(wi
 $(CODEC_ARCHIVES) &: $(LIBC_SO) ports/build.sh ports/aximos-cc
 	for p in $(CODEC_PORTS); do ports/build.sh $$p || exit 1; done
 
+$(LIBWEBP_SO): $(CODEC_ARCHIVES) $(LIBC_SO)
+	$(SHARED) -soname libwebp.so --whole-archive $(CODEC_DIR)/webp.a --no-whole-archive $(LIBC_SO) $(LIBGCC) -o $@
+
 $(LIBOGG_SO): $(CODEC_ARCHIVES) $(LIBC_SO)
 	$(SHARED) -soname libogg.so --whole-archive $(CODEC_DIR)/ogg.a --no-whole-archive $(LIBC_SO) -o $@
 
@@ -251,13 +256,16 @@ $(CURL): $(ZLIB) $(MBEDTLS_LIBS) ports/build.sh
 $(NETSURF): $(CURL) $(LIBGUI_SO) ports/build.sh $(wildcard ports/netsurf/*)
 	ports/build.sh netsurf
 
+$(FONTS): ports/build.sh
+	ports/build.sh dejavu
+
 $(ZONES):
 	mkdir -p $@
 	tar -C $(ZONEINFO) -chf - --exclude=./posix --exclude=./right . | tar -C $@ -xf -
 	find $@ -type f | while read -r f; do [ "$$(head -c 4 "$$f")" = TZif ] || rm "$$f"; done
 
-$(DISK): $(PROGRAM_ELFS) $(LIBC_SO) $(LIBGUI_SO) $(LIBAUDIO_SO) $(LIBOGG_SO) $(CODEC_SOS) $(ROOTFS_FILES) $(DASH) $(LUA) \
-		$(CURL) $(NETSURF) | $(ZONES)
+$(DISK): $(PROGRAM_ELFS) $(LIBC_SO) $(LIBGUI_SO) $(LIBAUDIO_SO) $(LIBOGG_SO) $(CODEC_SOS) $(LIBWEBP_SO) $(ROOTFS_FILES) $(DASH) $(LUA) \
+		$(CURL) $(NETSURF) $(FONTS) | $(ZONES)
 	rm -f $@
 	mkfs.fat -F 32 -C $@ $$(($(DISK_SIZE_MB) * 1024))
 	mcopy -s -i $@ rootfs/system ::/
@@ -266,7 +274,7 @@ $(DISK): $(PROGRAM_ELFS) $(LIBC_SO) $(LIBGUI_SO) $(LIBAUDIO_SO) $(LIBOGG_SO) $(C
 	mcopy -s -i $@ $(ZONES) ::/system/share/
 	$(call install_stripped,$(LIBC_SO),/system/lib/libc.so)
 	$(call install_stripped,$(LIBGUI_SO),/system/lib/libgui.so)
-	for l in $(LIBAUDIO_SO) $(LIBOGG_SO) $(CODEC_SOS); do $(call install_stripped,$$l,/system/lib/$$(basename $$l)); done
+	for l in $(LIBAUDIO_SO) $(LIBOGG_SO) $(CODEC_SOS) $(LIBWEBP_SO); do $(call install_stripped,$$l,/system/lib/$$(basename $$l)); done
 	$(call install_stripped,$(BUILD)/user/init.elf,/system/boot/init)
 	for p in $(filter-out init $(GUI_APPS),$(PROGRAMS)); do $(call install_stripped,$(BUILD)/user/$$p.elf,/system/bin/$$p); done
 	$(foreach p,$(GUI_APPS),$(call install_stripped,$(BUILD)/user/$(p).elf,/system/bin/gui/$(strip $(call app_dir,$(p)))$(p)) &&) true
@@ -277,6 +285,7 @@ $(DISK): $(PROGRAM_ELFS) $(LIBC_SO) $(LIBGUI_SO) $(LIBAUDIO_SO) $(LIBOGG_SO) $(C
 	rm -rf $(BUILD)/netsurf && cp -rL $(NETSURF_RES) $(BUILD)/netsurf && cp ports/netsurf/Choices $(BUILD)/netsurf/
 	rm -rf $(BUILD)/netsurf/de $(BUILD)/netsurf/fr $(BUILD)/netsurf/it $(BUILD)/netsurf/ja $(BUILD)/netsurf/nl $(BUILD)/netsurf/zh_CN
 	mcopy -s -i $@ $(BUILD)/netsurf ::/system/share/
+	mcopy -i $@ $(BUILD)/ports/fonts/*.ttf ::/system/share/fonts/
 	rm $(BUILD)/stripped
 
 $(ISO): $(KERNEL) limine.conf

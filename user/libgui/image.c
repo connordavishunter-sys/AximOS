@@ -46,7 +46,11 @@ bool gui_image_decode(const void *data, size_t size, struct gui_image *image) {
         return jpeg_decode(d, size, image);
     if (size >= 2 && d[0] == 'B' && d[1] == 'M')
         return bmp_decode(d, size, image);
-    return image_fail("not a PNG, JPEG or BMP");
+    if (size >= 6 && (!memcmp(d, "GIF87a", 6) || !memcmp(d, "GIF89a", 6)))
+        return gif_decode(d, size, image);
+    if (size >= 12 && !memcmp(d, "RIFF", 4) && !memcmp(d + 8, "WEBP", 4))
+        return webp_decode(d, size, image);
+    return image_fail("not a PNG, JPEG, BMP, GIF or WebP");
 }
 
 bool gui_image_load(const char *path, struct gui_image *image) {
@@ -197,7 +201,7 @@ const struct gui_image *gui_icon(const char *name) {
 }
 
 const struct gui_image *gui_file_icon(const char *name, bool folder) {
-    static const char *const images[] = {"png", "jpg", "jpeg", "bmp", NULL};
+    static const char *const images[] = {"png", "jpg", "jpeg", "bmp", "gif", "webp", NULL};
     static const char *const texts[] = {"txt", "md", "c", "h", "py", "sh", "conf", "log", "json", "html", "css", NULL};
     static const char *const sounds[] = {"wav", "mp3", "flac", "ogg", "oga", "opus", "aac", NULL};
     const char *dot = strrchr(name, '.');

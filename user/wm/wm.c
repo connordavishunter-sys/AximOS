@@ -154,6 +154,7 @@ struct window {
     char app[GUI_TITLE_MAX]; // the program, which picks its icon
     struct gui_canvas canvas;
     bool minimized;
+    bool put_away; // minimized by the show desktop corner, which brings it back
 
     // The size it's been asked to be. One request is out at a time, and the program
     // answers it with a new buffer of whatever size it chose.
@@ -1315,7 +1316,7 @@ static void close_panel(void) {
 // Short sounds of wm's own, made as they're played by a child, so wm never waits
 // for the sound card: notes that each start at once and fade away, a sine with a
 // little of its octave so they're softer than beeps, or for the shutter, a hiss.
-enum sound { SOUND_NOTICE, SOUND_LOG_IN, SOUND_LOG_OUT, SOUND_VOLUME, SOUND_SHUTTER };
+enum sound { SOUND_NOTICE, SOUND_LOG_IN, SOUND_LOG_OUT, SOUND_VOLUME, SOUND_SHUTTER, SOUND_SNAP };
 #define SOUND_RATE 48000
 #define SOUND_NOTES 3
 
@@ -1326,6 +1327,7 @@ static void play_sound(enum sound which) {
         [SOUND_LOG_OUT] = {{784, 0, 500}, {659.3f, 110, 500}, {523.3f, 220, 800}},
         [SOUND_VOLUME] = {{1046.5f, 0, 60}},
         [SOUND_SHUTTER] = {{0, 0, 120}},
+        [SOUND_SNAP] = {{784, 0, 70}, {1046.5f, 35, 110}},
     };
     long frames = 0;
     int rate = SOUND_RATE, fd;
@@ -3350,6 +3352,7 @@ static void show(struct window *w) {
     if (w->minimized)
         arrive(w, button_for(w), MINIMIZE_MS);
     w->minimized = false;
+    w->put_away = false;
     raise_window(w);
     set_focus(w);
     damage_taskbar();
@@ -4534,6 +4537,8 @@ static void snap_to(struct window *w, enum snap to) {
         untile(w);
     else
         place(w, snap_rect(to));
+    if (to != SNAP_NONE)
+        play_sound(SOUND_SNAP);
     w->snapped = to;
     reframe(w, was);
 }
@@ -4679,16 +4684,43 @@ static void press_here(uint32_t changed) {
     }
 }
 
+// The show desktop corner puts away the workspace's windows, or brings back those it
+// put away if there are none left out.
+static void show_desktop(void) {
+    struct window *list[MAX_WINDOWS];
+    int count = windows_by_age(list), shown = 0;
+
+    for (int i = 0; i < count; i++)
+        shown += !list[i]->bare && !list[i]->minimized;
+    for (int i = 0; i < count; i++) {
+        if (list[i]->bare)
+            continue;
+        if (shown && !list[i]->minimized) {
+            minimize(list[i]);
+            list[i]->put_away = true;
+        } else if (!shown && list[i]->put_away) {
+            show(list[i]);
+        }
+    }
+    printf("wm: desktop %s\n", shown ? "shown" : "covered again");
+}
+
 // The gap between the taskbar and the screen's edges counts as the taskbar, so the
 // mouse can be thrown at the edge: a press there is taken as one on the bar, in line
-// with it, or at its end beside the side gaps.
+// with it, or at its end beside the side gaps. The gap at the right end of it is the
+// show desktop corner.
 static void press(uint32_t changed) {
     struct rect bar = taskbar();
     enum part part;
     int x = cursor_x, y = cursor_y, edges;
     bool beyond = settings.taskbar_top ? y < bar.y + bar.height : y >= bar.y;
+    bool outside = !locked && bar_visible() && beyond && !contains(bar, x, y) && !window_at(x, y, &part, &edges);
 
-    if (!locked && bar_visible() && beyond && !contains(bar, x, y) && !window_at(x, y, &part, &edges)) {
+    if (outside && x >= bar.x + bar.width && (changed & MOUSE_BUTTON_LEFT)) {
+        show_desktop();
+        return;
+    }
+    if (outside) {
         cursor_x = x < bar.x + 4 ? bar.x + 4 : x > bar.x + bar.width - 5 ? bar.x + bar.width - 5 : x;
         cursor_y = bar.y + bar.height / 2;
     }
