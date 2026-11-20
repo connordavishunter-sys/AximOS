@@ -29,6 +29,7 @@
 //     sounds on
 //     transparency on
 //     blur on
+//     corners 8
 //
 // Anything missing or not understood is left as it is by default.
 
@@ -60,7 +61,7 @@ void gui_settings_load(struct gui_settings *s) {
     char line[64], value[32], kind[16];
     int width, height;
 
-    *s = (struct gui_settings){.shadows = true, .animations = true, .sounds = true, .transparency = true, .blur = true, .repeat_delay = KEYBOARD_REPEAT_DELAY_DEFAULT,
+    *s = (struct gui_settings){.shadows = true, .animations = true, .sounds = true, .transparency = true, .blur = true, .corners = GUI_CORNERS, .repeat_delay = KEYBOARD_REPEAT_DELAY_DEFAULT,
                                .repeat_rate = KEYBOARD_REPEAT_RATE_DEFAULT, .mouse_speed = 5,
                                .apps = {"files", "viewer", "player", "editor"}, .night_strength = 50};
     while (f && fgets(line, sizeof(line), f)) {
@@ -101,6 +102,8 @@ void gui_settings_load(struct gui_settings *s) {
             s->transparency = strcmp(value, "off") != 0;
         else if (sscanf(line, "blur %31s", value) == 1)
             s->blur = strcmp(value, "off") != 0;
+        else if (sscanf(line, "corners %d", &s->corners) == 1)
+            s->corners = s->corners < 0 ? 0 : s->corners > GUI_MAX_RADIUS ? GUI_MAX_RADIUS : s->corners;
         else if (sscanf(line, "app %15s %31s", kind, value) == 2) {
             for (int i = 0; i < GUI_KINDS; i++) {
                 if (!strcmp(kind, gui_kinds[i]))
@@ -129,8 +132,9 @@ bool gui_settings_save(const struct gui_settings *s) {
     fprintf(f, "accent %s\ntaskbar %s\nautohide %s\nicons %s\nnight %s %d\nairplane %s\n", accent_keys[s->accent],
             s->taskbar_top ? "top" : "bottom", s->autohide ? "on" : "off", s->hide_icons ? "off" : "on",
             s->night_light ? "on" : "off", s->night_strength, s->airplane ? "on" : "off");
-    fprintf(f, "animations %s\nquiet %s\nsounds %s\ntransparency %s\nblur %s\n", s->animations ? "on" : "off",
-            s->quiet ? "on" : "off", s->sounds ? "on" : "off", s->transparency ? "on" : "off", s->blur ? "on" : "off");
+    fprintf(f, "animations %s\nquiet %s\nsounds %s\ntransparency %s\nblur %s\ncorners %d\n",
+            s->animations ? "on" : "off", s->quiet ? "on" : "off", s->sounds ? "on" : "off",
+            s->transparency ? "on" : "off", s->blur ? "on" : "off", s->corners);
     return fclose(f) == 0;
 }
 

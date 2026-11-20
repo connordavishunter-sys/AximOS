@@ -40,7 +40,8 @@ with the dash shell.
   that searches the apps as you type
 - Blurred glass for the taskbar, title bars, menus, panels, notifications and the
   window switcher, and for any window that asks for it (the terminal does). Settings
-  can turn off the blur, or the transparency altogether
+  can turn off the blur, or the transparency altogether, and set how round corners are, down
+  to square
 - A tray with quick settings (airplane mode, night light, dark mode, do not disturb,
   volume), the network, notifications, a calendar, and the clipboard's history, to put
   back something copied earlier

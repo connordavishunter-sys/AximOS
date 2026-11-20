@@ -302,6 +302,14 @@ static void appearance(struct gui_ui *ui) {
     if (gui_checkbox(ui, "Blur behind see-through things", &settings.blur))
         save(settings.blur ? "blur on" : "blur off");
     report(ui, 34, "blur");
+    gui_label(ui, "Corners, from square to round:");
+    if (gui_slider(ui, "##corners", &settings.corners, 0, GUI_MAX_RADIUS)) {
+        char what[32];
+
+        snprintf(what, sizeof(what), "corners %d", settings.corners);
+        save(what);
+    }
+    report(ui, 35, "corners");
 
     bool smooth = !settings.sharp_text;
 

@@ -189,6 +189,7 @@ void gui_copy(struct gui_canvas *canvas, int x, int y, const struct gui_canvas *
 // them, either of which can be GUI_NONE, which no pixel is.
 #define GUI_NONE 0xFFFFFFFF
 #define GUI_MAX_RADIUS 16
+#define GUI_CORNERS 8 // windows' corner radius unless the settings say otherwise
 void gui_fill_rounded(struct gui_canvas *canvas, int x, int y, int width, int height, int radius, uint32_t color);
 void gui_frame_rounded(struct gui_canvas *canvas, int x, int y, int width, int height, int radius, uint32_t fill,
                        uint32_t line);
@@ -237,6 +238,8 @@ struct gui_settings {
     bool sounds;        // wm's own: a chime for notifications, logging in and out, the volume
     bool transparency;  // the taskbar, title bars, menus and the terminal show what's under them
     bool blur;          // and blur it
+    int corners;        // windows' corner radius, 0 for square, up to GUI_MAX_RADIUS, with
+                        // smaller ones, like buttons', rounded in proportion
 };
 
 // The accent colours there are, as Settings names them, and what goes on each.

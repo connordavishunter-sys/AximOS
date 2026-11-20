@@ -54,8 +54,8 @@
 
 #define TASKBAR_HEIGHT 32
 #define BAR_ALPHA 200 // out of 256: the taskbar and title bars show a little of what's under them
-#define RADIUS 8      // of windows', menus' and panels' corners
-#define SMALL_RADIUS 4 // of buttons and highlights
+#define RADIUS settings.corners              // of windows', menus' and panels' corners
+#define SMALL_RADIUS (settings.corners / 2) // of buttons and highlights
 #define TASKBAR_BUTTON_WIDTH 160
 #define LAUNCHER_WIDTH 64
 
@@ -204,7 +204,7 @@ static struct window *focused;
 static uint8_t falloff[SHADOW + 1][SHADOW + 1];
 // Out of 256, how much of each pixel in a corner, from the corner, is inside a
 // window's rounded edge.
-static uint16_t coverage[RADIUS][RADIUS];
+static uint16_t coverage[GUI_MAX_RADIUS][GUI_MAX_RADIUS];
 static struct gui_settings settings;
 
 // Whether a window shows what's under it, which the settings can turn off.
@@ -5197,6 +5197,7 @@ static void load_settings(void) {
     bool icons_were_hidden = settings.hide_icons;
 
     gui_settings_load(&settings);
+    make_coverage();
     theme_now = *(settings.light ? &light : &dark);
     theme_now.title_focused = gui_accent_colors[settings.accent];
     theme_now.on_accent = gui_on_accent(settings.accent);
@@ -5291,7 +5292,6 @@ int main(int argc, char **argv) {
     mkdir(desktop_dir, 0755);
     add_damage((struct rect){0, 0, screen.width, screen.height});
     make_falloff();
-    make_coverage();
     load_settings();
     load_volume();
     load_desktop(false);

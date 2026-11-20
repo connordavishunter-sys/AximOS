@@ -23,10 +23,12 @@
 #define TAB_WIDTH 170 // at most, with narrower ones when there are many
 #define TAB_CLOSE 16
 #define SEPARATOR_HEIGHT 9 // in a menu
-#define ROUND 5      // the corners of buttons, boxes, lists and scroll bars
-#define ROUND_SMALL 3 // of checkboxes and what's in them
-#define ROUND_POPUP 4 // of menus and dropdowns, as far in as their first item
-#define ROUND_DIALOG 8
+// Corners' radii, for windows' as GUI_CORNERS, and in proportion for the settings'.
+static int corners = GUI_CORNERS;
+#define ROUND (5 * corners / GUI_CORNERS)       // the corners of buttons, boxes, lists and scroll bars
+#define ROUND_SMALL (3 * corners / GUI_CORNERS) // of checkboxes and what's in them
+#define ROUND_POPUP (4 * corners / GUI_CORNERS) // of menus and dropdowns, as far in as their first item
+#define ROUND_DIALOG corners
 
 // Colours, from the theme the settings choose.
 struct theme {
@@ -150,6 +152,7 @@ static void load_theme(void) {
     struct gui_settings settings;
 
     gui_settings_load(&settings);
+    corners = settings.corners;
 
     // Another accent colour than the first, which the themes are made for, has what
     // goes with it worked out from it.

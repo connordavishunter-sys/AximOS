@@ -122,6 +122,17 @@ try:
             check('the wallpaper shows unblurred', sharp != blurred and len(set(sharp)) > 4, len(set(sharp)))
     check('then the taskbar is flat', len(set(strip(px))) == 1, set(strip(px)))
 
+    # The corners slider at its left end makes windows square: the top left corner
+    # of settings' frame is then the border, like the top edge beside it.
+    corner = lambda px: (px(SETTINGS_X - 1, SETTINGS_Y - 25), px(SETTINGS_X + 20, SETTINGS_Y - 25))
+    check('windows have round corners', corner(px)[0] != corner(px)[1], [hex(p) for p in corner(px)])
+    at = v.mark()
+    mouse.click(*middle('corners', 3))
+    check('the corners slider to square', v.wait('settings: corners 0', 5, at), v.text(at))
+    mouse.to(1270, 700); time.sleep(1)
+    w, h, px = v.screenshot()
+    check('makes them square', corner(px)[0] == corner(px)[1], [hex(p) for p in corner(px)])
+
     # A 24 hour clock, 01:23, ends 12 pixels from the right, starting 52 from it,
     # and a 12 hour one, 1:23 AM, is wider. It's dark text, in the light theme.
     # Key repeat: a rate of 0, at the slider's left end, stops it.
