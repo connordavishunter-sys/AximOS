@@ -296,6 +296,12 @@ static void appearance(struct gui_ui *ui) {
     if (gui_checkbox(ui, "Animations", &settings.animations))
         save(settings.animations ? "animations on" : "animations off");
     report(ui, 30, "animations");
+    if (gui_checkbox(ui, "Transparency", &settings.transparency))
+        save(settings.transparency ? "transparency on" : "transparency off");
+    report(ui, 33, "transparency");
+    if (gui_checkbox(ui, "Blur behind see-through things", &settings.blur))
+        save(settings.blur ? "blur on" : "blur off");
+    report(ui, 34, "blur");
 
     bool smooth = !settings.sharp_text;
 

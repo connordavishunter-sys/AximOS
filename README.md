@@ -39,7 +39,8 @@ with the dash shell.
   takes clicks at the very edge of the screen), with a start menu sorted into folders
   that searches the apps as you type
 - Blurred glass for the taskbar, title bars, menus, panels, notifications and the
-  window switcher, and for any window that asks for it (the terminal does)
+  window switcher, and for any window that asks for it (the terminal does). Settings
+  can turn off the blur, or the transparency altogether
 - A tray with quick settings (airplane mode, night light, dark mode, do not disturb,
   volume), the network, notifications, a calendar, and the clipboard's history, to put
   back something copied earlier

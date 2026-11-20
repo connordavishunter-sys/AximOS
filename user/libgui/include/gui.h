@@ -232,6 +232,8 @@ struct gui_settings {
     bool animations;    // windows grow in, shrink away, and minimize to the taskbar
     bool quiet;         // do not disturb: notifications go straight to the tray, without showing
     bool sounds;        // wm's own: a chime for notifications, logging in and out, the volume
+    bool transparency;  // the taskbar, title bars, menus and the terminal show what's under them
+    bool blur;          // and blur it
 };
 
 // The accent colours there are, as Settings names them, and what goes on each.

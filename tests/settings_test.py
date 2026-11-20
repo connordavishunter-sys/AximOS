@@ -106,6 +106,22 @@ try:
     w, h, px = v.screenshot()
     check('puts it on the desktop', px(900, 100) != DESKTOP and px(900, 600) != DESKTOP, f'{px(900, 100):x} {px(900, 600):x}')
 
+    # The taskbar shows the wallpaper through it, blurred, until blur and then
+    # transparency are turned off, leaving it its own flat colour.
+    strip = lambda px: [px(x, 790) for x in range(600, 760)]
+    blurred = strip(px)
+    check('the taskbar shows the wallpaper', len(set(blurred)) > 4, len(set(blurred)))
+    for name, said in (('blur', 'blur off'), ('transparency', 'transparency off')):
+        at = v.mark()
+        mouse.click(*middle(name, 6))
+        check(f'turning {said}', v.wait(f'settings: {said}', 5, at), v.text(at))
+        mouse.to(1270, 700); time.sleep(1)
+        w, h, px = v.screenshot()
+        if name == 'blur':
+            sharp = strip(px)
+            check('the wallpaper shows unblurred', sharp != blurred and len(set(sharp)) > 4, len(set(sharp)))
+    check('then the taskbar is flat', len(set(strip(px))) == 1, set(strip(px)))
+
     # A 24 hour clock, 01:23, ends 12 pixels from the right, starting 52 from it,
     # and a 12 hour one, 1:23 AM, is wider. It's dark text, in the light theme.
     # Key repeat: a rate of 0, at the slider's left end, stops it.

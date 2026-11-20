@@ -206,6 +206,11 @@ static uint8_t falloff[SHADOW + 1][SHADOW + 1];
 // window's rounded edge.
 static uint16_t coverage[RADIUS][RADIUS];
 static struct gui_settings settings;
+
+// Whether a window shows what's under it, which the settings can turn off.
+static bool see_through(const struct window *w) {
+    return w->translucent && settings.transparency;
+}
 static struct gui_canvas wallpaper; // the screen's part of the scaled image, if there is one
 static struct gui_image wallpaper_image; // scaled to cover the screen
 static char wallpaper_path[GUI_PATH_MAX];
@@ -439,7 +444,7 @@ static bool covers(const struct window *w, struct rect r) {
     struct rect f = frame_of(w);
     int top = w->bare ? RADIUS : TITLE_HEIGHT + BORDER;
 
-    return visible(w) && !w->translucent && !w->anim_ms && r.x >= f.x && r.y >= f.y + top && r.x + r.width <= f.x + f.width
+    return visible(w) && !see_through(w) && !w->anim_ms && r.x >= f.x && r.y >= f.y + top && r.x + r.width <= f.x + f.width
         && r.y + r.height <= f.y + f.height - RADIUS;
 }
 
@@ -640,8 +645,15 @@ static void blend_fill(struct gui_canvas *c, int x, int y, int width, int height
 #define BLUR 4
 #define BLUR_MARGIN (4 * BLUR)
 
+// How much of the taskbar and title bars' colour covers what's under them.
+static int bar_alpha(void) {
+    return settings.transparency ? BAR_ALPHA : 256;
+}
+
 // Part of a canvas, each pixel the average of those up to BLUR away, across then down.
 static void blur(struct gui_canvas *c, int x, int y, int width, int height) {
+    if (!settings.blur || !settings.transparency)
+        return;
     static uint32_t *across;
     static size_t size;
     int x0 = x < 0 ? 0 : x, x1 = x + width > c->width ? c->width : x + width;
@@ -708,7 +720,7 @@ static void draw_contents(struct gui_canvas *c, const struct window *w, int ox, 
     int x0 = x < 0 ? 0 : x, x1 = x + w->canvas.width > c->width ? c->width : x + w->canvas.width;
     int y0 = y < 0 ? 0 : y, y1 = y + w->canvas.height > c->height ? c->height : y + w->canvas.height;
 
-    if (!w->translucent || drawing_layer) {
+    if (!see_through(w) || drawing_layer) {
         gui_copy(c, x, y, &w->canvas, 0, 0, w->canvas.width, w->canvas.height);
         return;
     }
@@ -756,7 +768,7 @@ static void draw_window(struct gui_canvas *c, const struct window *w, int ox, in
     if (!drawing_layer)
         blur(c, w->x - ox, w->y - TITLE_HEIGHT - oy, w->canvas.width, TITLE_HEIGHT);
     blend_fill(c, w->x - ox, w->y - TITLE_HEIGHT - oy, w->canvas.width, TITLE_HEIGHT, title_color,
-               drawing_layer ? 256 : BAR_ALPHA);
+               drawing_layer ? 256 : bar_alpha());
     draw_icon(c, w->app, w->x + 5, w->y - TITLE_HEIGHT + (TITLE_HEIGHT - ICON_SIZE) / 2, ox, oy);
 
     // A title too long for the bar stops short of the buttons.
@@ -824,7 +836,7 @@ static void draw_glass(struct gui_canvas *c, struct rect r, int ox, int oy) {
 
     keep_corners(c, r, ox, oy, kept);
     blur(c, x, y, r.width, r.height);
-    blend_fill(c, x, y, r.width, r.height, TASKBAR_COLOR, BAR_ALPHA);
+    blend_fill(c, x, y, r.width, r.height, TASKBAR_COLOR, bar_alpha());
     gui_fill(c, x, y, r.width, 1, TASKBAR_LINE);
     gui_fill(c, x, y + r.height - 1, r.width, 1, TASKBAR_LINE);
     gui_fill(c, x, y, 1, r.height, TASKBAR_LINE);
@@ -1036,7 +1048,7 @@ static void depart(const struct window *w, struct rect to, int ms) {
 
     if (!settings.animations || w->bare || !visible(w) || ghost_count == MAX_WINDOWS)
         return;
-    *g = (struct ghost){.rounded = rounded(w), .translucent = w->translucent, .shadow = w->shadow, .ms = ms,
+    *g = (struct ghost){.rounded = rounded(w), .translucent = see_through(w), .shadow = w->shadow, .ms = ms,
                         .start = now_ms(), .from = frame_of(w), .to = to};
     if (fill_layer(&g->layer, w))
         ghost_count++;
@@ -2536,7 +2548,7 @@ static void draw_overview(struct gui_canvas *c, int ox, int oy) {
         ready_copy(w);
         if (i == overview_choice)
             gui_fill_rounded(c, t.x - 4 - ox, t.y - 4 - oy, t.width + 8, t.height + 8, RADIUS, TITLE_FOCUSED);
-        draw_layer(c, &w->layer, t, 256, w->shadow, rounded(w), w->translucent, ox, oy);
+        draw_layer(c, &w->layer, t, 256, w->shadow, rounded(w), see_through(w), ox, oy);
         fitted_text(c, t.x + (t.width - text_width) / 2 - ox, t.y + t.height + 8 - oy, t.width, w->title, TITLE_TEXT);
     }
 }
@@ -2639,7 +2651,7 @@ static void draw_preview(struct gui_canvas *c, int unused, int ox, int oy) {
     fitted_text(c, p.x + 8 - ox, p.y + 8 - oy, p.width - 16, hovered->title, TASKBAR_TEXT);
     ready_copy(hovered);
     draw_layer(c, &hovered->layer, (struct rect){p.x + (p.width - width) / 2, p.y + 16 + GUI_CHAR_HEIGHT, width, height}, 256, 0,
-               rounded(hovered), hovered->translucent, ox, oy);
+               rounded(hovered), see_through(hovered), ox, oy);
 }
 
 static void hide_preview(void) {
@@ -3058,7 +3070,7 @@ static void draw_area(struct rect r, struct gui_canvas c) {
         if (w->anim_ms) {
             struct rect now = arriving(w, &alpha);
 
-            draw_layer(&c, &w->layer, now, alpha, w->shadow, rounded(w), w->translucent, r.x, r.y);
+            draw_layer(&c, &w->layer, now, alpha, w->shadow, rounded(w), see_through(w), r.x, r.y);
             continue;
         }
         if (settings.shadows)
