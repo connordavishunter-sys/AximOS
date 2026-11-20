@@ -576,6 +576,14 @@ static void frame(struct gui_ui *ui) {
         printf("settings: tab %s\n", tabs[tab]);
         status[0] = '\0';
     }
+    // Pages scroll when the window's too small for them, but for the time zones',
+    // whose list goes down to the bottom of the window and scrolls itself.
+    bool scrolls = tab != TIME;
+    char page[48];
+
+    snprintf(page, sizeof(page), "##%s page", tabs[tab]);
+    if (scrolls)
+        gui_scroll_begin(ui, page, 0);
     if (tab == APPEARANCE)
         appearance(ui);
     else if (tab == DISPLAY)
@@ -590,6 +598,8 @@ static void frame(struct gui_ui *ui) {
         taskbar(ui);
     else
         date_and_time(ui);
+    if (scrolls)
+        gui_scroll_end(ui);
     gui_ui_end(ui);
     fflush(stdout);
 }

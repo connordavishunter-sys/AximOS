@@ -145,6 +145,18 @@ try:
             check('leaves the desktop light', px(900, 100) == LIGHT_DESKTOP and px(900, 600) == LIGHT_DESKTOP,
                   f'{px(900, 100):x} {px(900, 600):x}')
 
+    # The page scrolls when it doesn't all fit, bringing the last wallpapers up.
+    before = where('wallpaper Sunset')[1]
+    mouse.to(SETTINGS_X + 300, SETTINGS_Y + 300)
+    for _ in range(5):
+        v.command('mouse_move 0 0 -1'); time.sleep(0.1) # down
+    time.sleep(0.5)
+    check('the page scrolls with the wheel', where('wallpaper Sunset')[1] < before, (before, where('wallpaper Sunset')))
+    for _ in range(10):
+        v.command('mouse_move 0 0 1'); time.sleep(0.1)
+    time.sleep(0.5)
+    mouse.to(1270, 700)
+
     # A 24 hour clock, 01:23, ends 12 pixels from the right, starting 52 from it,
     # and a 12 hour one, 1:23 AM, is wider. It's dark text, in the light theme.
     # Key repeat: a rate of 0, at the slider's left end, stops it.
