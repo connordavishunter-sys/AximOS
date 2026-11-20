@@ -469,19 +469,28 @@ static bool timer_due(struct gui_message *event) {
 }
 
 // Waits for wm until the next timer is due. False means a timer is.
-static bool wait_for_wm(void) {
+// Waits until wm sends something, the next timer's due, or until, if it's not -1,
+// returning whether wm sent something.
+static bool wait_for_wm(int64_t until) {
     struct timer *t = next_timer();
+    int64_t due = t && (until < 0 || t->due < until) ? t->due : until;
     struct pollfd fd = {.fd = connection, .events = POLLIN};
 
-    if (!t)
+    if (due < 0)
         return true;
     for (;;) {
-        int64_t wait = t->due - now_ms();
+        int64_t wait = due - now_ms();
         int ready = poll(&fd, 1, wait > 0 ? (int)wait : 0);
 
         if (ready >= 0 || errno != EINTR)
             return ready != 0; // an error is for gui_receive to find
     }
+}
+
+static bool timer_ready(void) {
+    struct timer *t = next_timer();
+
+    return t && t->due <= now_ms();
 }
 
 bool gui_next_event(struct gui_message *event) {
@@ -491,7 +500,7 @@ bool gui_next_event(struct gui_message *event) {
         queue_count--;
     } else if (timer_due(event)) {
         return true;
-    } else if (!wait_for_wm()) {
+    } else if (!wait_for_wm(-1)) {
         return timer_due(event) || gui_next_event(event);
     } else if (!gui_receive(connection, event)) {
         return false;
@@ -499,4 +508,10 @@ bool gui_next_event(struct gui_message *event) {
     if (event->type == GUI_SCREEN)
         screen = (struct gui_screen){event->width, event->height, event->x == 1};
     return true;
+}
+
+int gui_wait_event(struct gui_message *event, int ms) {
+    if (ms >= 0 && !queue_count && !timer_ready() && !wait_for_wm(now_ms() + ms) && !timer_ready())
+        return 0;
+    return gui_next_event(event) ? 1 : -1;
 }

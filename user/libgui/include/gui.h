@@ -162,6 +162,9 @@ void gui_show(struct gui_window *window);
 
 // Waits for the next event, returning false when wm has gone.
 bool gui_next_event(struct gui_message *event);
+// The same, waiting no more than ms milliseconds, or forever if it's negative:
+// 1 with an event, 0 if none came in time, and -1 when wm has gone.
+int gui_wait_event(struct gui_message *event, int ms);
 
 // Puts an event at the end of those gui_next_event gives, as if it came from wm.
 void gui_post(const struct gui_message *event);

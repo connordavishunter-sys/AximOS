@@ -60,6 +60,10 @@ ZONES := $(BUILD)/zoneinfo
 DASH := $(BUILD)/ports/dash-0.5.12/src/dash
 LUA := $(BUILD)/ports/lua-5.4.7/src/lua
 MBEDTLS := $(BUILD)/ports/mbedtls-3.6.7
+ZLIB := $(BUILD)/ports/sysroot/lib/libz.a
+CURL := $(BUILD)/ports/curl-8.11.1/src/curl
+NETSURF := $(BUILD)/ports/netsurf-all-3.11/netsurf/nsfb
+NETSURF_RES := $(BUILD)/ports/netsurf-all-3.11/netsurf/frontends/framebuffer/res
 MBEDTLS_LIBS := $(MBEDTLS)/library/libmbedtls.a $(MBEDTLS)/library/libmbedx509.a $(MBEDTLS)/library/libmbedcrypto.a
 
 # Every folder in user/ but the libraries is a program. init goes in /system/boot, the
@@ -238,13 +242,22 @@ $(DASH): $(LIBC_SO) $(CRT0) ports/build.sh ports/aximos-cc ports/dash.patch
 $(LUA): $(LIBC_SO) $(CRT0) ports/build.sh ports/aximos-cc ports/lua_aximos.h
 	ports/build.sh lua
 
+$(ZLIB): $(LIBC_SO) $(CRT0) ports/build.sh ports/aximos-cc
+	ports/build.sh zlib
+
+$(CURL): $(ZLIB) $(MBEDTLS_LIBS) ports/build.sh
+	ports/build.sh curl
+
+$(NETSURF): $(CURL) $(LIBGUI_SO) ports/build.sh $(wildcard ports/netsurf/*)
+	ports/build.sh netsurf
+
 $(ZONES):
 	mkdir -p $@
 	tar -C $(ZONEINFO) -chf - --exclude=./posix --exclude=./right . | tar -C $@ -xf -
 	find $@ -type f | while read -r f; do [ "$$(head -c 4 "$$f")" = TZif ] || rm "$$f"; done
 
 $(DISK): $(PROGRAM_ELFS) $(LIBC_SO) $(LIBGUI_SO) $(LIBAUDIO_SO) $(LIBOGG_SO) $(CODEC_SOS) $(ROOTFS_FILES) $(DASH) $(LUA) \
-		| $(ZONES)
+		$(CURL) $(NETSURF) | $(ZONES)
 	rm -f $@
 	mkfs.fat -F 32 -C $@ $$(($(DISK_SIZE_MB) * 1024))
 	mcopy -s -i $@ rootfs/system ::/
@@ -259,6 +272,11 @@ $(DISK): $(PROGRAM_ELFS) $(LIBC_SO) $(LIBGUI_SO) $(LIBAUDIO_SO) $(LIBOGG_SO) $(C
 	$(foreach p,$(GUI_APPS),$(call install_stripped,$(BUILD)/user/$(p).elf,/system/bin/gui/$(strip $(call app_dir,$(p)))$(p)) &&) true
 	$(call install_stripped,$(DASH),/system/bin/dash)
 	$(call install_stripped,$(LUA),/system/bin/lua)
+	$(call install_stripped,$(CURL),/system/bin/curl)
+	$(call install_stripped,$(NETSURF),/system/bin/gui/netsurf)
+	rm -rf $(BUILD)/netsurf && cp -rL $(NETSURF_RES) $(BUILD)/netsurf && cp ports/netsurf/Choices $(BUILD)/netsurf/
+	rm -rf $(BUILD)/netsurf/de $(BUILD)/netsurf/fr $(BUILD)/netsurf/it $(BUILD)/netsurf/ja $(BUILD)/netsurf/nl $(BUILD)/netsurf/zh_CN
+	mcopy -s -i $@ $(BUILD)/netsurf ::/system/share/
 	rm $(BUILD)/stripped
 
 $(ISO): $(KERNEL) limine.conf

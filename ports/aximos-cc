@@ -15,7 +15,7 @@ done
 # libc.so has everything, so libraries like libm are empty ones. Sharing an archive
 # name with the host's would link in the host's.
 mkdir -p "$root/build/ports/lib"
-for lib in m rt pthread dl crypt util; do
+for lib in m rt pthread dl crypt util iconv; do
 	[ -e "$root/build/ports/lib/lib$lib.a" ] || ar rcs "$root/build/ports/lib/lib$lib.a"
 done
 

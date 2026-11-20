@@ -4,6 +4,7 @@
 set -e
 root=$(cd "$(dirname "$0")/.." && pwd)
 cc=$root/ports/aximos-cc
+sysroot=$root/build/ports/sysroot # headers, libraries and pkg-config files of ports that others use
 
 fetch() { # url file sha256
 	[ -e "$root/ports/dist/$2" ] || curl -fsSL -o "$root/ports/dist/$2" "$1/$2"
@@ -73,6 +74,65 @@ lua)
 	rm -f lua-5.4.7/src/lua
 	make -j"$(nproc)" -C lua-5.4.7/src generic CC="$cc" MYCFLAGS="-include $root/ports/lua_aximos.h" \
 		SYSCFLAGS=-DLUA_USE_POSIX
+	;;
+zlib)
+	fetch https://zlib.net/fossils zlib-1.3.1.tar.gz 9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23
+	[ -d zlib-1.3.1 ] || tar xf "$root/ports/dist/zlib-1.3.1.tar.gz"
+	cd zlib-1.3.1
+	archive z -DHAVE_UNISTD_H -- adler32.c crc32.c deflate.c infback.c inffast.c inflate.c inftrees.c trees.c \
+		zutil.c compress.c uncompr.c gzclose.c gzlib.c gzread.c gzwrite.c
+	mkdir -p "$sysroot/include" "$sysroot/lib/pkgconfig"
+	cp zlib.h zconf.h "$sysroot/include"
+	cp "$root/build/ports/codecs/z.a" "$sysroot/lib/libz.a"
+	printf 'Name: zlib\nDescription: zlib\nVersion: 1.3.1\nLibs: -L%s/lib -lz\n' "$sysroot" > "$sysroot/lib/pkgconfig/zlib.pc"
+	;;
+curl) # after zlib and mbedtls
+	fetch https://curl.se/download curl-8.11.1.tar.xz c7ca7db48b0909743eaef34250da02c19bc61d4f1dcedd6603f109409536ab56
+	[ -d curl-8.11.1 ] || tar xf "$root/ports/dist/curl-8.11.1.tar.xz"
+	cd curl-8.11.1
+	mbedtls=$root/build/ports/mbedtls-3.6.7
+	# Only HTTP and HTTPS, and nothing found on the host, whose libraries would be linked otherwise.
+	./configure --host=x86_64-unknown-elf CC="$cc" LDFLAGS="-L$mbedtls/library" \
+		CFLAGS="-O2 -I$mbedtls/include -DMBEDTLS_CONFIG_FILE='\"$root/ports/mbedtls_config.h\"'" \
+		--with-mbedtls --with-zlib="$sysroot" --without-brotli --without-zstd --without-libpsl --without-libidn2 \
+		--without-nghttp2 --without-libssh2 --without-librtmp --disable-shared --disable-threaded-resolver \
+		--disable-ipv6 --disable-ftp --disable-file --disable-ldap --disable-ldaps --disable-rtsp --disable-dict \
+		--disable-telnet --disable-tftp --disable-pop3 --disable-imap --disable-smb --disable-smtp --disable-gopher \
+		--disable-mqtt --disable-manual --disable-docs --disable-ntlm --disable-unix-sockets --disable-websockets \
+		--without-ca-bundle --without-ca-path > configure.out
+	make -j"$(nproc)"
+	printf 'Name: libcurl\nDescription: curl\nVersion: 8.11.1\nCflags: -I%s/include -DCURL_STATICLIB\nLibs: %s %s\n' \
+		"$PWD" "$PWD/lib/.libs/libcurl.a" "$mbedtls/library/libmbedtls.a $mbedtls/library/libmbedx509.a $mbedtls/library/libmbedcrypto.a $sysroot/lib/libz.a" \
+		> "$sysroot/lib/pkgconfig/libcurl.pc"
+	;;
+netsurf) # after curl, with libgui built
+	fetch https://download.netsurf-browser.org/netsurf/releases/source-full netsurf-all-3.11.tar.gz \
+		4dea880ff3c2f698bfd62c982b259340f9abcd7f67e6c8eb2b32c61f71644b7b
+	if [ ! -d netsurf-all-3.11 ]; then
+		tar xf "$root/ports/dist/netsurf-all-3.11.tar.gz"
+		patch -s -p1 -d netsurf-all-3.11 < "$root/ports/netsurf/netsurf.patch"
+	fi
+	cd netsurf-all-3.11
+	cp "$root/ports/netsurf/nsfb_aximos.c" libnsfb/src/surface/aximos.c
+	cp "$root/ports/netsurf/aximos_image.c" "$root/ports/netsurf/aximos_image.h" netsurf/content/handlers/image/
+	# NetSurf's build finds a cross compiler by the target's name.
+	mkdir -p tools
+	printf '#!/bin/sh\nexec %s "$@"\n' "$cc" > tools/x86_64-aximos-gcc
+	chmod +x tools/x86_64-aximos-gcc
+	ln -sf "$(command -v ar)" tools/x86_64-aximos-ar
+	export PATH=$PWD/tools:$sysroot/bin:$PATH PKG_CONFIG_LIBDIR=$sysroot/lib/pkgconfig PKG_CONFIG_PATH=
+	export CFLAGS="-I$root/user/libgui/include" LDFLAGS="-L$sysroot/lib $root/build/user/libgui.so"
+	for lib in buildsystem libnslog libwapcaplet libparserutils libcss libhubbub libdom libnsbmp libnsgif \
+		libnsutils libutf8proc libnspsl libnsfb; do
+		make -j"$(nproc)" install --directory=$lib HOST=x86_64-aximos PREFIX="$sysroot" NSSHARED="$PWD/buildsystem" \
+			WARNFLAGS=-w WITH_EXPAT_BINDING=no DESTDIR=
+	done
+	CFLAGS= LDFLAGS= make -j"$(nproc)" install --directory=nsgenbind PREFIX="$sysroot" DESTDIR=
+	# Pictures come from libgui's decoders, and files are read rather than mapped.
+	make -j"$(nproc)" --directory=netsurf HOST=x86_64-aximos CC=x86_64-aximos-gcc BUILD_CC=cc TARGET=framebuffer \
+		WARNFLAGS=-w NETSURF_USE_PNG=NO NETSURF_USE_JPEG=NO NETSURF_USE_WEBP=NO NETSURF_USE_JPEGXL=NO \
+		NETSURF_USE_NSSVG=NO NETSURF_USE_ROSPRITE=NO NETSURF_USE_LIBICONV_PLUG=NO NETSURF_USE_OPENSSL=NO \
+		NETSURF_FB_RESPATH=/system/share/netsurf NETSURF_FB_FONTPATH=/system/share/fonts
 	;;
 ogg)
 	fetch https://downloads.xiph.org/releases/ogg libogg-1.3.6.tar.xz \

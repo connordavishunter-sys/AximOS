@@ -6,6 +6,7 @@
 
 #define ALIGNMENT 16
 #define MIN_SPLIT (sizeof(struct block) + ALIGNMENT)
+#define BINS 48
 
 // Blocks sit back to back on the heap, linked in address order so neighbours
 // can be merged. The header size keeps payloads 16-byte aligned.
@@ -16,10 +17,49 @@ struct block {
     size_t free;
 };
 
+// A free block is also on the list for its size, from bins[n] for sizes from 2^n
+// up to 2^(n+1), linked through its payload, which is never smaller than this.
+struct links {
+    struct block *next, *prev;
+};
+
 #define HEAP_LOCKED LOCKED(&__heap_lock)
 
 static struct block *head;
 static struct block *tail;
+static struct block *bins[BINS];
+
+static struct links *links(struct block *b) {
+    return (struct links *)(b + 1);
+}
+
+static int bin_of(size_t size) {
+    int bin = 63 - __builtin_clzl(size);
+
+    return bin < BINS ? bin : BINS - 1;
+}
+
+static void add_free(struct block *b) {
+    struct block **bin = &bins[bin_of(b->size)];
+
+    b->free = true;
+    *links(b) = (struct links){.next = *bin};
+    if (*bin)
+        links(*bin)->prev = b;
+    *bin = b;
+}
+
+static void take_free(struct block *b) {
+    struct links *l = links(b);
+
+    if (l->prev)
+        links(l->prev)->next = l->next;
+    else
+        bins[bin_of(b->size)] = l->next;
+    if (l->next)
+        links(l->next)->prev = l->prev;
+    b->free = false;
+}
 
 static char *heap_end(void) {
     return (char *)syscall3(SYS_BRK, 0, 0, 0);
@@ -29,6 +69,19 @@ static bool set_heap_end(char *end) {
     return (char *)syscall3(SYS_BRK, (long)end, 0, 0) == end;
 }
 
+// Absorbs the block after b, which mustn't be on a free list.
+static void merge_next(struct block *b) {
+    struct block *next = b->next;
+
+    b->size += sizeof(struct block) + next->size;
+    b->next = next->next;
+    if (b->next)
+        b->next->prev = b;
+    else
+        tail = b;
+}
+
+// Gives what b doesn't need of its size back as a free block.
 static void split(struct block *b, size_t size) {
     if (b->size < size + MIN_SPLIT)
         return;
@@ -37,15 +90,18 @@ static void split(struct block *b, size_t size) {
     rest->size = b->size - size - sizeof(struct block);
     rest->prev = b;
     rest->next = b->next;
-    rest->free = true;
-
     if (rest->next)
         rest->next->prev = rest;
     else
         tail = rest;
-
     b->next = rest;
     b->size = size;
+
+    if (rest->next && rest->next->free) {
+        take_free(rest->next);
+        merge_next(rest);
+    }
+    add_free(rest);
 }
 
 static struct block *extend_heap(size_t size) {
@@ -55,6 +111,7 @@ static struct block *extend_heap(size_t size) {
 
         if (!set_heap_end(end))
             return NULL;
+        take_free(tail);
         tail->size = size;
         return tail;
     }
@@ -74,37 +131,31 @@ static struct block *extend_heap(size_t size) {
     return b;
 }
 
+// The first free block big enough: any in a bigger size's bin will do.
+static struct block *find_free(size_t size) {
+    for (int bin = bin_of(size); bin < BINS; bin++)
+        for (struct block *b = bins[bin]; b; b = links(b)->next)
+            if (b->size >= size)
+                return b;
+    return NULL;
+}
+
 void *malloc(size_t size) {
     HEAP_LOCKED;
     if (size == 0 || size > SIZE_MAX - ALIGNMENT - sizeof(struct block))
         return NULL;
     size = (size + ALIGNMENT - 1) & ~(size_t)(ALIGNMENT - 1);
 
-    struct block *b = head;
-    while (b && !(b->free && b->size >= size))
-        b = b->next;
+    struct block *b = find_free(size);
 
-    if (b)
+    if (b) {
+        take_free(b);
         split(b, size);
-    else
-        b = extend_heap(size);
-
-    if (!b)
+    } else if (!(b = extend_heap(size))) {
         return NULL;
+    }
     b->free = false;
     return b + 1;
-}
-
-// Absorbs the block after b, which must be free.
-static void merge_next(struct block *b) {
-    struct block *next = b->next;
-
-    b->size += sizeof(struct block) + next->size;
-    b->next = next->next;
-    if (b->next)
-        b->next->prev = b;
-    else
-        tail = b;
 }
 
 void free(void *ptr) {
@@ -113,12 +164,14 @@ void free(void *ptr) {
     HEAP_LOCKED;
 
     struct block *b = (struct block *)ptr - 1;
-    b->free = true;
 
-    if (b->next && b->next->free)
+    if (b->next && b->next->free) {
+        take_free(b->next);
         merge_next(b);
+    }
     if (b->prev && b->prev->free) {
         b = b->prev;
+        take_free(b);
         merge_next(b);
     }
 
@@ -131,7 +184,9 @@ void free(void *ptr) {
             head = NULL;
         if ((char *)(b + 1) + b->size == heap_end())
             set_heap_end((char *)b);
+        return;
     }
+    add_free(b);
 }
 
 void *calloc(size_t count, size_t size) {
@@ -163,8 +218,10 @@ void *realloc(void *ptr, size_t size) {
 
     // Growing into a free neighbour saves a copy.
     if (b->size < rounded && b->next && b->next->free &&
-        b->size + sizeof(struct block) + b->next->size >= rounded)
+        b->size + sizeof(struct block) + b->next->size >= rounded) {
+        take_free(b->next);
         merge_next(b);
+    }
 
     if (b->size >= rounded) {
         split(b, rounded);

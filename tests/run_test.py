@@ -44,12 +44,12 @@ try:
     v.key('up'); v.key('ret')
     check('Up goes back through what was run', v.wait('run: running guidemo', 5, at), v.text(at))
 
-    # The start menu: five folders and two apps, 24 pixels each, a line, then Run....
-    menu_top = BAR - 8 - 10 * 24 - 9 - 8 # floating 8 above the taskbar
+    # The start menu: five folders and three apps, 24 pixels each, a line, then Run....
+    menu_top = BAR - 8 - 11 * 24 - 9 - 8 # floating 8 above the taskbar
     at = v.mark()
     v.pointer(36, BAR + 14, 1); v.pointer(36, BAR + 14, 0)
     time.sleep(0.5)
-    v.pointer(100, menu_top + 4 + 7 * 24 + 9 + 12, 1); v.pointer(100, menu_top + 4 + 7 * 24 + 9 + 12, 0)
+    v.pointer(100, menu_top + 4 + 8 * 24 + 9 + 12, 1); v.pointer(100, menu_top + 4 + 8 * 24 + 9 + 12, 0)
     check('Run... in the start menu opens it', v.wait('run: ready', 5, at), v.text(at))
     time.sleep(0.3)
 

@@ -1,0 +1,83 @@
+--- a/libnslog/src/filter.c
++++ b/libnslog/src/filter.c
+@@ -381,7 +381,6 @@
+ {
+ 	int ret;
+ 	YY_BUFFER_STATE buffer = filter__scan_string((char *)input);
+-	filter_push_buffer_state(buffer);
+ 	ret = filter_parse(output);
+ 	filter_lex_destroy();
+ 	switch (ret) {
+--- a/netsurf/utils/config.h
++++ b/netsurf/utils/config.h
+@@ -136,7 +136,7 @@
+ #endif
+ 
+ #define HAVE_MMAP
+-#if (defined(_WIN32) || defined(__riscos__) || defined(__HAIKU__) || defined(__BEOS__) || defined(__amigaos4__) || defined(__AMIGA__) || defined(__MINT__))
++#if (defined(_WIN32) || defined(__riscos__) || defined(__HAIKU__) || defined(__BEOS__) || defined(__amigaos4__) || defined(__AMIGA__) || defined(__MINT__) || defined(__aximos__))
+ #undef HAVE_MMAP
+ #endif
+ 
+@@ -149,7 +149,7 @@
+ #define HAVE_DIRFD
+ #define HAVE_UNLINKAT
+ #define HAVE_FSTATAT
+-#if (defined(_WIN32) || defined(__riscos__) || defined(__HAIKU__) || defined(__BEOS__) || defined(__amigaos4__) || defined(__AMIGA__) || defined(__MINT__))
++#if (defined(_WIN32) || defined(__riscos__) || defined(__HAIKU__) || defined(__BEOS__) || defined(__amigaos4__) || defined(__AMIGA__) || defined(__MINT__) || defined(__aximos__))
+ #undef HAVE_DIRFD
+ #undef HAVE_UNLINKAT
+ #undef HAVE_FSTATAT
+--- a/libnsfb/include/libnsfb.h
++++ b/libnsfb/include/libnsfb.h
+@@ -35,6 +35,7 @@
+ /** The type of framebuffer surface. */
+ enum nsfb_type_e {
+     NSFB_SURFACE_NONE = 0, /**< No surface */
++    NSFB_SURFACE_AXIMOS, /**< AximOS window, first so it's the default */
+     NSFB_SURFACE_SDL, /**< SDL surface */
+     NSFB_SURFACE_X, /**< X windows surface */
+     NSFB_SURFACE_WL, /**< Wayland surface */
+--- a/libnsfb/src/surface/Makefile
++++ b/libnsfb/src/surface/Makefile
+@@ -1,7 +1,7 @@
+ # Sources
+ 
+ # Common surface code and heap based surface handler
+-SURFACE_HANDLER_yes := surface.c ram.c
++SURFACE_HANDLER_yes := surface.c ram.c aximos.c
+ 
+ # optional surface handlers
+ SURFACE_HANDLER_$(NSFB_SDL_AVAILABLE) += sdl.c
+--- a/netsurf/content/handlers/image/Makefile
++++ b/netsurf/content/handlers/image/Makefile
+@@ -1,7 +1,7 @@
+ # Image content handlers sources
+ 
+ # S_IMAGE are sources related to image management
+-S_IMAGE_YES := image.c image_cache.c
++S_IMAGE_YES := image.c image_cache.c aximos_image.c
+ S_IMAGE_NO :=
+ S_IMAGE_$(NETSURF_USE_BMP) += bmp.c
+ S_IMAGE_$(NETSURF_USE_GIF) += gif.c
+--- a/netsurf/content/handlers/image/image.c
++++ b/netsurf/content/handlers/image/image.c
+@@ -38,6 +38,7 @@
+ #include "image/rsvg.h"
+ #include "image/svg.h"
+ #include "image/webp.h"
++#include "image/aximos_image.h"
+ #include "image/image.h"
+ 
+ /**
+@@ -109,6 +110,10 @@
+ 		return error;
+ #endif
+ 
++	error = nsaximos_image_init();
++	if (error != NSERROR_OK)
++		return error;
++
+ 	return error;
+ }
+ 

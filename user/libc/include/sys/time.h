@@ -17,3 +17,5 @@ int settimeofday(const struct timeval *value, const void *zone);
 int utimes(const char *path, const struct timeval times[2]);
 int lutimes(const char *path, const struct timeval times[2]);
 int futimes(int fd, const struct timeval times[2]);
+
+#include <sys/select.h> // which POSIX lets this header give

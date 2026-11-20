@@ -170,15 +170,15 @@ try:
 
     # The menu lists /system/bin/gui above the launcher, 24 pixels an item: its
     # folders, Accessories, Demos, Games, Multimedia and System, then the apps
-    # outside them, files and term. Then a line, Run..., Reboot and Shut down. It
+    # outside them, files, netsurf and term. Then a line, Run..., Reboot and Shut down. It
     # floats 8 above the taskbar.
-    menu_top = bar - 10 * 24 - 9 - 8 - 8
+    menu_top = bar - 11 * 24 - 9 - 8 - 8
     mouse.click(36, bar + 14)
     time.sleep(0.5)
     w, h, px = v.screenshot()
     check('the launcher opens the menu', px(150, menu_top + 10) == FOCUSED, hex(px(150, menu_top + 10)))
     at = v.mark()
-    mouse.click(100, menu_top + 4 + 6 * 24 + 12)
+    mouse.click(100, menu_top + 4 + 7 * 24 + 12)
     check('clicking term in the menu opens a terminal', v.wait('guidemo: focus 0', 10, at), v.text(at))
     time.sleep(1)
     w, h, px = v.screenshot()

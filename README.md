@@ -62,6 +62,7 @@ with the dash shell.
 
 | App        | What it does                                                          |
 |------------|-----------------------------------------------------------------------|
+| NetSurf    | Web browser, with HTTPS, CSS, PNG and JPEG pictures, and some JavaScript |
 | Files      | File manager: places, recent files, search through folders, tabs, multi-select, thumbnails, Open with, and a trash you can restore from |
 | Terminal   | Tabs, scrollback, selection, find, and a see-through background       |
 | Editor     | Tabs, find and replace, go to line, colouring for C and shell scripts |
@@ -77,7 +78,7 @@ with the dash shell.
 
 `dash`, plus `ls cat cp mv rm mkdir rmdir touch rename stat find grep sort head
 tail wc more du df free ps top kill date tz sleep env echo clear`, network tools
-(`net ping host nc fetch`, where `fetch` speaks HTTPS through mbedTLS), `lua` (Lua 5.4), `volume`,
+(`net ping host nc fetch curl`, where `fetch` and `curl` speak HTTPS through mbedTLS), `lua` (Lua 5.4), `volume`,
 `convert` for audio files, `notify`, `text` (an editor in the terminal) and `axfetch`.
 Run any of them with `--help`.
 
@@ -94,11 +95,12 @@ AximOS builds on Linux. You need:
 - `xorriso`, `mtools`, `curl` and the tz database (`/usr/share/zoneinfo`)
 - QEMU (`qemu-system-x86_64`) to run it, and OVMF (`/usr/share/edk2/x64/OVMF.4m.fd`) for UEFI
 - Python 3 with Pillow and NumPy for the tests
+- `gperf`, `flex`, `bison` and `pkg-config` to build NetSurf
 
 On Arch or CachyOS:
 
 ```bash
-sudo pacman -S --needed base-devel limine xorriso mtools curl tzdata qemu-full edk2-ovmf python-pillow python-numpy
+sudo pacman -S --needed base-devel limine xorriso mtools curl tzdata qemu-full edk2-ovmf python-pillow python-numpy gperf
 ```
 
 Then:
@@ -109,7 +111,7 @@ make
 
 This builds `build/aximos.iso` (the kernel and bootloader) and `build/disk.img` (a 512 MB
 FAT32 disk with everything else). The first build downloads the source of dash, Lua, mbedTLS,
-stb_truetype and the audio codecs into `ports/dist`, checks their SHA-256 sums, and builds
+zlib, curl, NetSurf, stb_truetype and the audio codecs into `ports/dist`, checks their SHA-256 sums, and builds
 them against AximOS's own libc.
 
 ## Running
@@ -176,7 +178,7 @@ user/libaudio/   reading and writing sound files, through user/codecs/
 user/wm/         the window manager
 user/<name>/     every other folder is a program
 rootfs/          copied onto the disk as it is: settings, icons, fonts, wallpapers
-ports/           downloads and builds dash, Lua, mbedTLS, stb_truetype and the codecs
+ports/           downloads and builds dash, Lua, mbedTLS, zlib, curl, NetSurf, stb_truetype and the codecs
 tests/           the tests, and vm.py, which drives QEMU for them
 ```
 
@@ -192,7 +194,8 @@ AximOS is developed and tested in QEMU. It hasn't been tried on real hardware ye
 
 AximOS uses [Limine](https://github.com/limine-bootloader/limine),
 [dash](http://gondor.apana.org.au/~herbert/dash/), [Lua](https://www.lua.org),
-[Mbed TLS](https://github.com/Mbed-TLS/mbedtls),
+[Mbed TLS](https://github.com/Mbed-TLS/mbedtls), [zlib](https://zlib.net), [curl](https://curl.se),
+[NetSurf](https://www.netsurf-browser.org),
 [stb_truetype](https://github.com/nothings/stb), the
 [DejaVu](https://dejavu-fonts.github.io) fonts, and for sound
 [libogg, libvorbis, Opus, FLAC](https://xiph.org), [minimp3](https://github.com/lieff/minimp3),

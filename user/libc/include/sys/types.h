@@ -1,5 +1,8 @@
 #pragma once
 
+#include <stddef.h>
+#include <stdint.h>
+
 typedef int pid_t;
 typedef long ssize_t;
 typedef long off_t;
