@@ -92,17 +92,18 @@ def compile_library(source, out, *needs):
 
 
 class VM:
-    def __init__(self, disk=None, smp=4, timeout=300, extra=(), net='', vmmouse=False, desktop=False):
+    def __init__(self, disk=None, smp=4, timeout=300, extra=(), net='', vmmouse=False, desktop=False, cdrom=True):
         """With vmmouse, the mouse is placed where the host says, through QMP, as a
         desktop's QEMU window does. Without it there's only the relative PS/2 mouse.
         Shift is held through boot for the shell, unless it's to start the desktop."""
         self.dir = tempfile.mkdtemp(dir=WORK)
         self.log, sock, qmp = self.dir + '/serial.log', self.dir + '/monitor.sock', self.dir + '/qmp.sock'
         drive = f'file={disk},format=raw' if disk else f'file={base_disk()},format=raw,snapshot=on'
+        drives = (['-boot', 'd', '-cdrom', BUILD + '/aximos.iso'] if cdrom else []) \
+            + (['-drive', drive + ',if=none,id=disk', '-device', 'ide-hd,drive=disk,bus=ide.1'] if disk is not False else [])
         self.proc = subprocess.Popen(
             ['timeout', str(timeout), 'qemu-system-x86_64', '-accel', 'kvm', '-cpu', 'host', '-smp', str(smp), '-m', '256M',
-             '-M', 'q35,vmport=' + ('on' if vmmouse else 'off'), '-display', 'none', '-bios', OVMF, '-boot', 'd', '-cdrom', BUILD + '/aximos.iso',
-             '-drive', drive + ',if=none,id=disk', '-device', 'ide-hd,drive=disk,bus=ide.1',
+             '-M', 'q35,vmport=' + ('on' if vmmouse else 'off'), '-display', 'none', '-bios', OVMF, *drives,
              '-netdev', 'user,id=net0' + net, '-device', 'e1000,netdev=net0',
              '-audiodev', 'none,id=snd0', '-device', 'ich9-intel-hda', '-device', 'hda-output,audiodev=snd0',
              '-serial', 'file:' + self.log, '-monitor', f'unix:{sock},server=on,wait=off',

@@ -53,7 +53,7 @@ int main(int argc, char **argv) {
     static char path[PATH_MAX];
     struct dirent *entry;
     while ((entry = readdir(dev))) {
-        if (entry->d_type != DT_DIR)
+        if (entry->d_type != DT_DIR || !strcmp(entry->d_name, "disk")) // the drives themselves
             continue;
 
         strcpy(path, "/dev/");

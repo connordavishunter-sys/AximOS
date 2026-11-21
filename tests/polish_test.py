@@ -32,7 +32,7 @@ try:
     o = v.run('cat /home/.history')
     check('history is kept in the home folder', 'echo one two three' in o, o)
 
-    v.run('echo none > /system/etc/wallpaper; rm -f /system/etc/gui.conf; '
+    v.run('echo none > /system/etc/wallpaper; echo clock 24 > /system/etc/gui.conf; '
           'echo \'notify -a Act "touch /tmp/acted" Hello there\' > /tmp/n.sh')
 
     def click(x, y):
@@ -109,7 +109,7 @@ try:
 
     # With do not disturb on, a notification only goes to the tray.
     at = v.mark()
-    click(W - 8 - 40 - 12 - 8 - 24 - 2 - 22, H - 8 - 16) # the network and speaker
+    click(W - 8 - 36 - 12 - 8 - 24 - 2 - 22, H - 8 - 16) # the network and speaker, by a 24 hour clock
     v.wait('wm: tile 3 at', 5, at)
     t = tuple(map(int, re.findall(r'wm: tile 3 at (\d+) (\d+) (\d+) (\d+)', v.text(at))[-1]))
     click(t[0] + 20, t[1] + 20)

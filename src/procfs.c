@@ -1,3 +1,4 @@
+#include <block.h>
 #include <clock.h>
 #include <cpu.h>
 #include <irq.h>
@@ -15,6 +16,7 @@
 enum proc_kind {
     PROC_ROOT,
     PROC_CPUINFO,
+    PROC_DISKS,
     PROC_MEMINFO,
     PROC_MOUNTS,
     PROC_NET,
@@ -28,7 +30,7 @@ enum proc_kind {
 };
 
 static const char *const root_names[] = {
-    [PROC_CPUINFO] = "cpuinfo", [PROC_MEMINFO] = "meminfo", [PROC_MOUNTS] = "mounts", [PROC_NET] = "net",
+    [PROC_CPUINFO] = "cpuinfo", [PROC_DISKS] = "disks", [PROC_MEMINFO] = "meminfo", [PROC_MOUNTS] = "mounts", [PROC_NET] = "net",
     [PROC_STAT] = "stat", [PROC_UPTIME] = "uptime", [PROC_VERSION] = "version",
 };
 
@@ -166,12 +168,32 @@ static void make_status(struct text *t, const struct process_info *info) {
     add(t, "\n");
 }
 
+// Each drive's name, sectors and their size, and whether it's a disc, read-only or
+// being written to directly.
+static void make_disks(struct text *t) {
+    for (int i = 0; i < block_device_count; i++) {
+        const struct block_device *d = block_devices[i];
+
+        add(t, d->name);
+        add(t, " ");
+        add_number(t, d->sector_count);
+        add(t, " ");
+        add_number(t, d->sector_size);
+        add(t, d->optical ? " disc" : " disk");
+        add(t, d->write ? "" : " read-only");
+        add(t, d->claimed ? " busy\n" : "\n");
+    }
+}
+
 static bool make_file(uint32_t kind, int pid, struct text *t) {
     struct process_info info;
 
     switch (kind) {
     case PROC_CPUINFO:
         make_cpuinfo(t);
+        return true;
+    case PROC_DISKS:
+        make_disks(t);
         return true;
     case PROC_MEMINFO:
         make_meminfo(t);

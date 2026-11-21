@@ -15,8 +15,10 @@ with the dash shell.
 - Virtual memory: demand-paged stacks, `mmap`, shared memory, and read-only ELF segments
   shared between processes
 - Dynamically linked programs: `libc.so` is also the dynamic linker
-- Filesystems: FAT32 (read and write) on the disk, ISO 9660 on the boot CD, tmpfs on `/tmp`
-  (kept in memory, empty each boot), `/proc` and `/dev`
+- Filesystems: FAT32 (read and write) on disks and their GPT or MBR partitions, ISO 9660
+  on the install disc, tmpfs on `/tmp` (kept in memory, empty each boot), `/proc` and `/dev`
+- Drives as they are in `/dev/disk`, for partitioning and formatting: opening one to
+  write takes its filesystems away, and closing it mounts what's there
 - Drives over AHCI (SATA) and legacy IDE
 - Networking on an Intel e1000: ARP, IPv4, ICMP, UDP, TCP, DHCP and DNS, through BSD sockets
 - Intel HDA sound, with a mixer for several programs at once
@@ -75,13 +77,15 @@ with the dash shell.
 | Player     | WAV, MP3, FLAC, Vorbis, Opus and AAC, with shuffle and repeat         |
 | Calculator | With a history                                                        |
 | Tasks      | What's running, sortable, with a graph of CPU and memory use          |
+| Install    | Installs AximOS on a drive, from the ISO, which boots straight into it |
 | Settings   | Theme, accent, display, taskbar, keyboard and mouse, sound, date and time, and default apps |
 | Snake      | Three speeds, each with its own best score                            |
 
 ### Command line
 
 `dash`, plus `ls cat cp mv rm mkdir rmdir touch rename stat find grep sort head
-tail wc more du df free ps top kill date tz sleep env echo clear`, network tools
+tail wc more du df free ps top kill date tz sleep env echo clear`, `disk` (lists drives,
+partitions them with GPT and formats them as FAT32), network tools
 (`net ping host nc fetch curl`, where `fetch` and `curl` speak HTTPS through mbedTLS), `lua` (Lua 5.4), `volume`,
 `convert` for audio files, `notify`, `text` (an editor in the terminal) and `axfetch`.
 Run any of them with `--help`.
@@ -113,8 +117,8 @@ Then:
 make
 ```
 
-This builds `build/aximos.iso` (the kernel and bootloader) and `build/disk.img` (a 512 MB
-FAT32 disk with everything else). The first build downloads the source of dash, Lua, mbedTLS,
+This builds `build/disk.img` (a 512 MB FAT32 disk with the system) and `build/aximos.iso`
+(the kernel, the bootloader and the same system, which boots by itself to install it). The first build downloads the source of dash, Lua, mbedTLS,
 zlib, curl, NetSurf, libwebp, the DejaVu fonts, stb_truetype and the audio codecs into `ports/dist`, checks their SHA-256 sums, and builds
 them against AximOS's own libc.
 
@@ -128,6 +132,7 @@ make run
 |--------------------|----------------------------------------------------|
 | `make run`         | Run what's built, on an AHCI drive                 |
 | `make run-ide`     | Run on the older (and slower) IDE controller       |
+| `make run-installer` | Boot the ISO with a blank 2 GB disk to install on, kept in `build/install.img` |
 | `make build-run`   | Rebuild what changed, then run                     |
 | `make test`        | Run the tests                                      |
 | `make clean`       | Delete everything built                            |
@@ -135,6 +140,15 @@ make run
 QEMU uses KVM when the host has it. Sound goes to PipeWire; pass another backend with
 `make run AUDIO=pa`, for example. The serial port goes to the terminal you ran it from,
 where the kernel and wm log what they're doing.
+
+### Installing
+
+The ISO boots by itself into the installer, which erases the drive you choose, gives it
+one FAT32 partition the firmware boots from, and copies the system onto it. From then on
+the installed system is used, even with the ISO still in. The ISO has to be on a CD or
+DVD drive, since there's no USB storage driver yet, and the PC has to boot with UEFI.
+
+### First boot
 
 The first boot asks for your time zone (the clock starts out showing 12 hour time) and
 to make an account. After that it starts at the log-in screen.

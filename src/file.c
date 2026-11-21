@@ -2,6 +2,7 @@
 #include <errno_values.h>
 #include <fb.h>
 #include <audio.h>
+#include <block.h>
 #include <file.h>
 #include <key_event.h>
 #include <keyboard.h>
@@ -40,10 +41,12 @@ enum file_kind {
     FILE_INET,
     FILE_TTY,        // a pseudo-terminal's slave
     FILE_PTY_MASTER,
+    FILE_DISK,       // a drive, sector by sector
 };
 
 // How much one read gets, so that a big one can't hold up the kernel for long.
 #define RANDOM_READ_MAX (1024 * 1024)
+#define DISK_TRANSFER_MAX (64 * 1024)
 
 struct file {
     int refs;
@@ -57,6 +60,7 @@ struct file {
     struct inet_socket *inet;
     struct tty *tty;
     struct audio_stream *audio;
+    struct block_device *disk;
     struct file *next_open; // the list of open nodes
     struct file *prev_open;
 };
@@ -87,6 +91,28 @@ int file_open_peer(struct file *master, int flags, struct file **out) {
     if (!(file = kmalloc(sizeof(*file))))
         return -ENOMEM;
     *out = new_tty_file(file, FILE_TTY, tty_open_slave(master->tty), (flags & O_NONBLOCK) | O_RDWR);
+    return 0;
+}
+
+static bool drive_in_use(const struct block_device *drive) {
+    for (struct file *file = open_nodes; file; file = file->next_open) {
+        if (vfs_node_drive(&file->node) == drive)
+            return true;
+    }
+    return vfs_drive_has_root(drive);
+}
+
+// Writing to a drive directly takes its filesystems away until it's closed, so
+// it can't be while anything on them is open, or by two at once.
+static int open_disk(struct block_device *drive, int access) {
+    if (access == O_RDONLY)
+        return 0;
+    if (!drive->write)
+        return -EROFS;
+    if (drive->claimed || drive_in_use(drive))
+        return -EBUSY;
+    drive->claimed = true;
+    vfs_unmount_drive(drive);
     return 0;
 }
 
@@ -183,6 +209,18 @@ static int file_open_locked(const char *cwd, const char *path, int flags, struct
         file->kind = vfs_device_of(&file->node) == VFS_DEVICE_NULL ? FILE_NULL : FILE_ZERO;
         file->flags = flags;
         file->refs = 1;
+        *out = file;
+        return 0;
+    }
+    struct block_device *drive = status == VFS_OK ? vfs_raw_drive(&file->node) : NULL;
+
+    if (drive) {
+        status = open_disk(drive, access);
+        if (status < 0) {
+            kfree(file);
+            return status;
+        }
+        *file = (struct file){.refs = 1, .kind = FILE_DISK, .flags = flags, .node = file->node, .disk = drive};
         *out = file;
         return 0;
     }
@@ -330,6 +368,11 @@ int file_stat(struct file *file, struct stat *out) {
     case FILE_SHM:
         out->st_mode = S_IFREG | 0777;
         out->st_size = shm_size(file->shm);
+        return 0;
+    case FILE_DISK:
+        vfs_fill_stat(&file->node, out);
+        out->st_size = (uint64_t)file->disk->sector_count * file->disk->sector_size;
+        out->st_blksize = file->disk->sector_size;
         return 0;
     default:
         out->st_mode = S_IFCHR | 0777;
@@ -525,8 +568,61 @@ void file_close(struct file *file) {
         shm_unref(file->shm);
     } else if (file->kind == FILE_FB && (file->flags & O_ACCMODE) != O_RDONLY) {
         fb_release();
+    } else if (file->kind == FILE_DISK && (file->flags & O_ACCMODE) != O_RDONLY) {
+        // What's on it now is mounted, as it would be at boot.
+        vfs_lock();
+        if (file->disk->flush)
+            file->disk->flush(file->disk);
+        vfs_mount_drive(file->disk);
+        file->disk->claimed = false;
+        vfs_unlock();
     }
     kfree(file);
+}
+
+// Whole sectors at a time, a page at a time through the kernel's own memory, as
+// far as the drive goes.
+static int64_t disk_transfer(struct file *file, void *buf, size_t len, bool write) {
+    struct block_device *drive = file->disk;
+    uint32_t sector = drive->sector_size;
+    uint64_t size = (uint64_t)drive->sector_count * sector;
+
+    if ((file->flags & O_ACCMODE) == (write ? O_RDONLY : O_WRONLY))
+        return -EBADF;
+    if (file->offset % sector || len % sector || PAGE_SIZE % sector)
+        return -EINVAL;
+    if (file->offset >= size)
+        return write && len ? -ENOSPC : 0;
+    if (len > size - file->offset)
+        len = size - file->offset;
+    if (len > DISK_TRANSFER_MAX)
+        len = DISK_TRANSFER_MAX;
+
+    uint64_t phys = mm_alloc_kernel_page();
+
+    if (!phys)
+        return -ENOMEM;
+
+    uint8_t *page = mm_phys_to_virt(phys), *at = buf;
+    size_t done = 0;
+
+    vfs_lock();
+    while (done < len) {
+        size_t part = len - done < PAGE_SIZE ? len - done : PAGE_SIZE;
+        uint32_t lba = (file->offset + done) / sector;
+
+        if (write)
+            memcpy(page, at + done, part);
+        if (!(write ? block_write_many(drive, lba, part / sector, page) : block_read_many(drive, lba, part / sector, page)))
+            break;
+        if (!write)
+            memcpy(at + done, page, part);
+        done += part;
+    }
+    vfs_unlock();
+    mm_free_kernel_page(phys);
+    file->offset += done;
+    return done || len == 0 ? (int64_t)done : -EIO;
 }
 
 int64_t file_read(struct file *file, void *buf, size_t len) {
@@ -573,6 +669,8 @@ int64_t file_read(struct file *file, void *buf, size_t len) {
     case FILE_FB:
     case FILE_SHM:
         return -EINVAL;
+    case FILE_DISK:
+        return disk_transfer(file, buf, len, false);
     case FILE_NODE:
         break;
     }
@@ -625,6 +723,8 @@ int64_t file_write(struct file *file, const void *buf, size_t len) {
     case FILE_FB:
     case FILE_SHM:
         return -EINVAL;
+    case FILE_DISK:
+        return disk_transfer(file, (void *)buf, len, true);
     case FILE_NODE:
         break;
     }
@@ -648,18 +748,24 @@ int64_t file_write(struct file *file, const void *buf, size_t len) {
 }
 
 int64_t file_seek(struct file *file, int64_t offset, int whence) {
-    if (file->kind != FILE_NODE)
+    if (file->kind != FILE_NODE && file->kind != FILE_DISK)
         return -ESPIPE;
     if (file->node.is_dir)
         return -EISDIR;
 
-    vfs_lock();
+    uint64_t end = file->node.size;
 
-    int status = vfs_refresh(&file->node);
+    if (file->kind == FILE_DISK) {
+        end = (uint64_t)file->disk->sector_count * file->disk->sector_size;
+    } else {
+        vfs_lock();
 
-    vfs_unlock();
-    if (status != VFS_OK)
-        return status;
+        int status = vfs_refresh(&file->node);
+
+        vfs_unlock();
+        if (status != VFS_OK)
+            return status;
+    }
 
     int64_t base;
     switch (whence) {
@@ -670,7 +776,7 @@ int64_t file_seek(struct file *file, int64_t offset, int whence) {
         base = file->offset;
         break;
     case SEEK_END:
-        base = file->node.size;
+        base = end;
         break;
     default:
         return -EINVAL;

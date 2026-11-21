@@ -8,6 +8,7 @@ BUILD := build
 KERNEL := $(BUILD)/kernel.elf
 ISO := $(BUILD)/aximos.iso
 ISO_ROOT := $(BUILD)/iso_root
+SYSTEM := $(BUILD)/system# everything that goes on the disk, also on the ISO to install from
 DISK := $(BUILD)/disk.img
 DISK_SIZE_MB := 512
 
@@ -26,7 +27,7 @@ LIBC_SO_OBJS := $(patsubst user/libc/%,$(BUILD)/user/libc_pic/%.o,$(basename $(f
 # linked against. The apps go in /system/bin/gui, where wm's start menu finds them.
 LIBGUI_SO := $(BUILD)/user/libgui.so
 LIBGUI_SO_OBJS := $(patsubst user/libgui/%.c,$(BUILD)/user/libgui_pic/%.o,$(wildcard user/libgui/*.c))
-GUI_APPS := guidemo term fbdemo widgets editor files viewer settings player calculator tasks paint snake
+GUI_APPS := guidemo term fbdemo widgets editor files viewer settings player calculator tasks paint snake install
 
 # The start menu shows the folders in /system/bin/gui as they are, so the apps are
 # put in these, or at the top for those in none of them.
@@ -34,7 +35,7 @@ APP_FOLDERS := Accessories Games Multimedia System Demos
 APPS_Accessories := calculator editor paint viewer
 APPS_Games := snake
 APPS_Multimedia := player
-APPS_System := settings tasks
+APPS_System := settings tasks install
 APPS_Demos := guidemo fbdemo widgets
 app_dir = $(foreach f,$(APP_FOLDERS),$(if $(filter $(1),$(APPS_$(f))),$(f)/))
 
@@ -98,8 +99,8 @@ LIBC_SO_LDFLAGS := -m elf_x86_64 -nostdlib -shared --hash-style=sysv -soname lib
 	-e _dlstart -z noexecstack
 DYNAMIC_LDFLAGS := --hash-style=sysv -dynamic-linker /system/lib/libc.so
 
-# Copies a file onto the disk without its debug info.
-install_stripped = strip -s -o $(BUILD)/stripped $(1) && mcopy -i $@ $(BUILD)/stripped ::$(2)
+# Copies a file into the system without its debug info.
+install_stripped = strip -s -o $(SYSTEM)$(2) $(1)
 
 # KVM runs it at the CPU's own speed, where the host has it, and otherwise QEMU
 # goes back to emulating every instruction, many times slower.
@@ -117,7 +118,12 @@ QEMU := $(QEMU_BASE) -M pc -drive file=$(DISK),format=raw,if=ide,index=0
 QEMU_Q35 := $(QEMU_BASE) -M q35 -drive file=$(DISK),format=raw,if=none,id=disk \
 	-device ide-hd,drive=disk,bus=ide.1
 
-.PHONY: all help built run run-ide build-run test clean
+# The ISO with a blank disk to install on, which is kept, so running it again boots
+# what was installed.
+INSTALL_DISK := $(BUILD)/install.img
+INSTALL_DISK_MB := 2048
+
+.PHONY: all help built run run-ide run-installer build-run test clean
 
 # A recipe that fails leaves nothing behind that looks up to date.
 .DELETE_ON_ERROR:
@@ -264,14 +270,14 @@ $(ZONES):
 	tar -C $(ZONEINFO) -chf - --exclude=./posix --exclude=./right . | tar -C $@ -xf -
 	find $@ -type f | while read -r f; do [ "$$(head -c 4 "$$f")" = TZif ] || rm "$$f"; done
 
-$(DISK): $(PROGRAM_ELFS) $(LIBC_SO) $(LIBGUI_SO) $(LIBAUDIO_SO) $(LIBOGG_SO) $(CODEC_SOS) $(LIBWEBP_SO) $(ROOTFS_FILES) $(DASH) $(LUA) \
-		$(CURL) $(NETSURF) $(FONTS) | $(ZONES)
-	rm -f $@
-	mkfs.fat -F 32 -C $@ $$(($(DISK_SIZE_MB) * 1024))
-	mcopy -s -i $@ rootfs/system ::/
-	mmd -i $@ ::/system/boot ::/system/bin ::/system/bin/gui $(APP_FOLDERS:%=::/system/bin/gui/%) ::/system/lib ::/tmp \
-		::/trash ::/home ::/home/Desktop ::/home/Documents ::/home/Pictures
-	mcopy -s -i $@ $(ZONES) ::/system/share/
+$(SYSTEM): $(PROGRAM_ELFS) $(LIBC_SO) $(LIBGUI_SO) $(LIBAUDIO_SO) $(LIBOGG_SO) $(CODEC_SOS) $(LIBWEBP_SO) $(ROOTFS_FILES) \
+		$(DASH) $(LUA) $(CURL) $(NETSURF) $(FONTS) | $(ZONES)
+	rm -rf $(SYSTEM)
+	mkdir -p $(SYSTEM)
+	cp -r rootfs/system $(SYSTEM)/
+	mkdir -p $(SYSTEM)/system/boot $(SYSTEM)/system/bin/gui $(APP_FOLDERS:%=$(SYSTEM)/system/bin/gui/%) $(SYSTEM)/system/lib \
+		$(SYSTEM)/tmp $(SYSTEM)/trash $(SYSTEM)/home/Desktop $(SYSTEM)/home/Documents $(SYSTEM)/home/Pictures
+	cp -r $(ZONES) $(SYSTEM)/system/share/
 	$(call install_stripped,$(LIBC_SO),/system/lib/libc.so)
 	$(call install_stripped,$(LIBGUI_SO),/system/lib/libgui.so)
 	for l in $(LIBAUDIO_SO) $(LIBOGG_SO) $(CODEC_SOS) $(LIBWEBP_SO); do $(call install_stripped,$$l,/system/lib/$$(basename $$l)); done
@@ -282,14 +288,19 @@ $(DISK): $(PROGRAM_ELFS) $(LIBC_SO) $(LIBGUI_SO) $(LIBAUDIO_SO) $(LIBOGG_SO) $(C
 	$(call install_stripped,$(LUA),/system/bin/lua)
 	$(call install_stripped,$(CURL),/system/bin/curl)
 	$(call install_stripped,$(NETSURF),/system/bin/gui/netsurf)
-	rm -rf $(BUILD)/netsurf && cp -rL $(NETSURF_RES) $(BUILD)/netsurf && cp ports/netsurf/Choices $(BUILD)/netsurf/
-	rm -rf $(BUILD)/netsurf/de $(BUILD)/netsurf/fr $(BUILD)/netsurf/it $(BUILD)/netsurf/ja $(BUILD)/netsurf/nl $(BUILD)/netsurf/zh_CN
-	mcopy -s -i $@ $(BUILD)/netsurf ::/system/share/
-	mcopy -i $@ $(BUILD)/ports/fonts/*.ttf ::/system/share/fonts/
-	rm $(BUILD)/stripped
+	cp -rL $(NETSURF_RES) $(SYSTEM)/system/share/netsurf && cp ports/netsurf/Choices $(SYSTEM)/system/share/netsurf/
+	rm -rf $(addprefix $(SYSTEM)/system/share/netsurf/,de fr it ja nl zh_CN)
+	cp $(BUILD)/ports/fonts/*.ttf $(SYSTEM)/system/share/fonts/
 
-$(ISO): $(KERNEL) limine.conf
+$(DISK): $(SYSTEM)
+	rm -f $@
+	mkfs.fat -F 32 -C $@ $$(($(DISK_SIZE_MB) * 1024))
+	mcopy -s -i $@ $(SYSTEM)/* ::/
+
+# The ISO boots by itself, from the same system as the disk, to install it.
+$(ISO): $(KERNEL) limine.conf $(SYSTEM)
 	rm -rf $(ISO_ROOT)
+	cp -r $(SYSTEM) $(ISO_ROOT)
 	mkdir -p $(ISO_ROOT)/boot/limine $(ISO_ROOT)/EFI/BOOT
 	cp $(KERNEL) $(ISO_ROOT)/boot/
 	cp limine.conf $(LIMINE_DIR)/limine-uefi-cd.bin $(ISO_ROOT)/boot/limine/
@@ -308,6 +319,10 @@ run: built
 run-ide: built
 	$(QEMU)
 
+run-installer: built
+	test -f $(INSTALL_DISK) || truncate -s $(INSTALL_DISK_MB)M $(INSTALL_DISK)
+	$(QEMU_BASE) -M q35 -drive file=$(INSTALL_DISK),format=raw,if=none,id=disk -device ide-hd,drive=disk,bus=ide.1
+
 build-run: all
 	$(QEMU_Q35)
 
@@ -320,6 +335,7 @@ help:
 	@echo "make                build whatever has changed (same as make all)"
 	@echo "make run            run what's already built, using AHCI"
 	@echo "make run-ide        run what's already built, using the slower IDE controller"
+	@echo "make run-installer  boot the ISO with a blank disk to install on, kept in build/install.img"
 	@echo "make build-run      build whatever has changed, then run"
 	@echo "make test           run the tests in tests/ against what's already built"
 	@echo "make clean          delete everything that was built"

@@ -6,12 +6,12 @@ from vm import VM, check, finish
 
 W, H, BAR = 1280, 800, 32
 X, Y = 1, 25 # where a maximized window's contents start
-CLIPS = (W - 8 - 40 - 12 - 8 - 24 - 2 - 44 - 2 - 24 + 12, H - 8 - BAR // 2) # left of the network and speaker
+CLIPS = (W - 8 - 36 - 12 - 8 - 24 - 2 - 44 - 2 - 24 + 12, H - 8 - BAR // 2) # left of the network and speaker, by a 24 hour clock
 
 v = VM(vmmouse=True)
 try:
     check('prompt at boot', v.wait('/$ ', 30), v.text())
-    v.run('echo none > /system/etc/wallpaper; rm -f /system/etc/gui.conf /system/etc/recent; '
+    v.run('echo none > /system/etc/wallpaper; echo clock 24 > /system/etc/gui.conf; rm -f /system/etc/recent; '
           'mkdir /tmp/r; echo hello > /tmp/r/note.txt')
 
     def click(x, y):

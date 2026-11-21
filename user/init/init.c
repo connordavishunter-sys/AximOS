@@ -1,7 +1,9 @@
 #include <key_event.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/ioctl.h>
+#include <sys/statfs.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -40,14 +42,20 @@ static int run(const char *path, char *arg) {
 
 // Starts the desktop, behind its log-in screen, unless Shift is held, and keeps a
 // shell running after it, behind ttylogin, which asks for the same account.
+// Started from the install disc, which can't be written to, there's no account to
+// make, so the desktop starts with the installer and the shell after it.
 int main(void) {
     int modifiers = 0;
+    struct statfs fs;
+    bool disc = statfs("/", &fs) == 0 && !strcmp(fs.f_type, "iso9660");
 
     ioctl(STDIN_FILENO, KEYBOARD_GET_MODIFIERS, &modifiers);
     if (modifiers & KEY_MOD_SHIFT)
         printf("init: Shift is held, so starting the shell\n");
     else
-        run(WM_PATH, "--login");
+        run(WM_PATH, disc ? "install" : "--login");
+    while (disc && run(SHELL_PATH, NULL) != EXEC_FAILED)
+        ;
     while (run(TTYLOGIN_PATH, NULL) != EXEC_FAILED)
         ;
     while (run(SHELL_PATH, NULL) != EXEC_FAILED) // without ttylogin

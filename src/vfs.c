@@ -9,20 +9,26 @@
 #include <tmpfs.h>
 #include <vfs.h>
 
-#define MAX_MOUNTS 16
+#define MAX_MOUNTS 32
 #define SECTOR_SIZE 512
 #define MBR_TABLE_OFFSET 446
 #define MBR_ENTRIES 4
 #define MBR_TYPE_FAT32_CHS 0x0B
 #define MBR_TYPE_FAT32_LBA 0x0C
+#define MBR_TYPE_GPT 0xEE
+#define GPT_ENTRY_SIZE 128
+#define MAX_PARTITIONS 99
 
 #define ROOT_CURSOR_DONE UINT64_MAX
 #define ROOT_CURSOR_PROC (UINT64_MAX - 1)
 
+// An unmounted one keeps its slot, so a node left pointing at it fails rather
+// than finding whatever was mounted next, and loses its name.
 struct vfs_mount {
     char device[VFS_DEVICE_NAME_MAX];
     const struct vfs_ops *ops;
     void *volume;
+    struct block_device *drive;
 };
 
 struct mbr_entry {
@@ -59,15 +65,19 @@ static int dev_readdir(void *volume, const struct vfs_node *node, uint64_t *curs
     (void)volume;
     (void)node;
 
-    // The cursor counts the mounts first and then the possible devices.
+    // The cursor counts the mounts first, then the possible devices, then disk.
+    while (*cursor < (uint64_t)mount_count && !mounts[*cursor].device[0])
+        ++*cursor;
     while (*cursor >= (uint64_t)mount_count) {
         uint64_t device = (*cursor)++ - mount_count;
 
-        if (device >= VFS_DEVICE_COUNT)
+        if (device > VFS_DEVICE_COUNT)
             return VFS_END;
-        if (device_present[device]) {
-            memcpy(entry->d_name, device_names[device], strlen(device_names[device]) + 1);
-            entry->d_type = DT_CHR;
+        if (device == VFS_DEVICE_COUNT || device_present[device]) {
+            const char *name = device == VFS_DEVICE_COUNT ? "disk" : device_names[device];
+
+            memcpy(entry->d_name, name, strlen(name) + 1);
+            entry->d_type = device == VFS_DEVICE_COUNT ? DT_DIR : DT_CHR;
             entry->d_size = 0;
             return VFS_OK;
         }
@@ -80,6 +90,45 @@ static int dev_readdir(void *volume, const struct vfs_node *node, uint64_t *curs
     return VFS_OK;
 }
 
+// /dev/disk, which has each drive as it is, sector by sector.
+static int disk_readdir(void *volume, const struct vfs_node *node, uint64_t *cursor, struct dirent *entry) {
+    (void)volume;
+    (void)node;
+
+    if (*cursor >= (uint64_t)block_device_count)
+        return VFS_END;
+
+    const char *name = block_devices[(*cursor)++]->name;
+
+    memcpy(entry->d_name, name, strlen(name) + 1);
+    entry->d_type = DT_BLK;
+    entry->d_size = 0;
+    return VFS_OK;
+}
+
+static int gone_lookup(void *volume, const char *path, struct vfs_node *node) {
+    (void)volume, (void)path, (void)node;
+    return -ENODEV;
+}
+
+static int64_t gone_read(void *volume, const struct vfs_node *node, uint64_t offset, void *buf, size_t len) {
+    (void)volume, (void)node, (void)offset, (void)buf, (void)len;
+    return VFS_IO_ERROR;
+}
+
+static int gone_readdir(void *volume, const struct vfs_node *node, uint64_t *cursor, struct dirent *entry) {
+    (void)volume, (void)node, (void)cursor, (void)entry;
+    return VFS_END;
+}
+
+static bool gone_statfs(void *volume, struct statfs *out) {
+    (void)volume, (void)out;
+    return false;
+}
+
+static const struct vfs_ops gone_ops = {
+    .type = "gone", .lookup = gone_lookup, .read = gone_read, .readdir = gone_readdir, .statfs = gone_statfs};
+
 static struct vfs_mount proc_mount = {.device = "proc", .ops = &procfs_ops};
 static struct vfs_mount tmp_mount = {.device = "tmpfs", .ops = &tmpfs_ops};
 
@@ -90,8 +139,10 @@ static bool under(const char *path, const char *dir, size_t len) {
 
 static const struct vfs_ops dev_ops = {.type = "devfs", .readdir = dev_readdir};
 static struct vfs_mount dev_mount = {.device = "devfs", .ops = &dev_ops};
+static const struct vfs_ops disk_ops = {.type = "devfs", .readdir = disk_readdir};
+static struct vfs_mount disk_mount = {.device = "disk", .ops = &disk_ops};
 
-static void add_mount(const char *device, const struct vfs_ops *ops, void *volume) {
+static void add_mount(struct block_device *drive, const char *device, const struct vfs_ops *ops, void *volume) {
     if (mount_count == MAX_MOUNTS) {
         kprintf("vfs: too many filesystems, ignoring %s\n", device);
         return;
@@ -101,13 +152,60 @@ static void add_mount(const char *device, const struct vfs_ops *ops, void *volum
     memcpy(mount->device, device, strlen(device) + 1);
     mount->ops = ops;
     mount->volume = volume;
+    mount->drive = drive;
     kprintf("vfs: mounted %s filesystem at /dev/%s\n", ops->type, device);
+}
+
+// Partitions are named after their drive and number, as sda1.
+static void mount_partition(struct block_device *drive, int number, uint32_t lba) {
+    size_t len = strlen(drive->name);
+    char device[BLOCK_NAME_MAX + 3];
+    void *volume;
+
+    memcpy(device, drive->name, len);
+    if (number >= 10)
+        device[len++] = '0' + number / 10;
+    device[len] = '0' + number % 10;
+    device[len + 1] = '\0';
+
+    if ((volume = fat32_mount(drive, lba)))
+        add_mount(drive, device, &fat32_ops, volume);
+    else
+        kprintf("vfs: nothing to mount on /dev/%s\n", device);
+}
+
+// A GPT's header is in the second sector, and says where its entries are.
+static void mount_gpt(struct block_device *drive, uint8_t *sector) {
+    uint64_t entries_lba;
+    uint32_t count, size;
+
+    if (!block_read(drive, 1, sector) || memcmp(sector, "EFI PART", 8) != 0)
+        return;
+    memcpy(&entries_lba, &sector[72], sizeof(entries_lba));
+    memcpy(&count, &sector[80], sizeof(count));
+    memcpy(&size, &sector[84], sizeof(size));
+    if (size < GPT_ENTRY_SIZE || SECTOR_SIZE % size)
+        return;
+
+    for (uint32_t i = 0; i < count && i < MAX_PARTITIONS; i++) {
+        static const uint8_t unused[16];
+        uint64_t first;
+
+        if (!block_read(drive, entries_lba + i * size / SECTOR_SIZE, sector))
+            return;
+
+        const uint8_t *entry = &sector[i * size % SECTOR_SIZE];
+
+        memcpy(&first, &entry[32], sizeof(first));
+        if (memcmp(entry, unused, sizeof(unused)) != 0 && first < UINT32_MAX)
+            mount_partition(drive, i + 1, first);
+    }
 }
 
 static void mount_disk(struct block_device *drive) {
     void *volume = fat32_mount(drive, 0);
     if (volume) {
-        add_mount(drive->name, &fat32_ops, volume);
+        add_mount(drive, drive->name, &fat32_ops, volume);
         return;
     }
 
@@ -120,40 +218,57 @@ static void mount_disk(struct block_device *drive) {
     struct mbr_entry entries[MBR_ENTRIES];
     memcpy(entries, &sector[MBR_TABLE_OFFSET], sizeof(entries));
 
+    if (entries[0].type == MBR_TYPE_GPT) {
+        mount_gpt(drive, sector);
+        return;
+    }
     for (int i = 0; i < MBR_ENTRIES; i++) {
-        if (entries[i].type != MBR_TYPE_FAT32_CHS && entries[i].type != MBR_TYPE_FAT32_LBA)
-            continue;
-
-        size_t len = strlen(drive->name);
-        char device[BLOCK_NAME_MAX + 2];
-
-        memcpy(device, drive->name, len);
-        device[len] = '1' + i;
-        device[len + 1] = '\0';
-
-        volume = fat32_mount(drive, entries[i].lba);
-        if (volume)
-            add_mount(device, &fat32_ops, volume);
-        else
-            kprintf("vfs: nothing to mount on /dev/%s\n", device);
+        if (entries[i].type == MBR_TYPE_FAT32_CHS || entries[i].type == MBR_TYPE_FAT32_LBA)
+            mount_partition(drive, i + 1, entries[i].lba);
     }
 }
 
 static void mount_disc(struct block_device *drive) {
     void *volume = iso9660_mount(drive);
     if (volume)
-        add_mount(drive->name, &iso9660_ops, volume);
+        add_mount(drive, drive->name, &iso9660_ops, volume);
     else
         kprintf("vfs: nothing to mount on /dev/%s\n", drive->name);
 }
 
-bool vfs_mount_all(void) {
-    for (int i = 0; i < block_device_count; i++) {
-        if (block_devices[i]->optical)
-            mount_disc(block_devices[i]);
-        else
-            mount_disk(block_devices[i]);
+void vfs_mount_drive(struct block_device *drive) {
+    if (drive->optical)
+        mount_disc(drive);
+    else
+        mount_disk(drive);
+}
+
+void vfs_unmount_drive(struct block_device *drive) {
+    for (int i = 0; i < mount_count; i++) {
+        if (mounts[i].drive == drive && mounts[i].ops != &gone_ops) {
+            kprintf("vfs: unmounted /dev/%s\n", mounts[i].device);
+            mounts[i].ops = &gone_ops;
+            mounts[i].device[0] = '\0';
+        }
     }
+    fat32_forget(drive);
+}
+
+bool vfs_drive_has_root(const struct block_device *drive) {
+    return root_mount && root_mount->drive == drive;
+}
+
+struct block_device *vfs_node_drive(const struct vfs_node *node) {
+    return node->mount ? node->mount->drive : NULL;
+}
+
+struct block_device *vfs_raw_drive(const struct vfs_node *node) {
+    return node->mount == &disk_mount && !node->is_dir ? block_devices[node->location] : NULL;
+}
+
+bool vfs_mount_all(void) {
+    for (int i = 0; i < block_device_count; i++)
+        vfs_mount_drive(block_devices[i]);
     return mount_count > 0;
 }
 
@@ -174,13 +289,18 @@ void vfs_unlock(void) {
     process_wakeup(&lock_held);
 }
 
+// One that can be written to comes first, so an installed system is used rather
+// than the disc it was installed from.
 bool vfs_choose_root(const char *path) {
-    for (int i = 0; i < mount_count; i++) {
+    for (int i = 0; i < 2 * mount_count; i++) {
+        struct vfs_mount *mount = &mounts[i % mount_count];
         struct vfs_node node;
 
-        if (mounts[i].ops->lookup(mounts[i].volume, path + 1, &node) == VFS_OK) {
-            root_mount = &mounts[i];
-            kprintf("vfs: /dev/%s is the root filesystem\n", mounts[i].device);
+        if (i < mount_count && !mount->ops->write)
+            continue;
+        if (mount->ops->lookup(mount->volume, path + 1, &node) == VFS_OK) {
+            root_mount = mount;
+            kprintf("vfs: /dev/%s is the root filesystem\n", mount->device);
             return true;
         }
     }
@@ -281,6 +401,22 @@ int vfs_lookup(const char *cwd, const char *path, struct vfs_node *node) {
             }
         }
 
+        if (rest - device == 4 && memcmp(device, "disk", 4) == 0) {
+            if (*rest == '\0' || strcmp(rest, "/") == 0) {
+                *node = (struct vfs_node){.mount = &disk_mount, .is_dir = true};
+                return VFS_OK;
+            }
+            for (int i = 0; i < block_device_count; i++) {
+                if (strcmp(rest + 1, block_devices[i]->name) == 0) {
+                    uint64_t bytes = (uint64_t)block_devices[i]->sector_count * block_devices[i]->sector_size;
+
+                    *node = (struct vfs_node){.mount = &disk_mount, .location = i,
+                                              .size = bytes < UINT32_MAX ? bytes : UINT32_MAX};
+                    return VFS_OK;
+                }
+            }
+            return VFS_NOT_FOUND;
+        }
         mount = find_mount(device, rest - device);
         if (!mount)
             return VFS_NOT_FOUND;
@@ -342,6 +478,9 @@ size_t vfs_list_mounts(char *out, size_t size) {
     size_t used = 0;
 
     for (int i = 0; i < mount_count; i++) {
+        if (!mounts[i].device[0])
+            continue;
+
         const char *parts[] = {"/dev/", mounts[i].device, " ", &mounts[i] == root_mount ? "/" : "/dev/",
                                &mounts[i] == root_mount ? "" : mounts[i].device, " ", mounts[i].ops->type, "\n"};
 
@@ -490,7 +629,10 @@ void vfs_fill_stat(const struct vfs_node *node, struct stat *out) {
         .st_dev = node->mount == &dev_mount ? MAX_MOUNTS + 1 : node->mount == &proc_mount ? MAX_MOUNTS + 2
                 : node->mount == &tmp_mount ? MAX_MOUNTS + 3 : (uint64_t)(node->mount - mounts) + 1,
         .st_ino = (uint64_t)node->entry_lba << 16 | node->entry_pos,
-        .st_mode = (node->is_dir ? S_IFDIR : vfs_device_of(node) != VFS_DEVICE_NONE ? S_IFCHR : S_IFREG) | 0777,
+        .st_mode = (node->is_dir                            ? S_IFDIR
+                    : vfs_raw_drive(node)                   ? S_IFBLK
+                    : vfs_device_of(node) != VFS_DEVICE_NONE ? S_IFCHR
+                                                            : S_IFREG) | 0777,
         .st_nlink = 1,
         .st_size = node->size,
         .st_blksize = SECTOR_SIZE,

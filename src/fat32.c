@@ -326,6 +326,11 @@ void *fat32_mount(struct block_device *drive, uint32_t start_lba) {
     return v;
 }
 
+void fat32_forget(const struct block_device *drive) {
+    if (cached_drive == drive)
+        cached_drive = NULL;
+}
+
 // FAT has no time zone, and this OS treats every timestamp as UTC.
 static int64_t entry_mtime(const struct dir_entry *e) {
     if (e->date == 0)

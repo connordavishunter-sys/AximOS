@@ -82,6 +82,18 @@ void vfs_release_if_mine(void);
 // if there were none.
 bool vfs_mount_all(void);
 
+struct block_device;
+
+// Mounts what's on a drive, or forgets it, so that it can be written to sector by
+// sector. Nodes still pointing at what was there fail from then on.
+void vfs_mount_drive(struct block_device *drive);
+void vfs_unmount_drive(struct block_device *drive);
+bool vfs_drive_has_root(const struct block_device *drive);
+
+// The drive a node's filesystem is on, and the drive a /dev/disk node is, or NULL.
+struct block_device *vfs_node_drive(const struct vfs_node *node);
+struct block_device *vfs_raw_drive(const struct vfs_node *node);
+
 // Writes a line about each mounted filesystem, returning how much that came to.
 size_t vfs_list_mounts(char *out, size_t size);
 
@@ -93,7 +105,8 @@ void vfs_fill_stat(const struct vfs_node *node, struct stat *out);
 // Which device a node is, if any.
 enum vfs_device vfs_device_of(const struct vfs_node *node);
 
-// Makes the first mounted filesystem containing path the root of the tree.
+// Makes the first mounted filesystem containing path the root of the tree,
+// trying those that can be written to first.
 bool vfs_choose_root(const char *path);
 
 // Resolves a path, which is taken relative to cwd unless it is absolute.

@@ -14,6 +14,7 @@ struct block_device {
     uint32_t sector_size;
     uint32_t sector_count;
     uint32_t max_sectors; // the most one command can move
+    bool claimed;         // open for writing through /dev/disk
     void *driver;
     bool (*read)(struct block_device *device, uint32_t lba, uint32_t count, void *buf);
     bool (*write)(struct block_device *device, uint32_t lba, uint32_t count, const void *buf); // NULL if read-only
