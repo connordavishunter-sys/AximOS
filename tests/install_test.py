@@ -44,6 +44,8 @@ try:
     v.key('ret')
     check('then copies the system', v.wait('install: copying', 30, at), v.text(at))
     check('and finishes', v.wait('install: done', 240, at), v.text(at))
+    v.key('meta_l-q')
+    check('then closes', v.wait('install: closed', 5, at), v.text(at))
 finally:
     v.close()
 

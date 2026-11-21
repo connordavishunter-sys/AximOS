@@ -270,7 +270,8 @@ int main(int argc, char **argv) {
     gui_ui_init(&ui, window);
     go_to(&ui, CHOOSE);
 
-    // While copying, it draws between steps rather than waiting for events.
+    // While copying, it draws between steps rather than waiting for events, and
+    // doesn't close, which would leave the drive half installed.
     for (bool redraw = true;;) {
         struct gui_message e;
         int got;
@@ -280,10 +281,11 @@ int main(int argc, char **argv) {
         redraw = page == COPYING;
         if (redraw)
             copy_some(&ui);
-        if ((got = gui_wait_event(&e, redraw ? 0 : -1)) < 0)
+        if ((got = gui_wait_event(&e, redraw ? 0 : -1)) < 0 || (got && e.type == GUI_CLOSE && page != COPYING))
             break;
         if (got)
             redraw |= gui_ui_event(&ui, &e);
     }
+    printf("install: closed\n");
     return 0;
 }
