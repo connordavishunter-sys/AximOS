@@ -8,6 +8,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 static int connection = -1;
@@ -35,9 +36,10 @@ bool gui_send(int fd, const struct gui_message *message) {
 }
 
 bool gui_connect(void) {
-    struct sockaddr_un address = {.sun_family = AF_UNIX, .sun_path = GUI_SOCKET};
-    const char *given = getenv("GUI_FD");
+    struct sockaddr_un address = {.sun_family = AF_UNIX};
+    const char *given = getenv("GUI_FD"), *path = getenv("GUI_SOCKET");
 
+    snprintf(address.sun_path, sizeof(address.sun_path), "%s", path ? path : GUI_SOCKET);
     if (given) {
         connection = atoi(given);
         unsetenv("GUI_FD");

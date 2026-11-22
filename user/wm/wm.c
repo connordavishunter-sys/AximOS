@@ -1,3 +1,4 @@
+#include "display.h"
 #include <arpa/inet.h>
 #include <audio_types.h>
 #include <ctype.h>
@@ -13,11 +14,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/fb.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/reboot.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -59,8 +60,8 @@
 #define TASKBAR_BUTTON_WIDTH 160
 #define LAUNCHER_WIDTH 64
 
-#define APPS_DIR "/system/bin/gui"
-#define ICONS "/system/share/icons"
+#define APPS_DIR GUI_APPS
+#define ICONS GUI_ROOT "/system/share/icons"
 #define MAX_ICONS 32
 #define ICON_SIZE 16
 
@@ -191,12 +192,12 @@ struct window {
 enum part { PART_NONE, PART_CONTENT, PART_TITLE, PART_CLOSE, PART_MAXIMIZE, PART_MINIMIZE, PART_RESIZE };
 enum { EDGE_LEFT = 1, EDGE_RIGHT = 2, EDGE_TOP = 4, EDGE_BOTTOM = 8 };
 
-// Composed here, in the desktop's pixels, then copied to the framebuffer, each
+// Composed here, in the desktop's pixels, then copied to the display's, each
 // pixel scale times as wide and high there.
 static struct gui_canvas screen;
-static uint8_t *framebuffer;
-static int pitch, fb, keyboard, fb_width, fb_height, scale = 1;
-static bool can_set_mode;
+static const struct display *display;
+static struct screen output;
+static int scale = 1;
 
 static struct client *clients[MAX_CLIENTS];
 static struct window *windows[MAX_WINDOWS]; // bottom first
@@ -253,7 +254,7 @@ static enum snap snap; // where the window being dragged would go, if let go now
 // With --login, the desktop is locked until the log-in screen, which wm starts
 // with a connection of its own, says someone's logged in. While it's locked only
 // that screen's window is shown, and it gets all the input.
-#define LOGIN_PATH "/system/bin/login"
+#define LOGIN_PATH GUI_ROOT "/system/bin/login"
 static bool login_mode, locked, logged_in;
 static struct client *session; // the log-in screen's connection
 static int64_t login_due = -1, login_started; // when to start it again, if it stops
@@ -1185,7 +1186,7 @@ enum { TILE_AIRPLANE, TILE_NIGHT, TILE_DARK, TILE_QUIET, TILES };
 #define CLIP_ROW 24
 #define QUICK_WIDTH 400
 #define TILE_HEIGHT 52
-#define VOLUME_FILE "/system/etc/volume"
+#define VOLUME_FILE GUI_ROOT "/system/etc/volume"
 #define VOLUME_STEP 5
 #define NET_CHECK_MS 5000 // how often the network's looked at, for its icon
 static int panel = -1; // the one open
@@ -2099,7 +2100,7 @@ static void draw_snap(struct gui_canvas *c, int ox, int oy) {
 #define MAX_DESKTOP 64
 #define DOUBLE_CLICK_MS 400
 #define DRAG_DISTANCE 6
-#define LAYOUT "/system/etc/desktop"
+#define LAYOUT GUI_ROOT "/system/etc/desktop"
 struct desktop_item {
     char name[256];
     bool folder;
@@ -2391,7 +2392,7 @@ static void copy_to_desktop(const char *path) {
     if (!slash || ((size_t)(slash - path) == strlen(desktop_dir) && !strncmp(path, desktop_dir, slash - path)))
         return;
     if ((child = fork()) == 0) {
-        execl("/system/bin/cp", "cp", "-r", path, desktop_dir, (char *)NULL);
+        execl(GUI_BIN "/cp", "cp", "-r", path, desktop_dir, (char *)NULL);
         _exit(127);
     }
     if (child > 0)
@@ -3131,14 +3132,16 @@ static void make_night(void) {
     }
 }
 
-// A row of the screen on the framebuffer, scale rows high and each pixel scale wide.
+// A row of the screen on the display's, scale rows high and each pixel scale wide.
+// It's put together in memory first, as reading the framebuffer back is slow.
 static void show_row(uint8_t *to, const uint32_t *from, int width) {
-    uint32_t *row = (uint32_t *)to;
+    static uint32_t row[MAX_SIZE * 2];
 
     if (!settings.night_light && scale == 1) {
-        memcpy(row, from, width * sizeof(uint32_t));
+        memcpy(to, from, width * sizeof(uint32_t));
         return;
     }
+    width = width * scale > (int)(sizeof(row) / sizeof(*row)) ? (int)(sizeof(row) / sizeof(*row)) / scale : width;
     for (int x = 0; x < width; x++) {
         uint32_t p = settings.night_light
                        ? (from[x] & 0xFF0000) | night_green[from[x] >> 8 & 0xFF] << 8 | night_blue[from[x] & 0xFF]
@@ -3147,8 +3150,8 @@ static void show_row(uint8_t *to, const uint32_t *from, int width) {
         for (int i = 0; i < scale; i++)
             row[x * scale + i] = p;
     }
-    for (int i = 1; i < scale; i++)
-        memcpy(to + (long)i * pitch, row, width * scale * sizeof(uint32_t));
+    for (int i = 0; i < scale; i++)
+        memcpy(to + (long)i * output.pitch, row, width * scale * sizeof(uint32_t));
 }
 
 // Draws a rectangle of the screen. As what's see-through blurs what's under it,
@@ -3194,9 +3197,12 @@ static void redraw(void) {
                     mixed[x] = gui_mix(was[x], now[x], shown);
                 now = mixed;
             }
-            show_row(framebuffer + (long)row * scale * pitch + r.x * scale * sizeof(uint32_t), now, r.width);
+            show_row(output.pixels + (long)row * scale * output.pitch + r.x * scale * sizeof(uint32_t), now, r.width);
         }
+        display->changed(r.x * scale, r.y * scale, r.width * scale, r.height * scale);
     }
+    if (damage_count)
+        display->show();
     damage_count = 0;
 }
 
@@ -3472,7 +3478,7 @@ static void create_window(struct client *client, const struct gui_message *m) {
         add_damage(switcher());
     queue_message(client, &reply);
     queue_message(client, &(struct gui_message){
-                              .type = GUI_SCREEN, .width = screen.width, .height = screen.height, .x = can_set_mode,
+                              .type = GUI_SCREEN, .width = screen.width, .height = screen.height, .x = output.can_set_mode,
                               .y = scale});
     add_damage(extent_of(w));
     if (visible(w)) // so nothing can take what's typed on the log-in screen
@@ -3884,7 +3890,7 @@ static void send_mouse(struct window *w, uint32_t type, uint32_t changed, int wh
 
 static void launch(const char *command) {
     if (fork() == 0) {
-        execl("/system/bin/sh", "sh", "-c", command, (char *)NULL);
+        execl(GUI_BIN "/sh", "sh", "-c", command, (char *)NULL);
         _exit(127);
     }
 }
@@ -4319,8 +4325,13 @@ static int64_t leave_due;
 static void leave(int item) {
     if (item == ITEM_LOG_OUT)
         log_out();
+#ifdef GUI_HOSTED
+    else
+        quitting = true; // on Linux, the computer isn't wm's to turn off
+#else
     else
         reboot(item == ITEM_REBOOT ? RB_AUTOBOOT : RB_POWER_OFF);
+#endif
 }
 
 static void start_leaving(int item) {
@@ -4801,8 +4812,8 @@ static void handle_mouse(const struct mouse_event *e) {
     // To the nearest screen pixel, as the host gives the last one as a little under its share of
     // the range, then the desktop's pixel that's in. Moved, it goes as far in the desktop's pixels.
     int64_t range = MOUSE_ABSOLUTE_MAX + 1;
-    int x = e->absolute ? (int)(((int64_t)e->x * fb_width + range / 2) / range) / scale : cursor_x + faster(e->dx, 0);
-    int y = e->absolute ? (int)(((int64_t)e->y * fb_height + range / 2) / range) / scale : cursor_y + faster(e->dy, 1);
+    int x = e->absolute ? (int)(((int64_t)e->x * output.width + range / 2) / range) / scale : cursor_x + faster(e->dx, 0);
+    int y = e->absolute ? (int)(((int64_t)e->y * output.height + range / 2) / range) / scale : cursor_y + faster(e->dy, 1);
 
     x = x < 0 ? 0 : x >= screen.width ? screen.width - 1 : x;
     y = y < 0 ? 0 : y >= screen.height ? screen.height - 1 : y;
@@ -5206,20 +5217,20 @@ static void fit_windows(struct rect was) {
 
 // The scale the settings ask for, or the one the screen's size suits.
 static int wanted_scale(void) {
-    return settings.scale ? settings.scale : fb_width >= GUI_SCALE_WIDTH ? 2 : 1;
+    return settings.scale ? settings.scale : output.width >= GUI_SCALE_WIDTH ? 2 : 1;
 }
 
-// Makes the screen the framebuffer's size over the scale, if it isn't, keeping the
+// Makes the screen the display's size over the scale, if it isn't, keeping the
 // windows and the mouse on it, and tells every program.
 static void fit_screen(void) {
-    int to = wanted_scale(), width = fb_width / to, height = fb_height / to;
+    int to = wanted_scale(), width = output.width / to, height = output.height / to;
     struct rect was = desktop();
     uint32_t *pixels;
 
     if (screen.pixels && to == scale && width == screen.width && height == screen.height)
         return;
     if (!(pixels = malloc((size_t)width * height * sizeof(uint32_t)))) {
-        quitting = true; // the old screen could run off the framebuffer
+        quitting = true; // the old screen could run off the display's
         return;
     }
     cursor_x = screen.pixels ? (int)((long)cursor_x * width / screen.width) : width / 2;
@@ -5236,29 +5247,18 @@ static void fit_screen(void) {
     for (int i = 0; i < MAX_CLIENTS; i++) {
         if (clients[i])
             queue_message(clients[i], &(struct gui_message){.type = GUI_SCREEN, .width = width, .height = height,
-                                                            .x = can_set_mode, .y = scale});
+                                                            .x = output.can_set_mode, .y = scale});
     }
-    printf("wm: running at %dx%d%s%s\n", fb_width, fb_height, scale > 1 ? " at 2x" : "",
-           can_set_mode ? "" : ", which can't change");
+    printf("wm: running at %dx%d%s%s\n", output.width, output.height, scale > 1 ? " at 2x" : "",
+           output.can_set_mode ? "" : ", which can't change");
 }
 
 // Changes the screen's resolution.
 static void change_resolution(int width, int height) {
-    struct fb_info info;
-
-    if (fb_set_mode(fb, width, height) < 0 || fb_info(fb, &info) < 0) {
-        printf("wm: can't change to %dx%d\n", width, height);
-        return;
-    }
-    munmap(framebuffer, (size_t)pitch * fb_height);
-    pitch = info.pitch;
-    fb_width = info.width;
-    fb_height = info.height;
-    framebuffer = mmap(NULL, (size_t)pitch * info.height, PROT_READ | PROT_WRITE, MAP_SHARED, fb, 0);
-    if (framebuffer == MAP_FAILED)
-        quitting = true;
-    else
+    if (display->set_mode(&output, width, height))
         fit_screen();
+    else
+        printf("wm: can't change to %dx%d\n", width, height);
 }
 
 // Settings change the colours, shadows, clock, resolution and wallpaper, so
@@ -5282,8 +5282,7 @@ static void load_settings(void) {
     }
     if (icons_were_hidden != settings.hide_icons)
         desktop_selected = -1;
-    ioctl(keyboard, KEYBOARD_SET_REPEAT_DELAY, &settings.repeat_delay);
-    ioctl(keyboard, KEYBOARD_SET_REPEAT_RATE, &settings.repeat_rate);
+    display->set_repeat(settings.repeat_delay, settings.repeat_rate);
 
     // The volume may have been set elsewhere, as Settings does.
     int now_volume = volume, now_muted = muted;
@@ -5294,7 +5293,7 @@ static void load_settings(void) {
         muted = now_muted;
         damage_tray();
     }
-    if (can_set_mode && settings.width && (settings.width != fb_width || settings.height != fb_height))
+    if (output.can_set_mode && settings.width && (settings.width != output.width || settings.height != output.height))
         change_resolution(settings.width, settings.height);
     fit_screen();
     load_wallpaper();
@@ -5310,6 +5309,10 @@ static void settings_changed(void) {
     }
 }
 
+static void quit(void) {
+    quitting = true;
+}
+
 static int fail(const char *what) {
     dprintf(STDERR_FILENO, "wm: %s: %s\n", what, strerror(errno));
     return 1;
@@ -5319,38 +5322,29 @@ int main(int argc, char **argv) {
     help_option(argc, argv, "usage: wm [--login] [command]...\n"
                             "Runs the window system, starting each command in it. Super+Shift+Q quits.\n"
                             "With --login, it starts locked, behind the log-in screen, and the commands\n"
-                            "start once someone's logged in. Super+L locks it again.\n");
+                            "start once someone's logged in. Super+L locks it again.\n"
+                            "On Linux, --window runs it in a window and --drm on the screen itself, which\n"
+                            "it picks for itself by whether there's a desktop to make a window on.\n");
+    if (!(display = display_choose(&argc, &argv)))
+        return 1;
     login_mode = argc > 1 && !strcmp(argv[1], "--login");
     commands = argv + 1 + login_mode;
     command_count = argc - 1 - login_mode;
     signal(SIGPIPE, SIG_IGN);
 
-    struct fb_info info;
-    fb = open("/dev/fb0", O_RDWR | O_CLOEXEC);
+    if (!display->open(&output))
+        return 1;
 
-    if (fb < 0 || fb_info(fb, &info) < 0)
-        return fail("/dev/fb0");
-
-    int mouse = open("/dev/mouse", O_RDONLY | O_NONBLOCK | O_CLOEXEC);
-    keyboard = open("/dev/keyboard", O_RDONLY | O_NONBLOCK | O_CLOEXEC);
-    struct sockaddr_un address = {.sun_family = AF_UNIX, .sun_path = GUI_SOCKET};
+    // Where programs connect, which on Linux is a different place for each wm.
+    const char *socket_path = getenv("GUI_SOCKET") ? getenv("GUI_SOCKET") : GUI_SOCKET;
+    struct sockaddr_un address = {.sun_family = AF_UNIX};
     int listener = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0); // none of these for the programs it starts
 
-    if (mouse < 0)
-        return fail("/dev/mouse");
-    if (keyboard < 0)
-        return fail("/dev/keyboard");
+    snprintf(address.sun_path, sizeof(address.sun_path), "%s", socket_path);
+    unlink(socket_path); // left by one that crashed
     if (listener < 0 || bind(listener, (struct sockaddr *)&address, sizeof(address)) < 0 || listen(listener, 8) < 0)
-        return fail(GUI_SOCKET);
+        return fail(socket_path);
     fcntl(listener, F_SETFL, O_NONBLOCK);
-
-    pitch = info.pitch;
-    can_set_mode = info.can_set_mode;
-    fb_width = info.width;
-    fb_height = info.height;
-    framebuffer = mmap(NULL, (size_t)pitch * info.height, PROT_READ | PROT_WRITE, MAP_SHARED, fb, 0);
-    if (framebuffer == MAP_FAILED)
-        return fail("screen");
 
     // Programs start in the home folder, which has the desktop's.
     const char *home = getenv("HOME");
@@ -5378,13 +5372,12 @@ int main(int argc, char **argv) {
     snprintf(shown_clock, sizeof(shown_clock), "%s", clock_text(clock));
     check_network();
     while (!quitting) {
-        struct pollfd fds[3 + MAX_CLIENTS] = {
-            {.fd = listener, .events = POLLIN}, {.fd = mouse, .events = POLLIN}, {.fd = keyboard, .events = POLLIN},
-        };
+        struct pollfd fds[1 + DISPLAY_FDS + MAX_CLIENTS] = {{.fd = listener, .events = POLLIN}};
+        struct pollfd *input = fds + 1, *client_fds = input + display->poll_fds(input);
 
         for (int i = 0; i < MAX_CLIENTS; i++) {
-            fds[3 + i].fd = clients[i] ? clients[i]->fd : -1;
-            fds[3 + i].events = clients[i] ? POLLIN | (clients[i]->out_used ? POLLOUT : 0) : 0;
+            client_fds[i].fd = clients[i] ? clients[i]->fd : -1;
+            client_fds[i].events = clients[i] ? POLLIN | (clients[i]->out_used ? POLLOUT : 0) : 0;
         }
         int preview = check_preview(); // before the flyouts, so their own start moving
         int layout_wait = check_layouts();
@@ -5419,7 +5412,9 @@ int main(int argc, char **argv) {
                 timeout = (int)wait;
         }
 
-        int ready = poll(fds, 3 + MAX_CLIENTS, timeout);
+        timeout = display->max_wait >= 0 && (timeout < 0 || timeout > display->max_wait) ? display->max_wait : timeout;
+
+        int ready = poll(fds, client_fds + MAX_CLIENTS - fds, timeout);
 
         if (ready < 0 && errno != EINTR)
             return fail("poll");
@@ -5436,19 +5431,10 @@ int main(int argc, char **argv) {
         if (fds[0].revents & POLLIN)
             accept_client(listener);
 
-        struct mouse_event mouse_events[32];
-        ssize_t n = fds[1].revents & POLLIN ? read(mouse, mouse_events, sizeof(mouse_events)) : 0;
-
-        for (ssize_t i = 0; i < n / (ssize_t)sizeof(*mouse_events); i++)
-            handle_mouse(&mouse_events[i]);
-
-        struct key_event key_events[32];
-        n = fds[2].revents & POLLIN ? read(keyboard, key_events, sizeof(key_events)) : 0;
-        for (ssize_t i = 0; i < n / (ssize_t)sizeof(*key_events); i++)
-            handle_key(&key_events[i]);
-
+        if (display->read(input, &output, &(struct input){handle_mouse, handle_key, quit}))
+            fit_screen();
         for (int i = 0; i < MAX_CLIENTS; i++) {
-            if (clients[i] && (fds[3 + i].revents & (POLLIN | POLLHUP | POLLERR)))
+            if (clients[i] && (client_fds[i].revents & (POLLIN | POLLHUP | POLLERR)))
                 read_client(i);
         }
         for (int i = 0; i < MAX_CLIENTS; i++) {
@@ -5458,6 +5444,7 @@ int main(int argc, char **argv) {
         while (waitpid(-1, NULL, WNOHANG) > 0)
             ;
     }
+    unlink(socket_path);
     printf("wm: quit\n");
     return 0;
 }

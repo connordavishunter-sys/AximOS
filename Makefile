@@ -336,23 +336,36 @@ $(DEBUG_ISO): $(ISO)
 	touch $(BUILD)/iso_debug/system/etc/debug
 	$(call make_iso,$(BUILD)/iso_debug)
 
-# Apps built for Linux, with libgui showing their windows through SDL2. They use the
-# built system's fonts, icons and settings, as on AximOS.
+# wm and apps built for Linux. wm runs in a window on the desktop, or on the screen
+# itself from a text console, and the apps in it, or in windows of their own through
+# SDL2 when they're started anywhere else. They use the built system's fonts, icons
+# and settings, as on AximOS, with the apps in the start menu's folders.
 LINUX := $(BUILD)/linux
 LINUX_APPS := calculator snake editor paint
-LINUX_GUI := $(filter-out user/libgui/gui.c,$(wildcard user/libgui/*.c)) linux/gui_sdl.c
+LINUX_GUI := $(wildcard user/libgui/*.c) linux/gui_sdl.c linux/gui_switch.c linux/compat.c
+LINUX_WM := $(filter-out user/wm/display_aximos.c,$(wildcard user/wm/*.c)) $(wildcard linux/wm_*.c) linux/evdev.c
+LINUX_LIBS := sdl2 libdrm
 LINUX_CFLAGS := -std=gnu23 -O2 -g -Wall -Wextra -Wno-format-truncation -D_GNU_SOURCE -DGUI_ROOT='"$(abspath $(SYSTEM))"' \
-	-DLIBWEBP='"libwebp.so.7"' -include linux/compat.h -Iuser/libgui/include -idirafter abi -isystem ports/dist \
-	$(shell pkg-config --cflags sdl2 2>/dev/null)
+	-DGUI_APPS='"$(abspath $(LINUX))/apps"' -DGUI_BIN='"/usr/bin"' -DLIBWEBP='"libwebp.so.7"' -include linux/compat.h \
+	-Iuser/libgui/include -idirafter abi -isystem ports/dist $(shell pkg-config --cflags $(LINUX_LIBS) 2>/dev/null)
+linux_objs = $(addprefix $(LINUX)/,$(subst .c,.o,$(1) $(LINUX_GUI)))
 
-linux: $(LINUX_APPS:%=$(LINUX)/%) $(SYSTEM)
+linux: $(LINUX)/wm $(foreach p,$(LINUX_APPS),$(LINUX)/apps/$(strip $(call app_dir,$(p)))$(p)) $(SYSTEM)
+
+# libgui has both backends, each named for itself, and gui_switch.c picks one.
+$(LINUX)/user/libgui/gui.o: BACKEND := -DBACKEND=wm -include linux/backend_names.h
+$(LINUX)/linux/gui_sdl.o: BACKEND := -DBACKEND=sdl -include linux/backend_names.h
 
 $(LINUX)/%.o: %.c ports/dist/stb_truetype.h
 	@mkdir -p $(@D)
-	$(CC) $(LINUX_CFLAGS) -MMD -MP -c $< -o $@
+	$(CC) $(LINUX_CFLAGS) $(BACKEND) -MMD -MP -c $< -o $@
 
-$(LINUX_APPS:%=$(LINUX)/%): $(LINUX)/%: $$(addprefix $(LINUX)/,$$(subst .c,.o,$$(wildcard user/$$*/*.c) $(LINUX_GUI)))
-	$(CC) $^ -lm $(shell pkg-config --libs sdl2 2>/dev/null) -o $@
+$(LINUX)/wm: $(call linux_objs,$(LINUX_WM))
+	$(CC) $^ -lm $(shell pkg-config --libs $(LINUX_LIBS) 2>/dev/null) -o $@
+
+$(LINUX)/apps/%: $$(call linux_objs,$$(wildcard user/$$(notdir $$*)/*.c))
+	@mkdir -p $(@D)
+	$(CC) $^ -lm $(shell pkg-config --libs $(LINUX_LIBS) 2>/dev/null) -o $@
 
 # These run what's already built. make build-run rebuilds what changed first.
 built:

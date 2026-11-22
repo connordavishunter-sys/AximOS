@@ -10,9 +10,16 @@
 
 #define GUI_SOCKET "/tmp/wm.sock"
 
-// Where the system's files are: the root on AximOS, and the built system on Linux.
+// Where the system's files are: the root on AximOS, and the built system on Linux,
+// whose apps and programs such as sh are somewhere else, being built for Linux.
 #ifndef GUI_ROOT
 #define GUI_ROOT ""
+#endif
+#ifndef GUI_APPS
+#define GUI_APPS GUI_ROOT "/system/bin/gui"
+#endif
+#ifndef GUI_BIN
+#define GUI_BIN "/system/bin"
 #endif
 #define GUI_TITLE_MAX 64
 #define GUI_PATH_MAX 1024
@@ -275,7 +282,6 @@ const char *gui_app_for(const char *path);
 
 // Apps are in /system/bin/gui, or a folder in it, as the start menu shows them.
 // Finds one by name, returning false if there's none.
-#define GUI_APPS GUI_ROOT "/system/bin/gui"
 bool gui_app_path(const char *name, char path[GUI_PATH_MAX]);
 
 // Every app's name, sorted, up to max, returning how many there are.

@@ -117,7 +117,7 @@ AximOS builds on Linux. You need:
 - QEMU (`qemu-system-x86_64`) and OVMF, its UEFI firmware (`/usr/share/edk2/x64/OVMF.4m.fd`), to run it
 - Python 3 with Pillow and NumPy for the tests
 - `gperf`, `flex`, `bison` and `pkg-config` to build NetSurf
-- `sdl2`, only for `make linux`
+- `sdl2` and `libdrm`, only for `make linux`
 
 On Arch or CachyOS:
 
@@ -150,13 +150,28 @@ make run
 | `make run-usb`     | The same, with the ISO on a USB stick instead of a CD |
 | `make build-run`   | Rebuild what changed, then run                     |
 | `make debug`       | Also build `build/aximos-debug.iso`, which boots to the shell instead of the desktop |
-| `make linux`       | Build the calculator, Snake, the editor and Paint for Linux, in `build/linux`, through SDL2 |
+| `make linux`       | Build wm and the calculator, Snake, the editor and Paint for Linux, in `build/linux` |
 | `make test`        | Run the tests                                      |
 | `make clean`       | Delete everything built                            |
 
 QEMU uses KVM when the host has it. Sound goes to PipeWire; pass another backend with
 `make run AUDIO=pa`, for example. The serial port goes to the terminal you ran it from,
 where the kernel and wm log what they're doing.
+
+### On Linux
+
+`make linux` builds wm and some of the apps for Linux. From a desktop, wm runs in a
+window, with the apps in its start menu:
+
+```bash
+build/linux/wm
+```
+
+From a text console (Ctrl+Alt+F3, say), it takes over the screen itself through DRM,
+reading the keyboard, mouse and touchpad from `/dev/input`, which needs the `input`
+group. `--window` and `--drm` pick one or the other. Super+Shift+Q quits, and puts the
+console back. The apps also run by themselves, in windows of their own, from
+`build/linux/apps`.
 
 ### Installing
 

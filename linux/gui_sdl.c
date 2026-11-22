@@ -328,10 +328,3 @@ bool gui_backend_wait(int64_t due) {
     } while (SDL_PollEvent(&e));
     return true;
 }
-
-void help_option(int argc, char **argv, const char *text) {
-    if (argc > 1 && strcmp(argv[1], "-h") == 0) {
-        fputs(text, stdout);
-        exit(0);
-    }
-}
