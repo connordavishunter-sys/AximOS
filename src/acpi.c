@@ -400,19 +400,21 @@ bool acpi_battery(struct acpi_battery *out) {
     if (uacpi_eval_simple_integer(battery, "_STA", &value) == UACPI_STATUS_OK && !(value & STA_BATTERY_PRESENT))
         return true;
     out->present = true;
-    if (!package(battery, "_BST", status, 4))
-        return true;
-    out->charging = status[0] & BST_CHARGING;
-    out->discharging = status[0] & BST_DISCHARGING;
 
     // _BIX has a revision in front of what _BIF has. The capacity when last full
-    // is what the charge is out of, falling back on what it was made to hold.
+    // is what the charge is out of, falling back on what it was made to hold. It
+    // goes first, as Linux does it: some firmware, like Lenovo's, only works out the
+    // units _BST's numbers are in while it runs.
     uint64_t full = UNKNOWN;
 
     if (package(battery, "_BIX", info, 4))
         full = info[3] && info[3] != UNKNOWN ? info[3] : info[2];
     else if (package(battery, "_BIF", info, 3))
         full = info[2] && info[2] != UNKNOWN ? info[2] : info[1];
+    if (!package(battery, "_BST", status, 4))
+        return true;
+    out->charging = status[0] & BST_CHARGING;
+    out->discharging = status[0] & BST_DISCHARGING;
     if (full && full != UNKNOWN && status[2] != UNKNOWN)
         out->percent = status[2] >= full ? 100 : status[2] * 100 / full;
     return true;

@@ -27,8 +27,11 @@
 #define BOOT_PROTOCOL 0
 
 #define MAX_INTERFACES 4
-#define KEYS 6
-#define ROLLOVER 0x01 // in every key's place when too many are held
+#define BOOT_REPORT 8
+#define KEYBOARD_REPORT_ID 1
+#define MAX_HELD 32
+#define ROLLOVER 0x01        // in every key's place when too many are held
+#define MODIFIER_USAGE 0xE0 // where the bits for the modifiers begin
 
 // The modifier byte's bits, in order.
 static const uint16_t modifier_keys[8] = {
@@ -37,8 +40,8 @@ static const uint16_t modifier_keys[8] = {
 };
 
 struct keyboard {
-    uint8_t modifiers;
-    uint8_t keys[KEYS];
+    uint8_t modifiers, count;
+    uint8_t keys[MAX_HELD];
 };
 
 static void send_key(uint8_t usage, uint8_t modifiers, bool pressed) {
@@ -51,34 +54,55 @@ static void send_key(uint8_t usage, uint8_t modifiers, bool pressed) {
         keyboard_key(code, pressed);
 }
 
-static bool holds(const uint8_t *keys, uint8_t usage) {
-    for (int i = 0; i < KEYS; i++) {
+static bool holds(const uint8_t *keys, int count, uint8_t usage) {
+    for (int i = 0; i < count; i++) {
         if (keys[i] == usage)
             return true;
     }
     return false;
 }
 
+static void hold(uint8_t *keys, int *count, uint8_t usage) {
+    if (usage > ROLLOVER && *count < MAX_HELD && !holds(keys, *count, usage))
+        keys[(*count)++] = usage;
+}
+
+// A boot report is 8 bytes. A keyboard that keeps its own reports, as some do
+// whatever they're told, puts its report ID first, and many follow the same 8 bytes
+// with a bit for every key, for when more than six are held.
 static void keyboard_report(void *context, const uint8_t *data, uint32_t length) {
     struct keyboard *k = context;
-    const uint8_t *keys = data + 2;
+    uint8_t keys[MAX_HELD];
+    int count = 0;
 
-    if (length < 2 + KEYS || keys[0] == ROLLOVER)
+    if (length > BOOT_REPORT && data[0] == KEYBOARD_REPORT_ID)
+        data++, length--;
+    else if (length != BOOT_REPORT)
         return;
+    if (data[2] == ROLLOVER)
+        return;
+    for (int i = 2; i < BOOT_REPORT; i++)
+        hold(keys, &count, data[i]);
+    for (uint32_t i = 0; i < (length - BOOT_REPORT) * 8 && i < MODIFIER_USAGE; i++) {
+        if (data[BOOT_REPORT + i / 8] & 1 << i % 8)
+            hold(keys, &count, i);
+    }
+
     for (int i = 0; i < 8; i++) {
         if ((k->modifiers ^ data[0]) & 1 << i)
             keyboard_key(modifier_keys[i], data[0] & 1 << i);
     }
-    for (int i = 0; i < KEYS; i++) {
-        if (k->keys[i] && !holds(keys, k->keys[i]))
+    for (int i = 0; i < k->count; i++) {
+        if (!holds(keys, count, k->keys[i]))
             send_key(k->keys[i], data[0], false);
     }
-    for (int i = 0; i < KEYS; i++) {
-        if (keys[i] && !holds(k->keys, keys[i]))
+    for (int i = 0; i < count; i++) {
+        if (!holds(k->keys, k->count, keys[i]))
             send_key(keys[i], data[0], true);
     }
     k->modifiers = data[0];
-    memcpy(k->keys, keys, KEYS);
+    k->count = count;
+    memcpy(k->keys, keys, count);
 }
 
 static void mouse_report(void *context, const uint8_t *data, uint32_t length) {
