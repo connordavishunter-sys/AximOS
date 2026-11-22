@@ -20,7 +20,9 @@
 #define COMMAND_READ 0x80
 #define COMMAND_WRITE 0x81
 #define COMMAND_QUERY 0x84
+#define STATUS_EVENT 0x20       // it has news for a query
 #define WAIT_NS (50 * 1000000ULL) // far longer than any EC takes
+#define GUARD_NS 550000ULL        // before its status shows a byte was sent, as Linux waits
 #define HID_EC "PNP0C09"
 
 static uint16_t data_port, command_port;
@@ -38,10 +40,14 @@ static bool wait_status(uint8_t mask, uint8_t want) {
     return false;
 }
 
+// The status port can take a while to show the EC has a byte, and polling it too
+// soon reads the old status, so the next byte goes out before the EC is ready.
 static bool send(uint16_t port, uint8_t byte) {
     if (!wait_status(STATUS_INPUT_FULL, 0))
         return false;
     outb(port, byte);
+    for (uint64_t until = clock_monotonic_ns() + GUARD_NS; clock_monotonic_ns() < until;)
+        ;
     return true;
 }
 
@@ -96,7 +102,7 @@ static void run_queries(uacpi_handle unused) {
 
     (void)unused;
     query_pending = false;
-    while (transaction(COMMAND_QUERY, 0, &query) && query) {
+    while (inb(command_port) & STATUS_EVENT && transaction(COMMAND_QUERY, 0, &query) && query) {
         char method[] = {'_', 'Q', hex[query >> 4], hex[query & 0xF], 0};
 
         uacpi_eval_simple(ec, method, NULL);
