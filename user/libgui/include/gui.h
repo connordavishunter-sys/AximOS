@@ -51,7 +51,8 @@ enum gui_message_type {
     GUI_CLOSE,        // the close button was clicked, or Super+Q pressed
     GUI_RESIZE,       // width and height wm would like the window to be
     GUI_CLIPBOARD,    // width and buffer, what's on the clipboard
-    GUI_SCREEN,       // width and height of the screen, with x 1 if its resolution can change.
+    GUI_SCREEN,       // width and height of the screen, with x 1 if its resolution can change,
+                      // and y its scale: the screen's pixels are y times as wide and high.
                       // After GUI_CREATED, and whenever it changes.
     GUI_DROP,         // x, y, and a file's path dropped on the window, as GUI_DRAG gives it
 
@@ -245,7 +246,11 @@ struct gui_settings {
     bool blur;          // and blur it
     int corners;        // windows' corner radius, 0 for square, up to GUI_MAX_RADIUS, with
                         // smaller ones, like buttons', rounded in proportion
+    int scale;          // 1 or 2 screen pixels to each of the desktop's, or 0 for 2 on screens
+                        // GUI_SCALE_WIDTH wide or more, and 1 on smaller ones
 };
+
+#define GUI_SCALE_WIDTH 2560
 
 // The accent colours there are, as Settings names them, and what goes on each.
 #define GUI_ACCENTS 8
@@ -308,8 +313,9 @@ void gui_settings_changed(void);
 
 // The screen, as of the last GUI_SCREEN.
 struct gui_screen {
-    int width, height;
-    bool can_resize; // whether its resolution can change
+    int width, height; // in the desktop's pixels, scale screen pixels each way
+    bool can_resize;   // whether its resolution can change
+    int scale;
 };
 
 const struct gui_screen *gui_screen(void);

@@ -191,9 +191,11 @@ struct window {
 enum part { PART_NONE, PART_CONTENT, PART_TITLE, PART_CLOSE, PART_MAXIMIZE, PART_MINIMIZE, PART_RESIZE };
 enum { EDGE_LEFT = 1, EDGE_RIGHT = 2, EDGE_TOP = 4, EDGE_BOTTOM = 8 };
 
-static struct gui_canvas screen; // composed here, then copied to the framebuffer
+// Composed here, in the desktop's pixels, then copied to the framebuffer, each
+// pixel scale times as wide and high there.
+static struct gui_canvas screen;
 static uint8_t *framebuffer;
-static int pitch, fb, keyboard;
+static int pitch, fb, keyboard, fb_width, fb_height, scale = 1;
 static bool can_set_mode;
 
 static struct client *clients[MAX_CLIENTS];
@@ -3129,13 +3131,24 @@ static void make_night(void) {
     }
 }
 
-static void show_row(uint32_t *to, const uint32_t *from, int width) {
-    if (!settings.night_light) {
-        memcpy(to, from, width * sizeof(uint32_t));
+// A row of the screen on the framebuffer, scale rows high and each pixel scale wide.
+static void show_row(uint8_t *to, const uint32_t *from, int width) {
+    uint32_t *row = (uint32_t *)to;
+
+    if (!settings.night_light && scale == 1) {
+        memcpy(row, from, width * sizeof(uint32_t));
         return;
     }
-    for (int x = 0; x < width; x++)
-        to[x] = (from[x] & 0xFF0000) | night_green[from[x] >> 8 & 0xFF] << 8 | night_blue[from[x] & 0xFF];
+    for (int x = 0; x < width; x++) {
+        uint32_t p = settings.night_light
+                       ? (from[x] & 0xFF0000) | night_green[from[x] >> 8 & 0xFF] << 8 | night_blue[from[x] & 0xFF]
+                       : from[x];
+
+        for (int i = 0; i < scale; i++)
+            row[x * scale + i] = p;
+    }
+    for (int i = 1; i < scale; i++)
+        memcpy(to + (long)i * pitch, row, width * scale * sizeof(uint32_t));
 }
 
 // Draws a rectangle of the screen. As what's see-through blurs what's under it,
@@ -3181,7 +3194,7 @@ static void redraw(void) {
                     mixed[x] = gui_mix(was[x], now[x], shown);
                 now = mixed;
             }
-            show_row((uint32_t *)(framebuffer + (long)row * pitch) + r.x, now, r.width);
+            show_row(framebuffer + (long)row * scale * pitch + r.x * scale * sizeof(uint32_t), now, r.width);
         }
     }
     damage_count = 0;
@@ -3459,7 +3472,8 @@ static void create_window(struct client *client, const struct gui_message *m) {
         add_damage(switcher());
     queue_message(client, &reply);
     queue_message(client, &(struct gui_message){
-                              .type = GUI_SCREEN, .width = screen.width, .height = screen.height, .x = can_set_mode});
+                              .type = GUI_SCREEN, .width = screen.width, .height = screen.height, .x = can_set_mode,
+                              .y = scale});
     add_damage(extent_of(w));
     if (visible(w)) // so nothing can take what's typed on the log-in screen
         set_focus(w);
@@ -4784,10 +4798,11 @@ static void handle_mouse(const struct mouse_event *e) {
     enum part part;
     int edges;
     uint32_t pressed = e->buttons & ~buttons, released = buttons & ~e->buttons;
-    // To the nearest pixel, as the host gives the last one as a little under its share of the range.
+    // To the nearest screen pixel, as the host gives the last one as a little under its share of
+    // the range, then the desktop's pixel that's in. Moved, it goes as far in the desktop's pixels.
     int64_t range = MOUSE_ABSOLUTE_MAX + 1;
-    int x = e->absolute ? (int)(((int64_t)e->x * screen.width + range / 2) / range) : cursor_x + faster(e->dx, 0);
-    int y = e->absolute ? (int)(((int64_t)e->y * screen.height + range / 2) / range) : cursor_y + faster(e->dy, 1);
+    int x = e->absolute ? (int)(((int64_t)e->x * fb_width + range / 2) / range) / scale : cursor_x + faster(e->dx, 0);
+    int y = e->absolute ? (int)(((int64_t)e->y * fb_height + range / 2) / range) / scale : cursor_y + faster(e->dy, 1);
 
     x = x < 0 ? 0 : x >= screen.width ? screen.width - 1 : x;
     y = y < 0 ? 0 : y >= screen.height ? screen.height - 1 : y;
@@ -5189,36 +5204,61 @@ static void fit_windows(struct rect was) {
     }
 }
 
+// The scale the settings ask for, or the one the screen's size suits.
+static int wanted_scale(void) {
+    return settings.scale ? settings.scale : fb_width >= GUI_SCALE_WIDTH ? 2 : 1;
+}
+
+// Makes the screen the framebuffer's size over the scale, if it isn't, keeping the
+// windows and the mouse on it, and tells every program.
+static void fit_screen(void) {
+    int to = wanted_scale(), width = fb_width / to, height = fb_height / to;
+    struct rect was = desktop();
+    uint32_t *pixels;
+
+    if (screen.pixels && to == scale && width == screen.width && height == screen.height)
+        return;
+    if (!(pixels = malloc((size_t)width * height * sizeof(uint32_t)))) {
+        quitting = true; // the old screen could run off the framebuffer
+        return;
+    }
+    cursor_x = screen.pixels ? (int)((long)cursor_x * width / screen.width) : width / 2;
+    cursor_y = screen.pixels ? (int)((long)cursor_y * height / screen.height) : height / 2;
+    free(screen.pixels);
+    screen = (struct gui_canvas){pixels, width, height, width};
+    scale = to;
+    damage_count = 0; // clipped to the old size, so they could run off this one
+    add_damage((struct rect){0, 0, width, height});
+    if (was.width > 0) {
+        fit_windows(was);
+        load_desktop(true);
+    }
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        if (clients[i])
+            queue_message(clients[i], &(struct gui_message){.type = GUI_SCREEN, .width = width, .height = height,
+                                                            .x = can_set_mode, .y = scale});
+    }
+    printf("wm: running at %dx%d%s%s\n", fb_width, fb_height, scale > 1 ? " at 2x" : "",
+           can_set_mode ? "" : ", which can't change");
+}
+
 // Changes the screen's resolution.
 static void change_resolution(int width, int height) {
     struct fb_info info;
-    struct rect was = desktop();
-    uint32_t *pixels = malloc((size_t)width * height * sizeof(uint32_t));
 
-    if (!pixels || fb_set_mode(fb, width, height) < 0 || fb_info(fb, &info) < 0) {
-        free(pixels);
+    if (fb_set_mode(fb, width, height) < 0 || fb_info(fb, &info) < 0) {
         printf("wm: can't change to %dx%d\n", width, height);
         return;
     }
-    munmap(framebuffer, (size_t)pitch * screen.height);
+    munmap(framebuffer, (size_t)pitch * fb_height);
     pitch = info.pitch;
+    fb_width = info.width;
+    fb_height = info.height;
     framebuffer = mmap(NULL, (size_t)pitch * info.height, PROT_READ | PROT_WRITE, MAP_SHARED, fb, 0);
-    free(screen.pixels);
-    screen = (struct gui_canvas){pixels, info.width, info.height, info.width};
-    damage_count = 0; // clipped to the old size, so they could run off this one
-    if (framebuffer == MAP_FAILED) {
+    if (framebuffer == MAP_FAILED)
         quitting = true;
-        return;
-    }
-    fit_windows(was);
-    cursor_x = cursor_x < screen.width ? cursor_x : screen.width - 1;
-    cursor_y = cursor_y < screen.height ? cursor_y : screen.height - 1;
-    for (int i = 0; i < MAX_CLIENTS; i++) {
-        if (clients[i])
-            queue_message(clients[i], &(struct gui_message){
-                                          .type = GUI_SCREEN, .width = screen.width, .height = screen.height, .x = 1});
-    }
-    printf("wm: running at %dx%d\n", screen.width, screen.height);
+    else
+        fit_screen();
 }
 
 // Settings change the colours, shadows, clock, resolution and wallpaper, so
@@ -5254,8 +5294,9 @@ static void load_settings(void) {
         muted = now_muted;
         damage_tray();
     }
-    if (can_set_mode && settings.width && (settings.width != screen.width || settings.height != screen.height))
+    if (can_set_mode && settings.width && (settings.width != fb_width || settings.height != fb_height))
         change_resolution(settings.width, settings.height);
+    fit_screen();
     load_wallpaper();
     add_damage((struct rect){0, 0, screen.width, screen.height});
 }
@@ -5305,14 +5346,11 @@ int main(int argc, char **argv) {
 
     pitch = info.pitch;
     can_set_mode = info.can_set_mode;
+    fb_width = info.width;
+    fb_height = info.height;
     framebuffer = mmap(NULL, (size_t)pitch * info.height, PROT_READ | PROT_WRITE, MAP_SHARED, fb, 0);
-    screen = (struct gui_canvas){malloc((size_t)info.width * info.height * sizeof(uint32_t)), info.width,
-                                 info.height, info.width};
-    if (framebuffer == MAP_FAILED || !screen.pixels)
+    if (framebuffer == MAP_FAILED)
         return fail("screen");
-
-    cursor_x = screen.width / 2;
-    cursor_y = screen.height / 2;
 
     // Programs start in the home folder, which has the desktop's.
     const char *home = getenv("HOME");
@@ -5321,7 +5359,9 @@ int main(int argc, char **argv) {
     if (home && chdir(home) < 0)
         printf("wm: can't go to %s\n", home);
     mkdir(desktop_dir, 0755);
-    add_damage((struct rect){0, 0, screen.width, screen.height});
+    fit_screen();
+    if (!screen.pixels)
+        return fail("screen");
     make_falloff();
     load_settings();
     load_volume();
@@ -5330,7 +5370,6 @@ int main(int argc, char **argv) {
         lock();
     else
         unlock();
-    printf("wm: running at %dx%d%s\n", screen.width, screen.height, can_set_mode ? "" : ", which can't change");
     fflush(stdout);
 
     char clock[16], shown_clock[16];

@@ -62,6 +62,10 @@ with the dash shell.
   same account.
 - Light and dark themes, eight accent colours, wallpapers, resolution, time zones and
   12 or 24 hour time, all set in Settings
+- Display scaling at 1x or 2x, chosen under Settings > Display and applied at once. At
+  2x everything on the desktop is twice the size, each pixel drawn as four, while apps
+  keep working in the desktop's own pixels. It's 2x by default on screens 2560 wide or
+  more, and 1x on smaller ones, unless `/system/etc/gui.conf` says `scale 1` or `scale 2`
 - **libgui**, an immediate-mode toolkit for apps: buttons, text boxes with undo,
   lists, tabs, menus, dialogs, a file picker, a code editor with syntax colouring,
   PNG/JPEG/BMP images and TrueType text

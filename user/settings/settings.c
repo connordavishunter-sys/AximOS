@@ -32,13 +32,13 @@ static const char *apps[MAX_APPS];
 static int app_count;
 static char try_typing[128];
 static const char *const themes[] = {"Dark", "Light"}, *const clocks[] = {"24 hour", "12 hour"};
-static const char *const positions[] = {"Bottom", "Top"};
+static const char *const positions[] = {"Bottom", "Top"}, *const scales[] = {"1x", "2x"};
 
 // What the screen can be, as far as QEMU's graphics card goes. Their widths are
 // multiples of 8, which it needs.
 static const int sizes[][2] = {
     {800, 600},   {1024, 768},  {1152, 864},  {1280, 720},  {1280, 800}, {1280, 1024},
-    {1440, 900},  {1600, 900},  {1680, 1050}, {1920, 1080}, {1920, 1200}, {2560, 1440},
+    {1440, 900},  {1600, 900},  {1680, 1050}, {1920, 1080}, {1920, 1200}, {2560, 1440}, {2560, 1600},
 };
 
 static struct gui_settings settings;
@@ -149,19 +149,20 @@ static void load_wallpapers(void) {
 // The sizes the screen can be, with the one it is now, if that's not among them.
 static void list_resolutions(void) {
     const struct gui_screen *s = gui_screen();
+    int width = s->width * s->scale, height = s->height * s->scale;
     bool listed = false;
 
     resolution_count = 0;
     for (size_t i = 0; i < sizeof(sizes) / sizeof(*sizes); i++) {
-        if (!listed && (sizes[i][0] > s->width || (sizes[i][0] == s->width && sizes[i][1] >= s->height))) {
+        if (!listed && (sizes[i][0] > width || (sizes[i][0] == width && sizes[i][1] >= height))) {
             listed = true;
-            if (sizes[i][0] != s->width || sizes[i][1] != s->height)
-                snprintf(resolution_names[resolution_count++], 16, "%dx%d", s->width, s->height);
+            if (sizes[i][0] != width || sizes[i][1] != height)
+                snprintf(resolution_names[resolution_count++], 16, "%dx%d", width, height);
         }
         snprintf(resolution_names[resolution_count++], 16, "%dx%d", sizes[i][0], sizes[i][1]);
     }
     if (!listed)
-        snprintf(resolution_names[resolution_count++], 16, "%dx%d", s->width, s->height);
+        snprintf(resolution_names[resolution_count++], 16, "%dx%d", width, height);
     for (int i = 0; i < resolution_count; i++)
         resolutions[i] = resolution_names[i];
 }
@@ -189,9 +190,10 @@ static void go_back(void) {
 // What wm made of a resolution asked for.
 static void screen_changed(void) {
     const struct gui_screen *s = gui_screen();
+    int width = s->width * s->scale, height = s->height * s->scale;
 
-    printf("settings: screen %dx%d%s\n", s->width, s->height, s->can_resize ? "" : " fixed");
-    if (wanted_width && (s->width != wanted_width || s->height != wanted_height))
+    printf("settings: screen %dx%d%s%s\n", width, height, s->scale > 1 ? " at 2x" : "", s->can_resize ? "" : " fixed");
+    if (wanted_width && (width != wanted_width || height != wanted_height))
         snprintf(status, sizeof(status), "The screen couldn't be %dx%d", wanted_width, wanted_height);
     else if (wanted_width) {
         keep_left = KEEP_SECONDS;
@@ -323,17 +325,29 @@ static void taskbar(struct gui_ui *ui) {
     report(ui, 29, "icons");
 }
 
+// How big everything on the screen is: 2x draws each pixel as four.
+static void scale(struct gui_ui *ui) {
+    int at = gui_screen()->scale - 1;
+
+    if (gui_dropdown(ui, "Scale", scales, 2, &at)) {
+        settings.scale = at + 1;
+        save(at ? "scale 2x" : "scale 1x");
+    }
+    report(ui, 36, "scale");
+}
+
 static void display(struct gui_ui *ui) {
     const struct gui_screen *s = gui_screen();
     char now[16];
     int at = 0;
 
+    snprintf(now, sizeof(now), "%dx%d", s->width * s->scale, s->height * s->scale);
     if (!s->can_resize) {
-        gui_label(ui, "The screen is %dx%d, and its resolution can't be changed.", s->width, s->height);
+        gui_label(ui, "The screen is %s, and its resolution can't be changed.", now);
+        scale(ui);
         night_light(ui);
         return;
     }
-    snprintf(now, sizeof(now), "%dx%d", s->width, s->height);
     for (int i = 0; i < resolution_count; i++)
         at = strcmp(resolutions[i], now) ? at : i;
 
@@ -344,8 +358,8 @@ static void display(struct gui_ui *ui) {
         picked = shown_at;
     report(ui, 2, "resolution");
     if (gui_button(ui, "Apply") && picked >= 0 && picked != at && !keep_left) {
-        old_width = s->width;
-        old_height = s->height;
+        old_width = s->width * s->scale;
+        old_height = s->height * s->scale;
         sscanf(resolutions[picked], "%dx%d", &wanted_width, &wanted_height);
         status[0] = '\0';
         set_resolution(wanted_width, wanted_height);
@@ -354,6 +368,7 @@ static void display(struct gui_ui *ui) {
     gui_same_line(ui);
     gui_label(ui, "The screen is %s.", now);
     gui_label(ui, "%s", status);
+    scale(ui);
     night_light(ui);
 }
 

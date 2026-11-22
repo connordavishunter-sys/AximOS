@@ -406,7 +406,7 @@ void gui_post(const struct gui_message *event) {
         queue[(queue_head + queue_count++) % QUEUE_SIZE] = *event;
 }
 
-static struct gui_screen screen;
+static struct gui_screen screen = {.scale = 1};
 
 const struct gui_screen *gui_screen(void) {
     return &screen;
@@ -506,7 +506,7 @@ bool gui_next_event(struct gui_message *event) {
         return false;
     }
     if (event->type == GUI_SCREEN)
-        screen = (struct gui_screen){event->width, event->height, event->x == 1};
+        screen = (struct gui_screen){event->width, event->height, event->x == 1, event->y > 1 ? event->y : 1};
     return true;
 }
 

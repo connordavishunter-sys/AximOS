@@ -31,6 +31,7 @@
 //     transparency on
 //     blur on
 //     corners 8
+//     scale 2
 //
 // Anything missing or not understood is left as it is by default.
 
@@ -103,6 +104,8 @@ void gui_settings_load(struct gui_settings *s) {
             s->transparency = strcmp(value, "off") != 0;
         else if (sscanf(line, "blur %31s", value) == 1)
             s->blur = strcmp(value, "off") != 0;
+        else if (sscanf(line, "scale %d", &width) == 1 && width >= 1 && width <= 2)
+            s->scale = width;
         else if (sscanf(line, "corners %d", &s->corners) == 1)
             s->corners = s->corners < 0 ? 0 : s->corners > GUI_MAX_RADIUS ? GUI_MAX_RADIUS : s->corners;
         else if (sscanf(line, "app %15s %31s", kind, value) == 2) {
@@ -136,6 +139,8 @@ bool gui_settings_save(const struct gui_settings *s) {
     fprintf(f, "animations %s\nquiet %s\nsounds %s\ntransparency %s\nblur %s\ncorners %d\n",
             s->animations ? "on" : "off", s->quiet ? "on" : "off", s->sounds ? "on" : "off",
             s->transparency ? "on" : "off", s->blur ? "on" : "off", s->corners);
+    if (s->scale)
+        fprintf(f, "scale %d\n", s->scale);
     return fclose(f) == 0;
 }
 
