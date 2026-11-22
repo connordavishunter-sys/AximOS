@@ -212,6 +212,10 @@ static void finish_packet(void) {
     });
 }
 
+void mouse_add_motion(int dx, int dy, int wheel, uint32_t buttons) {
+    add_event((struct mouse_event){.dx = dx, .dy = dy, .wheel = wheel, .buttons = buttons});
+}
+
 void mouse_handle_byte(uint8_t byte) {
     // Every packet's first byte has this bit set, which is how to find the start
     // of one again after losing a byte.

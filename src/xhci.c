@@ -10,13 +10,17 @@
 
 // USB 3 controllers, set up once at boot for the devices on their root ports. Each
 // ring is one page, and one transfer or command runs at a time, which the VFS lock
-// already makes so, waiting for the event that says it finished.
+// already makes so, waiting for the event that says it finished. Interrupt endpoints,
+// such as a keyboard's, are the exception: each always has a transfer waiting, and
+// its events are handed straight to its driver.
 
 #define PCI_CLASS_XHCI 0x0C0330
 #define BAR_64_BIT 0x4
 #define MMIO_SIZE 0x10000 // more than its registers need, and the rest is never touched
 #define MAX_CONTROLLERS 4
 #define MAX_SLOTS 32
+#define MAX_PIPES 16 // interrupt endpoints on each controller
+#define SAVED_EVENTS 8 // what the interrupt handler finds for whoever's waiting
 #define TIMEOUT_NS (5 * NS_PER_SECOND)
 
 #define CAP_HCSPARAMS1 0x04
@@ -47,6 +51,8 @@
 #define PORT_SPEED(sc) ((sc) >> 10 & 0xF)
 #define PORT_CHANGES 0xFE0000
 #define PORT_RESET_CHANGE 0x200000
+#define SPEED_FULL 1
+#define SPEED_LOW 2
 #define SPEED_HIGH 3
 #define SPEED_SUPER 4
 
@@ -100,6 +106,7 @@ enum {
 #define EP_BULK_OUT 2
 #define EP_CONTROL 4
 #define EP_BULK_IN 6
+#define EP_INTERRUPT_IN 7
 
 #define GET_DESCRIPTOR 6
 #define CLEAR_FEATURE 1
@@ -120,6 +127,17 @@ struct ring {
     uint32_t cycle;
 };
 
+// An interrupt endpoint, whose reports go to handler as they come.
+struct pipe {
+    struct usb_device *device;
+    uint8_t id;
+    struct ring ring;
+    uint8_t *buffer;
+    uint16_t packet;
+    usb_report_handler handler;
+    void *context;
+};
+
 struct xhci {
     volatile uint8_t *cap, *op, *rt;
     volatile uint32_t *doorbells;
@@ -132,6 +150,10 @@ struct xhci {
     uint32_t event_index, event_cycle;
     bool have_interrupts;
     volatile bool interrupted;
+    struct pipe pipes[MAX_PIPES];
+    int pipe_count;
+    struct trb saved[SAVED_EVENTS];
+    int saved_count;
 };
 
 struct usb_device {
@@ -142,6 +164,7 @@ struct usb_device {
     uint8_t *buffer; // where control data goes through
     struct ring control, in, out;
     uint8_t in_id, out_id, in_address, out_address;
+    uint8_t last_id; // the highest endpoint the slot has
 };
 
 static struct xhci *controllers[MAX_CONTROLLERS];
@@ -216,32 +239,85 @@ static uint8_t code_of(const struct trb *event) {
     return event->status >> 24;
 }
 
+static uint8_t type_of(const struct trb *event) {
+    return event->control >> 10 & 0x3F;
+}
+
+static bool next_event(struct xhci *hc, struct trb *event) {
+    volatile struct trb *e = &hc->events[hc->event_index];
+
+    if ((e->control & TRB_CYCLE) != hc->event_cycle)
+        return false;
+    *event = (struct trb){e->param, e->status, e->control};
+    if (++hc->event_index == RING_TRBS) {
+        hc->event_index = 0;
+        hc->event_cycle ^= 1;
+    }
+    w64(hc->rt, INTERRUPTER + ERDP, (hc->events_phys + hc->event_index * sizeof(struct trb)) | ERDP_BUSY);
+    return true;
+}
+
+static void queue_report(struct xhci *hc, struct pipe *p) {
+    push(&p->ring, mm_virt_to_phys(p->buffer), p->packet, TRB_TYPE(NORMAL) | TRB_SHORT_OK | TRB_IOC);
+    hc->doorbells[p->device->slot] = p->id;
+}
+
+// Hands a report to its driver and waits for the next, returning false if the event
+// isn't about an interrupt endpoint. One that fails is left stopped.
+static bool deliver_report(struct xhci *hc, const struct trb *event) {
+    if (type_of(event) != TRANSFER_EVENT)
+        return false;
+    for (struct pipe *p = hc->pipes; p < hc->pipes + hc->pipe_count; p++) {
+        if (p->device->slot != event->control >> 24 || p->id != (event->control >> 16 & 0x1F))
+            continue;
+        if (code_of(event) == CODE_SUCCESS || code_of(event) == CODE_SHORT) {
+            p->handler(p->context, p->buffer, p->packet - (event->status & 0xFFFFFF));
+            queue_report(hc, p);
+        } else {
+            kprintf("xhci: port %u stopped reporting, code %u\n", p->device->port, code_of(event));
+        }
+        return true;
+    }
+    return false;
+}
+
 // Waits for the event about the TRB at trb, or a transfer that went wrong, which can
 // only be the one running. Events about anything else, such as ports, are dropped.
 static bool wait_for(struct xhci *hc, uint64_t trb, struct trb *event) {
     bool sleeping = hc->have_interrupts && process_can_sleep();
 
     for (uint64_t until = clock_monotonic_ns() + TIMEOUT_NS; clock_monotonic_ns() < until;) {
-        volatile struct trb *e = &hc->events[hc->event_index];
-
-        if ((e->control & TRB_CYCLE) != hc->event_cycle) {
+        if (hc->saved_count) {
+            *event = hc->saved[0];
+            memmove(hc->saved, hc->saved + 1, --hc->saved_count * sizeof(*event));
+        } else if (!next_event(hc, event)) {
             if (sleeping && !hc->interrupted)
                 process_sleep_uninterruptible(hc, TIMER_HZ);
             hc->interrupted = false;
             continue;
+        } else if (deliver_report(hc, event)) {
+            continue;
         }
-        *event = (struct trb){e->param, e->status, e->control};
-        if (++hc->event_index == RING_TRBS) {
-            hc->event_index = 0;
-            hc->event_cycle ^= 1;
-        }
-        w64(hc->rt, INTERRUPTER + ERDP, (hc->events_phys + hc->event_index * sizeof(struct trb)) | ERDP_BUSY);
-        if (event->param == trb
-            || ((event->control >> 10 & 0x3F) == TRANSFER_EVENT && code_of(event) != CODE_SUCCESS))
+        if (event->param == trb || (type_of(event) == TRANSFER_EVENT && code_of(event) != CODE_SUCCESS))
             return true;
     }
     kprintf("xhci: timed out\n");
     return false;
+}
+
+// Reports go to their drivers, and anything else is kept for wait_for.
+static void drain(struct xhci *hc) {
+    struct trb event;
+
+    while (next_event(hc, &event)) {
+        if (deliver_report(hc, &event))
+            continue;
+        if (hc->saved_count == SAVED_EVENTS)
+            memmove(hc->saved, hc->saved + 1, --hc->saved_count * sizeof(event));
+        hc->saved[hc->saved_count++] = event;
+    }
+    hc->interrupted = true;
+    process_wakeup(hc);
 }
 
 void xhci_handle_irq(void) {
@@ -251,9 +327,15 @@ void xhci_handle_irq(void) {
         if (r32(hc->op, OP_USBSTS) & USBSTS_EVENT) {
             w32(hc->op, OP_USBSTS, USBSTS_EVENT);
             w32(hc->rt, INTERRUPTER + IMAN, IMAN_PENDING | IMAN_ENABLE);
-            hc->interrupted = true;
-            process_wakeup(hc);
+            drain(hc);
         }
+    }
+}
+
+void xhci_tick(void) {
+    for (int i = 0; i < controller_count; i++) {
+        if (!controllers[i]->have_interrupts && controllers[i]->pipe_count)
+            drain(controllers[i]);
     }
 }
 
@@ -332,10 +414,51 @@ bool usb_open_bulk(struct usb_device *d, uint8_t in, uint16_t in_packet, uint8_t
         return false;
     context(d, 0)[0] = 0;
     context(d, 0)[1] = 1 | 1u << d->in_id | 1u << d->out_id;
-    slot[0] = (slot[0] & 0x07FFFFFF) | (uint32_t)(d->in_id > d->out_id ? d->in_id : d->out_id) << 27;
+    d->last_id = d->in_id > d->out_id ? d->in_id : d->out_id;
+    slot[0] = (slot[0] & 0x07FFFFFF) | (uint32_t)d->last_id << 27;
     set_endpoint(d, d->in_id, EP_BULK_IN, in_packet, &d->in);
     set_endpoint(d, d->out_id, EP_BULK_OUT, out_packet, &d->out);
     return command(d->hc, d->input_phys, TRB_TYPE(CONFIGURE_ENDPOINT) | TRB_SLOT(d->slot), NULL);
+}
+
+// How often to ask, as the exponent of 125 µs: bInterval is in frames at full and
+// low speeds, and is already an exponent, plus one, faster than that.
+static uint8_t interval_exponent(const struct usb_device *d, uint8_t interval) {
+    uint8_t e = 3;
+
+    if (d->speed != SPEED_FULL && d->speed != SPEED_LOW)
+        return interval ? interval - 1 : 0;
+    while (e < 10 && (2u << e) <= interval * 8u)
+        e++;
+    return e;
+}
+
+bool usb_open_interrupt(struct usb_device *d, uint8_t address, uint16_t packet, uint8_t interval,
+                        usb_report_handler handler, void *handler_context) {
+    struct xhci *hc = d->hc;
+    struct pipe *p = &hc->pipes[hc->pipe_count];
+    uint8_t id = (address & 0xF) * 2 + 1;
+
+    if (hc->pipe_count == MAX_PIPES || !ring_init(&p->ring) || !(p->buffer = alloc_page(NULL)))
+        return false;
+    p->device = d;
+    p->id = id;
+    p->packet = packet < PAGE_SIZE ? packet : PAGE_SIZE;
+    p->handler = handler;
+    p->context = handler_context;
+    if (id > d->last_id)
+        d->last_id = id;
+    context(d, 0)[0] = 0;
+    context(d, 0)[1] = 1 | 1u << id;
+    context(d, 1)[0] = (context(d, 1)[0] & 0x07FFFFFF) | (uint32_t)d->last_id << 27;
+    set_endpoint(d, id, EP_INTERRUPT_IN, packet, &p->ring);
+    context(d, 1 + id)[0] = (uint32_t)interval_exponent(d, interval) << 16;
+    context(d, 1 + id)[4] = 8 | (uint32_t)packet << 16; // a small average, and the most each interval
+    if (!command(hc, d->input_phys, TRB_TYPE(CONFIGURE_ENDPOINT) | TRB_SLOT(d->slot), NULL))
+        return false;
+    hc->pipe_count++;
+    queue_report(hc, p);
+    return true;
 }
 
 bool usb_bulk(struct usb_device *d, bool in, uint8_t *const *pages, uint32_t bytes) {
@@ -392,6 +515,7 @@ static void probe_port(struct xhci *hc, int port) {
     }
     d->hc = hc;
     d->port = port + 1;
+    d->last_id = 1;
     d->speed = PORT_SPEED(sc);
     if (!command(hc, 0, TRB_TYPE(ENABLE_SLOT), &d->slot) || d->slot > MAX_SLOTS) {
         kprintf("xhci: no slot for port %u\n", d->port);
@@ -433,8 +557,8 @@ static void probe_port(struct xhci *hc, int port) {
     kprintf("xhci: port %u has device %x:%x\n", d->port, descriptor[8] | descriptor[9] << 8,
             descriptor[10] | descriptor[11] << 8);
     if (config && usb_control(d, 0x80, GET_DESCRIPTOR, CONFIG_DESCRIPTOR, 0, config, length)
-        && !usb_storage_probe(d, config, length))
-        kprintf("xhci: device on port %u isn't storage, so it's left alone\n", d->port);
+        && !usb_storage_probe(d, config, length) && !usb_hid_probe(d, config, length))
+        kprintf("xhci: nothing here drives the device on port %u, so it's left alone\n", d->port);
     kfree(config);
 }
 

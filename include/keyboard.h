@@ -27,6 +27,9 @@ void keyboard_set_repeat(int delay_ms, int per_second);
 // Takes a byte the controller says came from the keyboard.
 void keyboard_handle_byte(uint8_t byte);
 
+// A key pressed or released, by its KEY_ code, from any keyboard.
+void keyboard_key(uint16_t code, bool pressed);
+
 // Copies out whatever is waiting, without blocking. Returns the bytes copied.
 size_t keyboard_read(char *buf, size_t len);
 

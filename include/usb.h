@@ -13,6 +13,9 @@ void xhci_init(void);
 
 void xhci_handle_irq(void);
 
+// Called on every tick, for a controller without interrupts.
+void xhci_tick(void);
+
 // Waits without sleeping, for setting up at boot.
 void usb_delay_ms(uint64_t ms);
 
@@ -28,6 +31,17 @@ bool usb_open_bulk(struct usb_device *device, uint8_t in, uint16_t in_packet, ui
 // A stalled endpoint is cleared again, but the transfer still fails.
 bool usb_bulk(struct usb_device *device, bool in, uint8_t *const *pages, uint32_t bytes);
 
+// Called with each report from an interrupt endpoint, in the interrupt handler.
+typedef void (*usb_report_handler)(void *context, const uint8_t *data, uint32_t length);
+
+// Opens an interrupt IN endpoint, by address, largest packet and bInterval, and
+// keeps asking it for reports.
+bool usb_open_interrupt(struct usb_device *device, uint8_t address, uint16_t packet, uint8_t interval,
+                        usb_report_handler handler, void *context);
+
 // Looks at a device's configuration descriptor and, if it's storage it can drive,
 // takes it on. Returns false to leave the device alone.
 bool usb_storage_probe(struct usb_device *device, const uint8_t *config, uint16_t length);
+
+// The same for keyboards and mice, through their simple boot protocol.
+bool usb_hid_probe(struct usb_device *device, const uint8_t *config, uint16_t length);

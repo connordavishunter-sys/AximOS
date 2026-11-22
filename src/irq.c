@@ -314,6 +314,7 @@ void irq_handle(const struct interrupt_frame *frame) {
         net_tick();
         audio_tick();
         keyboard_tick();
+        xhci_tick();
     }
 
     if (vector == VECTOR_TIMER && !this_cpu()->running)

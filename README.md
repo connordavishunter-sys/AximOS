@@ -20,8 +20,10 @@ with the dash shell.
 - Drives as they are in `/dev/disk`, for partitioning and formatting: opening one to
   write takes its filesystems away, and closing it mounts what's there
 - Drives over AHCI (SATA) and legacy IDE, and USB sticks and drives over xHCI (USB 3
-  controllers). USB devices are found at boot only, on the computer's own ports, not
-  through hubs
+  controllers)
+- USB keyboards and mice, through their boot protocol, which is how many laptops' own
+  keyboards are connected. USB devices are found at boot only, on the computer's own
+  ports, not through hubs
 - Networking on an Intel e1000: ARP, IPv4, ICMP, UDP, TCP, DHCP and DNS, through BSD sockets
 - Intel HDA sound, with a mixer for several programs at once
 - Pseudo-terminals, a framebuffer console, PS/2 keyboard and mouse, and the VMware/QEMU

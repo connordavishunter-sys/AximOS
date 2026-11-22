@@ -30,6 +30,7 @@
 #define CONFIG_TRANSLATE 0x40
 #define KEYBOARD_ENABLE_SCANNING 0xF4
 #define TIMEOUT 100000
+#define MAX_PENDING 32 // bytes read at once, as a missing controller reads as always full
 
 #define SC_RELEASED 0x80
 #define SC_EXTENDED 0xE0
@@ -86,7 +87,7 @@ static void wait_output_full(void) {
 }
 
 static void flush_output(void) {
-    while (inb(PS2_STATUS) & STATUS_OUTPUT_FULL)
+    for (int i = 0; i < MAX_PENDING && (inb(PS2_STATUS) & STATUS_OUTPUT_FULL); i++)
         inb(PS2_DATA);
 }
 
@@ -288,13 +289,14 @@ void keyboard_handle_byte(uint8_t byte) {
     }
 
     uint16_t code = (byte & ~SC_RELEASED) | (extended ? KEY_EXTENDED : 0);
-    bool pressed = !(byte & SC_RELEASED);
 
     extended = false;
     // Some keys come wrapped in a fake shift, which isn't a key at all.
-    if (code == (KEY_EXTENDED | KEY_LEFT_SHIFT) || code == (KEY_EXTENDED | KEY_RIGHT_SHIFT))
-        return;
+    if (code != (KEY_EXTENDED | KEY_LEFT_SHIFT) && code != (KEY_EXTENDED | KEY_RIGHT_SHIFT))
+        keyboard_key(code, !(byte & SC_RELEASED));
+}
 
+void keyboard_key(uint16_t code, bool pressed) {
     // Keys repeat here, at the same pace whatever the keyboard does, so its own
     // repeats are left out.
     if (pressed && code == held)
@@ -317,7 +319,7 @@ void keyboard_handle_byte(uint8_t byte) {
 void keyboard_handle_irq(void) {
     uint8_t status;
 
-    while ((status = inb(PS2_STATUS)) & STATUS_OUTPUT_FULL) {
+    for (int i = 0; i < MAX_PENDING && ((status = inb(PS2_STATUS)) & STATUS_OUTPUT_FULL); i++) {
         uint8_t byte = inb(PS2_DATA);
 
         if (status & STATUS_FROM_MOUSE)
