@@ -196,8 +196,9 @@ make test
 Each `tests/*_test.py` boots its own QEMU from a snapshot of the built disk, drives it
 over the serial port and QEMU's monitor (typing, clicking, taking screenshots), and checks
 what happens. They cover the kernel (files, memory, threads, timers, the network, `/proc`),
-the libraries, the shell and utilities, and every app. Run one on its own with
-`python3 tests/files_test.py`.
+the libraries, the shell and utilities, and every app. Several run at once, the slowest
+first; `make test JOBS=2` runs fewer, and `make test TESTS="tests/files_test.py"` runs
+just the ones named.
 
 ## Layout
 

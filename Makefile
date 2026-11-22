@@ -334,10 +334,10 @@ run-usb: built
 build-run: all
 	$(QEMU_Q35)
 
-# Each tests/*_test.py boots its own VM from a snapshot, so the disk stays as it was.
+# Each tests/*_test.py boots its own VMs from snapshots, so several run at once.
+# JOBS sets how many, and TESTS picks which, as in make test TESTS="tests/usb_test.py".
 test: built
-	@failed=; for t in tests/*_test.py; do echo "== $$t"; python3 $$t || failed="$$failed $$t"; done; \
-	[ -z "$$failed" ] || { echo "failed:$$failed"; exit 1; }
+	@python3 tests/run.py $(if $(JOBS),-j $(JOBS)) $(TESTS)
 
 help:
 	@echo "make                build whatever has changed (same as make all)"
@@ -346,7 +346,8 @@ help:
 	@echo "make run-installer  boot the ISO with a blank disk to install on, kept in build/install.img"
 	@echo "make run-usb        the same, with the ISO on a USB stick instead of a CD"
 	@echo "make build-run      build whatever has changed, then run"
-	@echo "make test           run the tests in tests/ against what's already built"
+	@echo "make test           run the tests in tests/ against what's already built, several at once"
+	@echo "                    (JOBS=n sets how many, TESTS=\"tests/x_test.py ...\" picks which)"
 	@echo "make clean          delete everything that was built"
 	@echo "make help           show this list"
 
