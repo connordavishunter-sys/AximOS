@@ -6,6 +6,7 @@
 #include <net.h>
 #include <process.h>
 #include <procfs.h>
+#include <serial.h>
 #include <string.h>
 
 // A file is its kind, and for those in a process's directory that process.
@@ -17,6 +18,7 @@ enum proc_kind {
     PROC_ROOT,
     PROC_CPUINFO,
     PROC_DISKS,
+    PROC_LOG,
     PROC_MEMINFO,
     PROC_MOUNTS,
     PROC_NET,
@@ -30,7 +32,7 @@ enum proc_kind {
 };
 
 static const char *const root_names[] = {
-    [PROC_CPUINFO] = "cpuinfo", [PROC_DISKS] = "disks", [PROC_MEMINFO] = "meminfo", [PROC_MOUNTS] = "mounts", [PROC_NET] = "net",
+    [PROC_CPUINFO] = "cpuinfo", [PROC_DISKS] = "disks", [PROC_LOG] = "log", [PROC_MEMINFO] = "meminfo", [PROC_MOUNTS] = "mounts", [PROC_NET] = "net",
     [PROC_STAT] = "stat", [PROC_UPTIME] = "uptime", [PROC_VERSION] = "version",
 };
 
@@ -298,6 +300,10 @@ static int procfs_lookup(void *volume, const char *path, struct vfs_node *node) 
 // It's all made up again for each read, so a reader sees it as it is by then.
 static int64_t procfs_read(void *volume, const struct vfs_node *node, uint64_t offset, void *buf, size_t len) {
     (void)volume;
+
+    // The kernel's log is bigger than a page, so it's read as it is.
+    if ((node->location & KIND_MASK) == PROC_LOG)
+        return log_read(offset, buf, len);
 
     uint64_t phys = mm_alloc_kernel_page();
 

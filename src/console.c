@@ -320,7 +320,10 @@ static void put_byte(char c) {
 
 void console_write(const char *buf, size_t len) {
     serial_write(buf, len);
+    console_draw(buf, len);
+}
 
+void console_draw(const char *buf, size_t len) {
     draw_cell(row, col, false);
     for (size_t i = 0; i < len; i++)
         put_byte(buf[i]);

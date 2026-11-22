@@ -102,6 +102,14 @@ static const struct fadt *fadt;
 static uint16_t sleep_type_a;
 static uint16_t sleep_type_b;
 static bool can_power_off;
+static uint64_t hpet_address;
+
+struct hpet_table {
+    struct table_header header;
+    uint32_t block_id;
+    uint8_t space, bit_width, bit_offset, access_size; // where the registers are
+    uint64_t address;
+} __attribute__((packed));
 
 static const struct table_header *find_table(const struct rsdp *rsdp, const char *signature) {
     bool extended = rsdp->revision >= 2 && rsdp->xsdt != 0;
@@ -207,6 +215,11 @@ bool acpi_init(void) {
         find_sleep_type(mm_phys_to_virt(has_64 ? fadt->dsdt_64 : fadt->dsdt));
     }
 
+    const struct hpet_table *hpet = (const struct hpet_table *)find_table(rsdp, "HPET");
+
+    if (hpet && hpet->space == 0) // in memory
+        hpet_address = hpet->address;
+
     kprintf("acpi: local APIC %lx, I/O APIC %lx, power off %s\n", local_apic_address,
             io_apic_address, can_power_off ? "available" : "unavailable");
     return io_apic_address != 0;
@@ -218,6 +231,10 @@ uint64_t acpi_local_apic_address(void) {
 
 uint64_t acpi_io_apic_address(void) {
     return io_apic_address;
+}
+
+uint64_t acpi_hpet_address(void) {
+    return hpet_address;
 }
 
 struct acpi_isa_route acpi_isa_route(int irq) {

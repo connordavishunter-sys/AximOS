@@ -1,6 +1,7 @@
 #include <clock.h>
 #include <io.h>
 #include <irq.h>
+#include <kernel.h>
 #include <serial.h>
 
 #define CMOS_INDEX 0x70
@@ -51,7 +52,9 @@ static int from_bcd(uint8_t value) {
 }
 
 void clock_init(void) {
-    tsc_hz = irq_measure_tsc_hz();
+    tsc_hz = irq_tsc_hz();
+    if (!tsc_hz)
+        die("can't tell how fast the timestamp counter runs");
     tsc_start = __builtin_ia32_rdtsc();
     boot_epoch = clock_now();
     kprintf("clock: timestamp counter runs at %lu Hz\n", tsc_hz);

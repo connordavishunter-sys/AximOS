@@ -17,4 +17,7 @@ void console_hide(void);
 void console_show(void);
 
 void console_write(const char *buf, size_t len);
+
+// The same without the copy to serial, for what's already been logged there.
+void console_draw(const char *buf, size_t len);
 void console_size(int *rows, int *cols);

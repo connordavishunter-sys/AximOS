@@ -35,8 +35,8 @@ void irq_enable_line(int line, int vector);
 
 void irq_handle(const struct interrupt_frame *frame);
 
-// How fast the CPU's timestamp counter runs, measured against the PIT.
-uint64_t irq_measure_tsc_hz(void);
+// How fast the CPU's timestamp counter runs, as irq_init measured it.
+uint64_t irq_tsc_hz(void);
 
 // Ticks since boot, for timeouts.
 uint64_t irq_ticks(void);

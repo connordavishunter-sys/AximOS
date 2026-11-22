@@ -14,6 +14,7 @@ bool acpi_init(void);
 
 uint64_t acpi_local_apic_address(void);
 uint64_t acpi_io_apic_address(void);
+uint64_t acpi_hpet_address(void); // or 0 if there's no HPET
 struct acpi_isa_route acpi_isa_route(int irq);
 
 // Turns the machine off or restarts it using what the firmware described.

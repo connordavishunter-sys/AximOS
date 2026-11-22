@@ -33,6 +33,14 @@
 #define PIT_CHANNEL2_ONE_SHOT 0xB0
 #define PIT_FREQUENCY 1193182
 #define TSC_MEASURE_HZ 20 // the longest count the PIT can do is about 55 ms
+#define WAIT_LIMIT 5000000 // reads of a timer, seconds longer than a wait takes
+#define MIN_TSC_HZ 200000000ULL // slower than any x86-64 CPU, so a timer that says so isn't counting
+
+#define HPET_CAPABILITIES 0x000
+#define HPET_CONFIG 0x010
+#define HPET_COUNTER 0x0F0
+#define HPET_ENABLE 0x1
+#define FS_PER_SECOND 1000000000000000ULL
 
 #define LAPIC_ID 0x20
 #define LAPIC_EOI 0xB0
@@ -65,6 +73,9 @@ static volatile uint8_t *ioapic;
 static uint32_t timer_count;
 static uint32_t boot_apic_id;
 static volatile uint64_t ticks;
+static uint64_t tsc_hz;
+static bool pit_missing;
+static volatile uint8_t *hpet;
 
 static uint32_t lapic_read(uint32_t reg) {
     return *(volatile uint32_t *)(lapic + reg);
@@ -109,34 +120,125 @@ static void pit_start(uint16_t pit_count) {
     outb(PIT_GATE_PORT, gate | PIT_GATE);
 }
 
-static void pit_wait(void) {
-    while (!(inb(PIT_GATE_PORT) & PIT_OUTPUT))
-        ;
-}
-
-uint64_t irq_measure_tsc_hz(void) {
-    pit_start(PIT_FREQUENCY / TSC_MEASURE_HZ);
+// Times a count of the PIT in timestamp counts. Newer chipsets can leave the PIT
+// switched off, so that its output never rises, or rises at once.
+static bool pit_wait(uint64_t hz, uint64_t *tsc_counts) {
+    if (pit_missing)
+        return false;
+    pit_start(PIT_FREQUENCY / hz);
 
     uint64_t start = __builtin_ia32_rdtsc();
 
-    pit_wait();
-    return (__builtin_ia32_rdtsc() - start) * TSC_MEASURE_HZ;
+    for (int i = 0; i < WAIT_LIMIT; i++) {
+        if (inb(PIT_GATE_PORT) & PIT_OUTPUT) {
+            *tsc_counts = __builtin_ia32_rdtsc() - start;
+            pit_missing = *tsc_counts * hz < MIN_TSC_HZ;
+            return !pit_missing;
+        }
+    }
+    pit_missing = true;
+    return false;
 }
 
-// Counts how fast the local APIC timer runs against the PIT's known frequency.
-static uint32_t measure_timer(void) {
-    pit_start(PIT_FREQUENCY / TIMER_HZ);
+// The same by the HPET's counter, which is left running.
+static bool hpet_wait(uint64_t hz, uint64_t *tsc_counts) {
+    if (!hpet) {
+        uint64_t phys = acpi_hpet_address();
 
+        if (!phys || !(hpet = mm_map_device(phys, PAGE_SIZE)))
+            return false;
+        kprintf("irq: the PIT doesn't count, so timing goes by the HPET\n");
+        *(volatile uint64_t *)(hpet + HPET_CONFIG) |= HPET_ENABLE;
+    }
+
+    uint64_t period_fs = *(volatile uint64_t *)(hpet + HPET_CAPABILITIES) >> 32;
+
+    if (!period_fs)
+        return false;
+
+    volatile uint32_t *counter = (volatile uint32_t *)(hpet + HPET_COUNTER);
+    uint32_t counts = FS_PER_SECOND / period_fs / hz, begin = *counter;
+    uint64_t start = __builtin_ia32_rdtsc();
+
+    for (int i = 0; i < WAIT_LIMIT; i++) {
+        if ((uint32_t)(*counter - begin) >= counts) {
+            *tsc_counts = __builtin_ia32_rdtsc() - start;
+            return *tsc_counts * hz >= MIN_TSC_HZ;
+        }
+    }
+    return false;
+}
+
+static bool reference_wait(uint64_t hz, uint64_t *tsc_counts) {
+    return pit_wait(hz, tsc_counts) || hpet_wait(hz, tsc_counts);
+}
+
+// What Intel CPUs since 2017 say about their clocks: the crystal that drives the
+// APIC timer, and how many timestamp counts there are to each of its cycles.
+// Virtual machines' timers run at their own speed, so this is only for when
+// there's nothing to measure them by.
+static bool cpuid_clocks(uint64_t *crystal_hz, uint64_t *tsc_hz) {
+    uint32_t top, denominator, numerator, crystal, unused;
+
+    __asm__ volatile("cpuid" : "=a"(top), "=b"(unused), "=c"(unused), "=d"(unused) : "a"(0));
+    if (top < 0x15)
+        return false;
+    __asm__ volatile("cpuid" : "=a"(denominator), "=b"(numerator), "=c"(crystal), "=d"(unused) : "a"(0x15), "c"(0));
+    if (!denominator || !numerator)
+        return false;
+
+    uint64_t hz = crystal;
+
+    // Some leave the crystal out, but say what the counter runs at in MHz.
+    if (!hz && top >= 0x16) {
+        uint32_t base_mhz;
+
+        __asm__ volatile("cpuid" : "=a"(base_mhz), "=b"(unused), "=c"(unused), "=d"(unused) : "a"(0x16), "c"(0));
+        hz = (uint64_t)base_mhz * 1000000 * denominator / numerator;
+    }
+    if (!hz)
+        return false;
+    *crystal_hz = hz;
+    *tsc_hz = hz * numerator / denominator;
+    return true;
+}
+
+uint64_t irq_tsc_hz(void) {
+    return tsc_hz;
+}
+
+// Counts how fast the local APIC timer runs, by the timestamp counter.
+static uint32_t measure_timer(void) {
     lapic_write(LAPIC_TIMER_DIVIDE, LAPIC_DIVIDE_BY_16);
     lapic_write(LAPIC_TIMER, LAPIC_TIMER_MASKED);
     lapic_write(LAPIC_TIMER_INITIAL, 0xFFFFFFFF);
 
-    pit_wait();
+    uint64_t start = __builtin_ia32_rdtsc();
+
+    while (__builtin_ia32_rdtsc() - start < tsc_hz / TIMER_HZ)
+        ;
 
     uint32_t elapsed = 0xFFFFFFFF - lapic_read(LAPIC_TIMER_CURRENT);
 
     lapic_write(LAPIC_TIMER_INITIAL, 0);
     return elapsed;
+}
+
+// The timestamp counter is measured by another timer, then the APIC timer by it.
+// Failing that, Intel CPUs say how fast both go.
+static bool measure_clocks(void) {
+    uint64_t counts, crystal;
+
+    if (reference_wait(TSC_MEASURE_HZ, &counts)) {
+        tsc_hz = counts * TSC_MEASURE_HZ;
+        timer_count = measure_timer();
+    } else if (cpuid_clocks(&crystal, &tsc_hz)) {
+        kprintf("irq: there's no timer to measure the others by, so going by the CPU's %lu Hz crystal\n", crystal);
+        timer_count = crystal / 16 / TIMER_HZ;
+    } else {
+        kprintf("irq: there's no timer to measure the others by\n");
+    }
+    return timer_count != 0;
 }
 
 void irq_init_this_cpu(void) {
@@ -157,8 +259,7 @@ bool irq_init(void) {
 
     boot_apic_id = lapic_read(LAPIC_ID) >> 24;
     this_cpu()->apic_id = boot_apic_id;
-    timer_count = measure_timer();
-    if (timer_count == 0)
+    if (!measure_clocks())
         return false;
 
     kprintf("irq: timer counts %u per tick\n", timer_count);

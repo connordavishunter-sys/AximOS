@@ -18,6 +18,7 @@
 #include <random.h>
 #include <serial.h>
 #include <stdint.h>
+#include <trace.h>
 #include <usb.h>
 #include <vfs.h>
 
@@ -37,10 +38,16 @@ void halt(void) {
         __asm__ volatile("cli; hlt");
 }
 
-void die(const char *message) {
+void die_at(const char *message, uint64_t rip, uint64_t rbp) {
     cpu_stop_others();
+    log_show_crash();
     kprintf("error: %s, halting\n", message);
+    trace_print(rip, rbp);
     halt();
+}
+
+void die(const char *message) {
+    die_at(message, 0, (uint64_t)__builtin_frame_address(0));
 }
 
 void _start(void) {
@@ -51,6 +58,7 @@ void _start(void) {
 
     cpu_init_boot();
     fb_init();
+    log_to_screen(true);
     keyboard_init();
 
     bool have_mouse = mouse_init();
@@ -104,5 +112,6 @@ void _start(void) {
     }
     net_init();
     cpu_start_others();
+    log_to_screen(false); // the screen is init's now
     process_idle_loop();
 }

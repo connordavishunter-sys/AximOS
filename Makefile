@@ -82,7 +82,7 @@ BASE_CFLAGS := -std=gnu23 -O2 -g -Wall -Wextra -MMD -MP \
 
 # The kernel never touches the floating point registers, so an interrupt doesn't
 # have to save them. They only change hands when processes switch.
-CFLAGS := $(BASE_CFLAGS) -Iinclude -Iabi -mcmodel=kernel -mno-80387 -mno-mmx -mno-sse -mno-sse2
+CFLAGS := $(BASE_CFLAGS) -fno-omit-frame-pointer -Iinclude -Iabi -mcmodel=kernel -mno-80387 -mno-mmx -mno-sse -mno-sse2
 
 # Programs are built small: each function has its own section, so linking leaves out
 # whatever a program doesn't use. build/ keeps debug info and the disk gets it stripped.

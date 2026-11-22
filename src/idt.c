@@ -74,7 +74,7 @@ void idt_load(void) {
 
     kprintf("exception: vector %lu error %lx rip %lx rsp %lx cr2 %lx\n",
             frame->vector, frame->error, frame->rip, frame->rsp, cr2);
-    die("exception in kernel");
+    die_at("exception in kernel", frame->rip, frame->rbp);
 }
 
 static void user_exception(struct interrupt_frame *frame, uint64_t cr2) {
