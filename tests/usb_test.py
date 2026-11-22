@@ -32,6 +32,15 @@ finally:
 check('what was written is on the stick',
       subprocess.run(['mtype', '-i', fat, '::/new.txt'], capture_output=True, text=True).stdout == 'written\n')
 
+# The ISO on a stick, with nothing else. The empty CD drive, which once failed a
+# command and kept interrupting, then stopped it starting at all.
+v = VM(disk=False, cdrom=False, desktop=True, extra=['-device', 'qemu-xhci,id=usb',
+                                                     *stick(BUILD + '/aximos.iso,snapshot=on', 'usb', 1, boot=True)])
+try:
+    check('the stick boots by itself', v.wait('install: choose', 60), v.raw()[-600:])
+finally:
+    v.close()
+
 # The ISO on a stick, with a blank disk to install on and no CD drive.
 target = f'{WORK}/target.img'
 open(target, 'wb').truncate(1 << 30)

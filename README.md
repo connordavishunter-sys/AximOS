@@ -147,6 +147,7 @@ make run
 | `make run-installer` | Boot the ISO with a blank 2 GB disk to install on, kept in `build/install.img` |
 | `make run-usb`     | The same, with the ISO on a USB stick instead of a CD |
 | `make build-run`   | Rebuild what changed, then run                     |
+| `make debug`       | Also build `build/aximos-debug.iso`, which boots to the shell instead of the desktop |
 | `make test`        | Run the tests                                      |
 | `make clean`       | Delete everything built                            |
 

@@ -8,6 +8,7 @@ BUILD := build
 KERNEL := $(BUILD)/kernel.elf
 ISO := $(BUILD)/aximos.iso
 ISO_ROOT := $(BUILD)/iso_root
+DEBUG_ISO := $(BUILD)/aximos-debug.iso
 SYSTEM := $(BUILD)/system# everything that goes on the disk, also on the ISO to install from
 DISK := $(BUILD)/disk.img
 DISK_SIZE_MB := 512
@@ -130,7 +131,7 @@ QEMU_Q35 := $(QEMU_BASE) -M q35 -drive file=$(DISK),format=raw,if=none,id=disk \
 INSTALL_DISK := $(BUILD)/install.img
 INSTALL_DISK_MB := 2048
 
-.PHONY: all help built run run-ide run-installer run-usb build-run test clean
+.PHONY: all debug help built run run-ide run-installer run-usb build-run test clean
 
 # A recipe that fails leaves nothing behind that looks up to date.
 .DELETE_ON_ERROR:
@@ -314,6 +315,9 @@ $(DISK): $(SYSTEM)
 	mcopy -s -i $@ $(SYSTEM)/* ::/
 
 # The ISO boots by itself, from the same system as the disk, to install it.
+make_iso = xorriso -as mkisofs -R -r -J --efi-boot boot/limine/limine-uefi-cd.bin \
+	-efi-boot-part --efi-boot-image --protective-msdos-label $(1) -o $@
+
 $(ISO): $(KERNEL) limine.conf $(SYSTEM)
 	rm -rf $(ISO_ROOT)
 	cp -r $(SYSTEM) $(ISO_ROOT)
@@ -321,8 +325,16 @@ $(ISO): $(KERNEL) limine.conf $(SYSTEM)
 	cp $(KERNEL) $(ISO_ROOT)/boot/
 	cp limine.conf $(LIMINE_DIR)/limine-uefi-cd.bin $(ISO_ROOT)/boot/limine/
 	cp $(LIMINE_DIR)/BOOTX64.EFI $(ISO_ROOT)/EFI/BOOT/
-	xorriso -as mkisofs -R -r -J --efi-boot boot/limine/limine-uefi-cd.bin \
-		-efi-boot-part --efi-boot-image --protective-msdos-label $(ISO_ROOT) -o $@
+	$(call make_iso,$(ISO_ROOT))
+
+# /system/etc/debug has init start the shell, without the desktop, as Shift does.
+debug: all $(DEBUG_ISO)
+
+$(DEBUG_ISO): $(ISO)
+	rm -rf $(BUILD)/iso_debug
+	cp -r $(ISO_ROOT) $(BUILD)/iso_debug
+	touch $(BUILD)/iso_debug/system/etc/debug
+	$(call make_iso,$(BUILD)/iso_debug)
 
 # These run what's already built. make build-run rebuilds what changed first.
 built:
@@ -361,6 +373,7 @@ help:
 	@echo "make run-installer  boot the ISO with a blank disk to install on, kept in build/install.img"
 	@echo "make run-usb        the same, with the ISO on a USB stick instead of a CD"
 	@echo "make build-run      build whatever has changed, then run"
+	@echo "make debug          build $(DEBUG_ISO) too, which boots to the shell, not the desktop"
 	@echo "make test           run the tests in tests/ against what's already built, several at once"
 	@echo "                    (JOBS=n sets how many, TESTS=\"tests/x_test.py ...\" picks which)"
 	@echo "make clean          delete everything that was built"

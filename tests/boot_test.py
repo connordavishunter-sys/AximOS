@@ -1,7 +1,7 @@
 """Checks the desktop starts at boot, behind its log-in screen, and that holding
-Shift starts the shell instead."""
+Shift starts the shell instead, as does a debug build, which has /system/etc/debug."""
 import time
-from vm import VM, check, finish
+from vm import VM, WORK, check, disk_copy, finish, put
 
 v = VM(desktop=True)
 try:
@@ -17,6 +17,16 @@ v = VM()
 try:
     check('holding Shift starts the shell', v.wait('/$ ', 30), v.text())
     check('without the desktop', 'wm: running' not in v.text(), v.text())
+finally:
+    v.close()
+
+img = disk_copy('debug')
+open(WORK + '/debug', 'w').close()
+put(img, WORK + '/debug', '/system/etc/debug')
+v = VM(disk=img, desktop=True)
+try:
+    check('a debug build starts the shell without Shift', v.wait('/$ ', 30), v.text())
+    check('and says why', 'init: a debug build, so starting the shell' in v.text() and 'wm: running' not in v.text(), v.text())
 finally:
     v.close()
 

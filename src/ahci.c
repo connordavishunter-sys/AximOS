@@ -107,6 +107,7 @@ struct ahci_port {
     uint8_t *buffer[BUFFER_PAGES]; // the pages data moves through
     bool atapi;
     volatile bool done;
+    volatile bool failed; // the command that ran last, as the interrupt saw
 };
 
 static struct ahci_port *ports[MAX_PORTS];
@@ -169,7 +170,7 @@ static bool run_command(struct ahci_port *p, uint8_t command, uint64_t lba, cons
         prdt[i].byte_count = part - 1;
     }
 
-    p->done = false;
+    p->done = p->failed = false;
     reg_write(p, PORT_IS, 0xFFFFFFFF);
     reg_write(p, PORT_CI, 1);
 
@@ -177,7 +178,7 @@ static bool run_command(struct ahci_port *p, uint8_t command, uint64_t lba, cons
     uint64_t deadline = irq_ticks() + COMMAND_TIMEOUT_TICKS;
 
     for (int i = 0; i < POLL_TIMEOUT; i++) {
-        if (reg_read(p, PORT_IS) & IS_TASK_FILE_ERROR)
+        if (p->failed || reg_read(p, PORT_IS) & IS_TASK_FILE_ERROR)
             return false;
         if (!(reg_read(p, PORT_CI) & 1))
             return true;
@@ -199,9 +200,11 @@ void ahci_handle_irq(void) {
         struct ahci_port *p = ports[i];
         uint32_t events = reg_read(p, PORT_IS);
 
+        // Every bit is cleared, as one left set would raise the interrupt again
+        // and again, and an error is remembered for the command waiting.
         if (events) {
-            // A task file error stays visible until the next command clears it.
-            reg_write(p, PORT_IS, events & ~IS_TASK_FILE_ERROR);
+            reg_write(p, PORT_IS, events);
+            p->failed |= events & IS_TASK_FILE_ERROR;
             p->done = true;
             process_wakeup(p);
         }

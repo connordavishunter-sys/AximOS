@@ -48,8 +48,9 @@ static void power_button(int signal) {
     reboot(RB_POWER_OFF);
 }
 
-// Starts the desktop, behind its log-in screen, unless Shift is held, and keeps a
-// shell running after it, behind ttylogin, which asks for the same account.
+// Starts the desktop, behind its log-in screen, unless Shift is held or it's a debug
+// build, which has /system/etc/debug, and keeps a shell running after it, behind
+// ttylogin, which asks for the same account.
 // Started from the install disc, which can't be written to, there's no account to
 // make, so the desktop starts with the installer and the shell after it.
 int main(void) {
@@ -61,6 +62,8 @@ int main(void) {
     ioctl(STDIN_FILENO, KEYBOARD_GET_MODIFIERS, &modifiers);
     if (modifiers & KEY_MOD_SHIFT)
         printf("init: Shift is held, so starting the shell\n");
+    else if (access("/system/etc/debug", F_OK) == 0)
+        printf("init: a debug build, so starting the shell\n");
     else
         run(WM_PATH, disc ? "install" : "--login");
     while (disc && run(SHELL_PATH, NULL) != EXEC_FAILED)
