@@ -35,6 +35,21 @@ bool acpi_handle_irq(int irq);
 // Whether the lid is open, or -1 without one.
 int acpi_lid_open(void);
 
+struct acpi_battery {
+    bool present;
+    int percent; // charged, or -1 if it can't tell
+    bool charging, discharging; // neither when it's full, or held back from charging more
+    int on_ac;   // whether the charger's plugged in, or -1 if there's no telling
+};
+
+// Reads the first battery. Returns false without one.
+bool acpi_battery(struct acpi_battery *out);
+
+// The embedded controller, which the firmware's code reads the battery and much else
+// through: set up before the firmware's devices, then its events once GPEs are.
+void ec_init(void);
+void ec_start_events(void);
+
 // For uACPI's kernel functions.
 uint64_t acpi_rsdp_address(void);
 void acpi_route_sci(int irq);

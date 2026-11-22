@@ -29,6 +29,12 @@
 #define ACPI_NOTIFY_STATUS 0x80 // what a button or the lid sends when pressed or moved
 #define ACPI_HID_POWER_BUTTON "PNP0C0C"
 #define ACPI_HID_LID "PNP0C0D"
+#define ACPI_HID_BATTERY "PNP0C0A"
+#define ACPI_HID_ADAPTER "ACPI0003"
+#define STA_BATTERY_PRESENT (1 << 4)
+#define BST_DISCHARGING 1
+#define BST_CHARGING 2
+#define UNKNOWN 0xFFFFFFFF // what a battery says of what it can't tell
 #define FADT_RESET_SUPPORTED (1 << 10)
 #define ADDRESS_SPACE_MEMORY 0
 #define ADDRESS_SPACE_IO 1
@@ -210,7 +216,7 @@ static void find_sleep_type(const struct table_header *dsdt) {
 }
 
 static bool running; // uACPI, which runs the firmware's own code from here on
-static uacpi_namespace_node *lid;
+static uacpi_namespace_node *lid, *battery, *adapter;
 
 static bool step(uacpi_status status, const char *what) {
     if (status != UACPI_STATUS_OK)
@@ -358,17 +364,81 @@ static uacpi_iteration_decision found_lid(void *unused, uacpi_namespace_node *no
     return UACPI_ITERATION_DECISION_BREAK;
 }
 
+static uacpi_iteration_decision found_first(void *out, uacpi_namespace_node *node, uacpi_u32 depth) {
+    (void)depth;
+    *(uacpi_namespace_node **)out = node;
+    return UACPI_ITERATION_DECISION_BREAK;
+}
+
+// Fills values from the numbers in a package a method returns, as far as it has them.
+static bool package(uacpi_namespace_node *node, const char *method, uint64_t *values, size_t count) {
+    uacpi_object *result;
+    uacpi_object_array items;
+
+    if (uacpi_eval_simple_typed(node, method, UACPI_OBJECT_PACKAGE_BIT, &result) != UACPI_STATUS_OK)
+        return false;
+    uacpi_object_get_package(result, &items);
+    for (size_t i = 0; i < count; i++) {
+        uacpi_u64 value = UNKNOWN;
+
+        if (i < items.count)
+            uacpi_object_get_integer(items.objects[i], &value);
+        values[i] = value;
+    }
+    uacpi_object_unref(result);
+    return true;
+}
+
+bool acpi_battery(struct acpi_battery *out) {
+    uint64_t info[4], status[4], value;
+
+    if (!battery)
+        return false;
+    *out = (struct acpi_battery){.percent = -1, .on_ac = -1};
+    if (adapter && uacpi_eval_simple_integer(adapter, "_PSR", &value) == UACPI_STATUS_OK)
+        out->on_ac = value != 0;
+    if (uacpi_eval_simple_integer(battery, "_STA", &value) == UACPI_STATUS_OK && !(value & STA_BATTERY_PRESENT))
+        return true;
+    out->present = true;
+    if (!package(battery, "_BST", status, 4))
+        return true;
+    out->charging = status[0] & BST_CHARGING;
+    out->discharging = status[0] & BST_DISCHARGING;
+
+    // _BIX has a revision in front of what _BIF has. The capacity when last full
+    // is what the charge is out of, falling back on what it was made to hold.
+    uint64_t full = UNKNOWN;
+
+    if (package(battery, "_BIX", info, 4))
+        full = info[3] && info[3] != UNKNOWN ? info[3] : info[2];
+    else if (package(battery, "_BIF", info, 3))
+        full = info[2] && info[2] != UNKNOWN ? info[2] : info[1];
+    if (full && full != UNKNOWN && status[2] != UNKNOWN)
+        out->percent = status[2] >= full ? 100 : status[2] * 100 / full;
+    return true;
+}
+
 void acpi_start(void) {
     if (!step(uacpi_initialize(0), "starting") || !step(uacpi_namespace_load(), "loading the firmware's tables")
-        || !step(uacpi_set_interrupt_model(UACPI_INTERRUPT_MODEL_IOAPIC), "choosing the I/O APIC")
-        || !step(uacpi_namespace_initialize(), "setting up the devices"))
+        || !step(uacpi_set_interrupt_model(UACPI_INTERRUPT_MODEL_IOAPIC), "choosing the I/O APIC"))
+        return;
+    ec_init(); // before the firmware's devices start, as many of them use it
+    if (!step(uacpi_namespace_initialize(), "setting up the devices"))
         return;
     running = true;
     step(uacpi_finalize_gpe_initialization(), "turning on events");
+    ec_start_events();
     if (!(fadt && fadt->flags & FADT_POWER_BUTTON_IS_DEVICE))
         step(uacpi_install_fixed_event_handler(UACPI_FIXED_EVENT_POWER_BUTTON, fixed_power_button, NULL),
              "using the power button");
     uacpi_find_devices(ACPI_HID_POWER_BUTTON, found_power_button, NULL);
     uacpi_find_devices(ACPI_HID_LID, found_lid, NULL);
+    uacpi_find_devices(ACPI_HID_BATTERY, found_first, &battery);
+    uacpi_find_devices(ACPI_HID_ADAPTER, found_first, &adapter);
     kprintf("acpi: running the firmware's code%s\n", lid ? (acpi_lid_open() ? ", lid open" : ", lid closed") : "");
+
+    struct acpi_battery b;
+
+    if (acpi_battery(&b) && b.present && b.percent >= 0)
+        kprintf("acpi: battery at %u percent%s\n", b.percent, b.charging ? ", charging" : "");
 }

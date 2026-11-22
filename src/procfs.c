@@ -1,3 +1,4 @@
+#include <acpi.h>
 #include <block.h>
 #include <clock.h>
 #include <cpu.h>
@@ -16,6 +17,7 @@
 
 enum proc_kind {
     PROC_ROOT,
+    PROC_BATTERY,
     PROC_CPUINFO,
     PROC_DISKS,
     PROC_LOG,
@@ -32,7 +34,7 @@ enum proc_kind {
 };
 
 static const char *const root_names[] = {
-    [PROC_CPUINFO] = "cpuinfo", [PROC_DISKS] = "disks", [PROC_LOG] = "log", [PROC_MEMINFO] = "meminfo", [PROC_MOUNTS] = "mounts", [PROC_NET] = "net",
+    [PROC_BATTERY] = "battery", [PROC_CPUINFO] = "cpuinfo", [PROC_DISKS] = "disks", [PROC_LOG] = "log", [PROC_MEMINFO] = "meminfo", [PROC_MOUNTS] = "mounts", [PROC_NET] = "net",
     [PROC_STAT] = "stat", [PROC_UPTIME] = "uptime", [PROC_VERSION] = "version",
 };
 
@@ -187,10 +189,29 @@ static void make_disks(struct text *t) {
     }
 }
 
+// As the firmware reports it, each time it's read.
+static void make_battery(struct text *t) {
+    struct acpi_battery b;
+
+    if (!acpi_battery(&b)) {
+        add(t, "no battery\n");
+        return;
+    }
+    if (b.present && b.percent >= 0)
+        add_field(t, "charge", b.percent, "%\n");
+    add(t, "state:\t");
+    add(t, !b.present ? "missing\n" : b.charging ? "charging\n" : b.discharging ? "discharging\n" : "not charging\n");
+    add(t, "power:\t");
+    add(t, b.on_ac < 0 ? "unknown\n" : b.on_ac ? "ac\n" : "battery\n");
+}
+
 static bool make_file(uint32_t kind, int pid, struct text *t) {
     struct process_info info;
 
     switch (kind) {
+    case PROC_BATTERY:
+        make_battery(t);
+        return true;
     case PROC_CPUINFO:
         make_cpuinfo(t);
         return true;

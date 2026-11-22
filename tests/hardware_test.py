@@ -1,19 +1,56 @@
 """Checks what real machines need that QEMU's defaults hide: booting without a working
 PIT, the kernel's log on screen and in /proc/log, as a laptop has no serial port to
-read it from, a crash shown on screen with where the kernel was, and the power
-button shutting down cleanly."""
+read it from, a crash shown on screen with where the kernel was, the lid, battery and
+embedded controller, and the power button shutting down cleanly."""
 import re, struct, subprocess, time
 from vm import BUILD, VM, WORK, check, disk_copy, finish
 
 
-def lid_table(path):
-    """An SSDT with a lid, Device (LID0) { Name (_HID, EisaId ("PNP0C0D")) Method (_LID) { Return (One) } },
-    assembled by hand. QEMU has no lid of its own."""
-    hid = b'\x08_HID\x0c' + bytes([0x41, 0xD0, 0x0C, 0x0D])
-    method = b'\x14\x08_LID\x00\xa4\x01'
-    body = b'LID0' + hid + method
-    aml = b'\x5b\x82' + bytes([len(body) + 1]) + body
-    header = struct.pack('<4sIBB6s8sI4sI', b'SSDT', 36 + len(aml), 2, 0, b'AXIMOS', b'LIDTEST ', 1, b'AXIM', 1)
+# A little AML, assembled by hand, for an SSDT of the laptop parts QEMU hasn't got.
+def pkg(body):
+    """Body with its length in front, which counts the length's own bytes."""
+    n = len(body) + 1
+    return bytes([n]) + body if n < 64 else bytes([0x40 | (n + 1) & 0xF, (n + 1) >> 4]) + body
+
+
+def num(n):
+    return bytes([n]) if n < 2 else b'\x0a' + bytes([n]) if n < 256 else b'\x0b' + struct.pack('<H', n)
+
+
+def name(seg, obj):
+    return b'\x08' + seg + obj
+
+
+def returns(seg, obj):
+    return b'\x14' + pkg(seg + b'\x00\xa4' + obj)
+
+
+def package(*items):
+    return b'\x12' + pkg(bytes([len(items)]) + b''.join(items))
+
+
+def device(seg, *parts):
+    return b'\x5b\x82' + pkg(seg + b''.join(parts))
+
+
+def eisa(product):
+    """EisaId ("PNPxxxx")."""
+    return b'\x0c\x41\xd0' + bytes.fromhex(product)
+
+
+def laptop_table(path):
+    """A lid that's open, a battery charged to 4000 of 5000 and charging, a charger
+    plugged in, and an embedded controller with its two ports and a GPE."""
+    io = lambda port: bytes([0x47, 1, port, 0, port, 0, 0, 1])
+    resources = io(0x62) + io(0x66) + b'\x79\x00'
+    aml = (device(b'LID0', name(b'_HID', eisa('0C0D')), returns(b'_LID', num(1)))
+           + device(b'BAT0', name(b'_HID', eisa('0C0A')), returns(b'_STA', num(0x1F)),
+                    returns(b'_BIF', package(num(0), num(5000), num(5000), num(1), num(12000), num(250), num(100))),
+                    returns(b'_BST', package(num(2), num(500), num(4000), num(12000))))
+           + device(b'ADP0', name(b'_HID', b'\x0dACPI0003\x00'), returns(b'_PSR', num(1)))
+           + device(b'EC0_', name(b'_HID', eisa('0C09')), name(b'_GPE', num(0x10)),
+                    name(b'_CRS', b'\x11' + pkg(num(len(resources)) + resources))))
+    header = struct.pack('<4sIBB6s8sI4sI', b'SSDT', 36 + len(aml), 2, 0, b'AXIMOS', b'LAPTOP  ', 1, b'AXIM', 1)
     table = bytearray(header + aml)
     table[9] = -sum(table) & 0xFF
     open(path, 'wb').write(table)
@@ -49,11 +86,16 @@ finally:
 
 # A press of the power button, which QEMU makes as the chipset's own.
 img = disk_copy('button')
-v = VM(disk=img, extra=['-acpitable', 'file=' + lid_table(WORK + '/lid.aml')])
+v = VM(disk=img, extra=['-acpitable', 'file=' + laptop_table(WORK + '/laptop.aml')])
 try:
     check('prompt at boot', v.wait('/$ ', 30), v.text())
     check("the firmware's code runs", "acpi: running the firmware's code" in v.raw(), v.raw())
     check('and says the lid is open', "acpi: running the firmware's code, lid open" in v.raw(), v.raw())
+    check('the embedded controller is found', 'ec: ports 62 and 66' in v.raw() and 'ec: events on GPE 10' in v.raw(),
+          [l for l in v.raw().split('\n') if l.startswith(('ec', 'acpi'))])
+    check('the battery too', 'acpi: battery at 80 percent, charging' in v.raw(), v.raw())
+    o = v.run('cat /proc/battery')
+    check('in /proc/battery', 'charge:\t80%\nstate:\tcharging\npower:\tac\n' in o, o)
     v.run('echo kept > /home/button.txt')
     v.command('system_powerdown')
     check('pressing it shuts down', v.exited(15), v.raw()[-600:])

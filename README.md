@@ -29,7 +29,8 @@ with the dash shell.
 - Pseudo-terminals, a framebuffer console, PS/2 keyboard and mouse, and the VMware/QEMU
   absolute pointer
 - ACPI through [uACPI](https://github.com/uACPI/uACPI), which runs the firmware's own code:
-  shutting down and rebooting, the power button, which shuts down cleanly, and the lid
+  shutting down and rebooting, the power button, which shuts down cleanly, the lid, and
+  the battery in `/proc/battery`, read through the laptop's embedded controller
 - Clocks measured by the PIT, or the HPET or what the CPU says where the PIT is switched off
 - The kernel's log on screen while it boots and in `/proc/log`, and a crash shown on screen
   with where the kernel was, by function name, for machines without a serial port
