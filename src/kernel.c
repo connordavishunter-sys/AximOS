@@ -18,6 +18,7 @@
 #include <random.h>
 #include <serial.h>
 #include <stdint.h>
+#include <usb.h>
 #include <vfs.h>
 
 #define INIT_PATH "/system/boot/init"
@@ -84,6 +85,7 @@ void _start(void) {
 
     ata_init();
     ahci_init();
+    xhci_init();
     if (block_device_count == 0)
         die("no drives found");
     if (!vfs_mount_all())

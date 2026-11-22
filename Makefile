@@ -109,9 +109,10 @@ install_stripped = strip -s -o $(SYSTEM)$(2) $(1)
 # of sound to keep going with while a redraw holds that up, rather than about 46.
 AUDIO ?= pipewire
 AUDIO_OPTIONS := $(if $(filter pipewire,$(AUDIO)),$(comma)out.latency=100000)
-QEMU_BASE := qemu-system-x86_64 -accel kvm -accel tcg -cpu max -smp 4 -m 256M -serial stdio -bios $(OVMF) -boot d -cdrom $(ISO) \
+QEMU_MACHINE := qemu-system-x86_64 -accel kvm -accel tcg -cpu max -smp 4 -m 256M -serial stdio -bios $(OVMF) \
 	-vga none -device VGA,vgamem_mb=64 -netdev user,id=net0 -device e1000,netdev=net0 \
 	-audiodev $(AUDIO),id=snd0$(AUDIO_OPTIONS) -device ich9-intel-hda -device hda-output,audiodev=snd0
+QEMU_BASE := $(QEMU_MACHINE) -boot d -cdrom $(ISO)
 
 # pc has legacy IDE drives, named hda and so on. q35 has AHCI, named sda and so on.
 QEMU := $(QEMU_BASE) -M pc -drive file=$(DISK),format=raw,if=ide,index=0
@@ -123,7 +124,7 @@ QEMU_Q35 := $(QEMU_BASE) -M q35 -drive file=$(DISK),format=raw,if=none,id=disk \
 INSTALL_DISK := $(BUILD)/install.img
 INSTALL_DISK_MB := 2048
 
-.PHONY: all help built run run-ide run-installer build-run test clean
+.PHONY: all help built run run-ide run-installer run-usb build-run test clean
 
 # A recipe that fails leaves nothing behind that looks up to date.
 .DELETE_ON_ERROR:
@@ -323,6 +324,13 @@ run-installer: built
 	test -f $(INSTALL_DISK) || truncate -s $(INSTALL_DISK_MB)M $(INSTALL_DISK)
 	$(QEMU_BASE) -M q35 -drive file=$(INSTALL_DISK),format=raw,if=none,id=disk -device ide-hd,drive=disk,bus=ide.1
 
+# The same, but with the ISO on a USB stick and no CD drive. The stick isn't changed.
+run-usb: built
+	test -f $(INSTALL_DISK) || truncate -s $(INSTALL_DISK_MB)M $(INSTALL_DISK)
+	$(QEMU_MACHINE) -M q35 -drive file=$(INSTALL_DISK),format=raw,if=none,id=disk -device ide-hd,drive=disk,bus=ide.1 \
+		-device qemu-xhci,id=usb -drive file=$(ISO),format=raw,if=none,id=stick,snapshot=on \
+		-device usb-storage,bus=usb.0,drive=stick,bootindex=0
+
 build-run: all
 	$(QEMU_Q35)
 
@@ -336,6 +344,7 @@ help:
 	@echo "make run            run what's already built, using AHCI"
 	@echo "make run-ide        run what's already built, using the slower IDE controller"
 	@echo "make run-installer  boot the ISO with a blank disk to install on, kept in build/install.img"
+	@echo "make run-usb        the same, with the ISO on a USB stick instead of a CD"
 	@echo "make build-run      build whatever has changed, then run"
 	@echo "make test           run the tests in tests/ against what's already built"
 	@echo "make clean          delete everything that was built"

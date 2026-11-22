@@ -12,6 +12,7 @@
 #include <process.h>
 #include <random.h>
 #include <serial.h>
+#include <usb.h>
 
 #define PIC1_COMMAND 0x20
 #define PIC1_DATA 0x21
@@ -202,6 +203,8 @@ void irq_handle(const struct interrupt_frame *frame) {
         ata_handle_irq(1);
     } else if (vector == VECTOR_AHCI) {
         ahci_handle_irq();
+    } else if (vector == VECTOR_USB) {
+        xhci_handle_irq();
     } else if (vector == VECTOR_NET) {
         e1000_poll();
     } else if (vector == VECTOR_TIMER && this_cpu()->index == 0) {

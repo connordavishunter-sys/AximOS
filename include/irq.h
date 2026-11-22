@@ -14,6 +14,7 @@
 #define VECTOR_AHCI 50
 #define VECTOR_FLUSH 51
 #define VECTOR_NET 52
+#define VECTOR_USB 53
 #define VECTOR_SPURIOUS 0xFF
 
 // How many timer ticks there are in a second.

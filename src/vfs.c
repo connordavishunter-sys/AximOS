@@ -228,17 +228,14 @@ static void mount_disk(struct block_device *drive) {
     }
 }
 
-static void mount_disc(struct block_device *drive) {
+// A disc image written to a USB stick is still a disc, whatever partitions it says it has.
+void vfs_mount_drive(struct block_device *drive) {
     void *volume = iso9660_mount(drive);
+
     if (volume)
         add_mount(drive, drive->name, &iso9660_ops, volume);
-    else
+    else if (drive->optical)
         kprintf("vfs: nothing to mount on /dev/%s\n", drive->name);
-}
-
-void vfs_mount_drive(struct block_device *drive) {
-    if (drive->optical)
-        mount_disc(drive);
     else
         mount_disk(drive);
 }

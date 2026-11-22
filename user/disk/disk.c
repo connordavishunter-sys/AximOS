@@ -345,7 +345,9 @@ static int partition(const char *name, char **sizes, int size_count) {
 
     random_guid(guid);
     put_header(header, 1, d.sectors - 1, 2, d.sectors, guid, table_crc);
-    ok = put(fd, 0, mbr, 1) && put(fd, 1, header, 1) && put(fd, 2, table, GPT_TABLE_SECTORS);
+    // What was before the first partition goes, as a disc image's would still be found.
+    ok = zero(fd, 2 + GPT_TABLE_SECTORS, ALIGN - 2 - GPT_TABLE_SECTORS) && put(fd, 0, mbr, 1) && put(fd, 1, header, 1)
+        && put(fd, 2, table, GPT_TABLE_SECTORS);
     put_header(header, d.sectors - 1, 1, d.sectors - 1 - GPT_TABLE_SECTORS, d.sectors, guid, table_crc);
     ok = ok && put(fd, d.sectors - 1 - GPT_TABLE_SECTORS, table, GPT_TABLE_SECTORS) && put(fd, d.sectors - 1, header, 1);
     close(fd);

@@ -41,6 +41,16 @@ int block_next_optical_index(void) {
     return optical_count++;
 }
 
+void block_name_disk(struct block_device *device) {
+    memcpy(device->name, "sda", 4);
+    for (int i = 0; i < block_device_count; i++) {
+        if (!strcmp(block_devices[i]->name, device->name)) {
+            device->name[2]++;
+            i = -1;
+        }
+    }
+}
+
 static struct cache_entry **bucket_for(const struct block_device *device, uint32_t lba) {
     uint32_t hash = (lba * 2654435761u) ^ ((uint64_t)device >> 4);
 

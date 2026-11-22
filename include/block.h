@@ -30,6 +30,9 @@ bool block_register(struct block_device *device);
 // Discs are numbered in the order they're found, whatever their controller.
 int block_next_optical_index(void);
 
+// Names a disk after those already found, as sdb after sda.
+void block_name_disk(struct block_device *device);
+
 // These go through a cache of recently used sectors. Writes reach the device
 // before they return, so the cache never holds anything the disk doesn't.
 bool block_read(struct block_device *device, uint32_t lba, void *buf);

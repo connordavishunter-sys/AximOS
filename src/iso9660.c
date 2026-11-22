@@ -53,8 +53,11 @@ static bool read_sector(struct block_device *drive, uint32_t lba) {
     if (cached_drive == drive && cached_lba == lba)
         return true;
 
+    // On a disk, such as a USB stick the image was written to, sectors are smaller.
+    uint32_t per = drive->sector_size < SECTOR_SIZE ? SECTOR_SIZE / drive->sector_size : 1;
+
     cached_drive = NULL;
-    if (!block_read(drive, lba, sector))
+    if (per == 1 ? !block_read(drive, lba, sector) : !block_read_many(drive, lba * per, per, sector))
         return false;
 
     cached_drive = drive;
@@ -71,6 +74,7 @@ static uint32_t read_u32(const uint8_t *p) {
 }
 
 void *iso9660_mount(struct block_device *drive) {
+    cached_drive = NULL; // what was there may have been written over since
     if (volume_count == MAX_VOLUMES || !read_sector(drive, PVD_LBA))
         return NULL;
     if (sector[0] != PVD_TYPE || memcmp(&sector[1], "CD001", 5) != 0)

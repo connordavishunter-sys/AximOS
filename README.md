@@ -16,10 +16,12 @@ with the dash shell.
   shared between processes
 - Dynamically linked programs: `libc.so` is also the dynamic linker
 - Filesystems: FAT32 (read and write) on disks and their GPT or MBR partitions, ISO 9660
-  on the install disc, tmpfs on `/tmp` (kept in memory, empty each boot), `/proc` and `/dev`
+  on the install disc or a USB stick it's written to, tmpfs on `/tmp` (kept in memory, empty each boot), `/proc` and `/dev`
 - Drives as they are in `/dev/disk`, for partitioning and formatting: opening one to
   write takes its filesystems away, and closing it mounts what's there
-- Drives over AHCI (SATA) and legacy IDE
+- Drives over AHCI (SATA) and legacy IDE, and USB sticks and drives over xHCI (USB 3
+  controllers). USB devices are found at boot only, on the computer's own ports, not
+  through hubs
 - Networking on an Intel e1000: ARP, IPv4, ICMP, UDP, TCP, DHCP and DNS, through BSD sockets
 - Intel HDA sound, with a mixer for several programs at once
 - Pseudo-terminals, a framebuffer console, PS/2 keyboard and mouse, and the VMware/QEMU
@@ -133,6 +135,7 @@ make run
 | `make run`         | Run what's built, on an AHCI drive                 |
 | `make run-ide`     | Run on the older (and slower) IDE controller       |
 | `make run-installer` | Boot the ISO with a blank 2 GB disk to install on, kept in `build/install.img` |
+| `make run-usb`     | The same, with the ISO on a USB stick instead of a CD |
 | `make build-run`   | Rebuild what changed, then run                     |
 | `make test`        | Run the tests                                      |
 | `make clean`       | Delete everything built                            |
@@ -145,8 +148,16 @@ where the kernel and wm log what they're doing.
 
 The ISO boots by itself into the installer, which erases the drive you choose, gives it
 one FAT32 partition the firmware boots from, and copies the system onto it. From then on
-the installed system is used, even with the ISO still in. The ISO has to be on a CD or
-DVD drive, since there's no USB storage driver yet, and the PC has to boot with UEFI.
+the installed system is used, even with the ISO still in. The PC has to boot with UEFI.
+
+To install from a USB stick, write the ISO to it, which erases the stick:
+
+```bash
+sudo dd if=build/aximos.iso of=/dev/sdX bs=4M conv=fsync
+```
+
+where `/dev/sdX` is the stick (`lsblk` lists them). The stick has to be plugged in
+before the PC starts.
 
 ### First boot
 

@@ -13,7 +13,7 @@ SHIFTED = {'!': '1', '@': '2', '#': '3', '$': '4', '%': '5', '^': '6', '&': '7',
            '_': 'minus', '+': 'equal', '"': 'apostrophe', ':': 'semicolon', '?': 'slash', '~': 'grave_accent',
            '>': 'dot', '<': 'comma', '|': 'backslash', '{': 'bracket_left', '}': 'bracket_right'}
 ESCAPES = re.compile(r'\x1b\[[0-9;?]*[A-Za-z]')
-KERNEL_LOG = re.compile(r'(process|elf|kernel|vfs|fat32|mm|net|tcp|clock|cpu|irq|block|ahci|ata|console|fb|acpi|mouse|keyboard|serial|iso9660|procfs|exception)\S*: ')
+KERNEL_LOG = re.compile(r'(process|elf|kernel|vfs|fat32|mm|net|tcp|clock|cpu|irq|block|ahci|xhci|usb|ata|console|fb|acpi|mouse|keyboard|serial|iso9660|procfs|exception)\S*: ')
 
 
 def key_for(c):
