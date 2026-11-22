@@ -57,7 +57,9 @@ static const char *const device_names[VFS_DEVICE_COUNT] = {
     [VFS_DEVICE_AUDIO] = "audio",
     [VFS_DEVICE_MIXER] = "mixer",
 };
-static bool lock_held;
+// Taken in turn, by ticket, so a process going straight back for it, as a copy
+// does after every read and write, can't keep the others waiting.
+static uint64_t next_ticket, now_serving;
 static int lock_owner;
 
 // /dev itself, which lists the mounts.
@@ -270,20 +272,24 @@ bool vfs_mount_all(void) {
 }
 
 void vfs_lock(void) {
-    while (lock_held && process_can_sleep())
-        process_sleep_uninterruptible(&lock_held, 0);
-    lock_held = true;
+    uint64_t ticket = next_ticket++;
+
+    // Before the scheduler runs, nothing else could be holding it.
+    while (now_serving != ticket && process_can_sleep())
+        process_sleep_uninterruptible(&now_serving, 0);
+    now_serving = ticket;
     lock_owner = process_can_sleep() ? process_thread_id() : 0;
 }
 
 void vfs_release_if_mine(void) {
-    if (lock_held && lock_owner == process_thread_id())
+    if (now_serving != next_ticket && lock_owner == process_thread_id())
         vfs_unlock();
 }
 
 void vfs_unlock(void) {
-    lock_held = false;
-    process_wakeup(&lock_held);
+    now_serving++;
+    lock_owner = 0;
+    process_wakeup(&now_serving);
 }
 
 // One that can be written to comes first, so an installed system is used rather

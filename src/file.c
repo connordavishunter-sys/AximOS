@@ -47,6 +47,7 @@ enum file_kind {
 // How much one read gets, so that a big one can't hold up the kernel for long.
 #define RANDOM_READ_MAX (1024 * 1024)
 #define DISK_TRANSFER_MAX (64 * 1024)
+#define NODE_PIECE (64 * 1024) // how much of a file is read or written each time the lock is taken
 
 struct file {
     int refs;
@@ -625,6 +626,29 @@ static int64_t disk_transfer(struct file *file, void *buf, size_t len, bool writ
     return done || len == 0 ? (int64_t)done : -EIO;
 }
 
+// A piece at a time, letting go of the lock in between, so a big read or write
+// takes turns with everyone else rather than making them wait until it's done.
+static int64_t node_transfer(struct file *file, void *buf, size_t len, bool write) {
+    size_t done = 0, part;
+    int64_t count;
+
+    do {
+        part = len - done < NODE_PIECE ? len - done : NODE_PIECE;
+        vfs_lock();
+        count = vfs_refresh(&file->node);
+        if (count == VFS_OK) {
+            if (write && file->flags & O_APPEND)
+                file->offset = file->node.size;
+            count = write ? vfs_write(&file->node, file->offset, (uint8_t *)buf + done, part)
+                          : vfs_read(&file->node, file->offset, (uint8_t *)buf + done, part);
+        }
+        if (count > 0)
+            file->offset += count, done += count;
+        vfs_unlock();
+    } while (count == (int64_t)part && done < len);
+    return done ? (int64_t)done : count;
+}
+
 int64_t file_read(struct file *file, void *buf, size_t len) {
     bool nonblocking = file->flags & O_NONBLOCK;
 
@@ -680,16 +704,7 @@ int64_t file_read(struct file *file, void *buf, size_t len) {
     if ((file->flags & O_ACCMODE) == O_WRONLY)
         return -EBADF;
 
-    vfs_lock();
-
-    int64_t count = vfs_refresh(&file->node);
-    if (count == VFS_OK)
-        count = vfs_read(&file->node, file->offset, buf, len);
-    if (count > 0)
-        file->offset += count;
-
-    vfs_unlock();
-    return count;
+    return node_transfer(file, buf, len, false);
 }
 
 int64_t file_write(struct file *file, const void *buf, size_t len) {
@@ -732,19 +747,7 @@ int64_t file_write(struct file *file, const void *buf, size_t len) {
     if ((file->flags & O_ACCMODE) == O_RDONLY)
         return -EBADF;
 
-    vfs_lock();
-
-    int64_t count = vfs_refresh(&file->node);
-    if (count == VFS_OK) {
-        if (file->flags & O_APPEND)
-            file->offset = file->node.size;
-        count = vfs_write(&file->node, file->offset, buf, len);
-    }
-    if (count > 0)
-        file->offset += count;
-
-    vfs_unlock();
-    return count;
+    return node_transfer(file, (void *)buf, len, true);
 }
 
 int64_t file_seek(struct file *file, int64_t offset, int whence) {

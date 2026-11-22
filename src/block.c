@@ -1,15 +1,20 @@
 #include <block.h>
 #include <kmalloc.h>
+#include <mm.h>
 #include <serial.h>
 #include <string.h>
 
-#define BUCKET_COUNT 1024
-#define MAX_CACHED_BYTES (4 * 1024 * 1024)
+#define BUCKET_COUNT 16384
+#define MIN_CACHED_BYTES (4 * 1024 * 1024)
+#define MAX_CACHED_BYTES (64 * 1024 * 1024)
+#define STREAM_SECTORS 16 // a read of this many at once is taken to be going through a big file
 
 struct block_device *block_devices[BLOCK_MAX_DEVICES];
 int block_device_count;
 
-// Entries are found by hash and evicted oldest first.
+// Entries are found by hash and evicted oldest first. What a big read brings in starts
+// out oldest, so that copying a big file doesn't push out everything else: it's kept
+// only if it's read again, or there's room to spare.
 struct cache_entry {
     struct block_device *device;
     uint32_t lba;
@@ -23,6 +28,7 @@ static struct cache_entry *buckets[BUCKET_COUNT];
 static struct cache_entry *newest;
 static struct cache_entry *oldest;
 static uint64_t cached_bytes;
+static uint64_t cache_limit;
 static uint64_t hits;
 static uint64_t misses;
 static int optical_count;
@@ -86,6 +92,16 @@ static void make_newest(struct cache_entry *e) {
     newest = e;
 }
 
+static void make_oldest(struct cache_entry *e) {
+    e->newer = oldest;
+    e->older = NULL;
+    if (oldest)
+        oldest->older = e;
+    else
+        newest = e;
+    oldest = e;
+}
+
 static void evict(struct cache_entry *e) {
     struct cache_entry **link = bucket_for(e->device, e->lba);
 
@@ -100,10 +116,20 @@ static void evict(struct cache_entry *e) {
 }
 
 // Failing to cache only costs speed, so running out of memory isn't an error.
-static void remember(struct block_device *device, uint32_t lba, const void *buf) {
+// A sixteenth of memory, within limits.
+static uint64_t limit(void) {
+    if (!cache_limit) {
+        uint64_t share = mm_total_page_count() * PAGE_SIZE / 16;
+
+        cache_limit = share < MIN_CACHED_BYTES ? MIN_CACHED_BYTES : share > MAX_CACHED_BYTES ? MAX_CACHED_BYTES : share;
+    }
+    return cache_limit;
+}
+
+static void remember(struct block_device *device, uint32_t lba, const void *buf, bool streaming) {
     size_t size = device->sector_size;
 
-    while (oldest && cached_bytes + size > MAX_CACHED_BYTES)
+    while (oldest && cached_bytes + size > limit())
         evict(oldest);
 
     struct cache_entry *e = kmalloc(sizeof(*e));
@@ -124,7 +150,10 @@ static void remember(struct block_device *device, uint32_t lba, const void *buf)
 
     e->bucket_next = *bucket;
     *bucket = e;
-    make_newest(e);
+    if (streaming)
+        make_oldest(e);
+    else
+        make_newest(e);
     cached_bytes += size;
 }
 
@@ -155,7 +184,7 @@ bool block_read(struct block_device *device, uint32_t lba, void *buf) {
         return false;
     }
 
-    remember(device, lba, buf);
+    remember(device, lba, buf, false);
     return true;
 }
 
@@ -180,7 +209,7 @@ bool block_write(struct block_device *device, uint32_t lba, const void *buf) {
         unlink_age(e);
         make_newest(e);
     } else {
-        remember(device, lba, buf);
+        remember(device, lba, buf, false);
     }
     return true;
 }
@@ -214,7 +243,7 @@ bool block_read_many(struct block_device *device, uint32_t lba, uint32_t count, 
             return false;
         }
         for (uint32_t i = 0; i < run; i++)
-            remember(device, lba + i, out + i * size);
+            remember(device, lba + i, out + i * size, run >= STREAM_SECTORS);
         lba += run;
         out += run * size;
         count -= run;
