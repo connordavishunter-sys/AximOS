@@ -1,8 +1,10 @@
 #include <key_event.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/reboot.h>
 #include <sys/statfs.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -40,6 +42,12 @@ static int run(const char *path, char *arg) {
     return status;
 }
 
+// The kernel's word that the power button was pressed.
+static void power_button(int signal) {
+    (void)signal;
+    reboot(RB_POWER_OFF);
+}
+
 // Starts the desktop, behind its log-in screen, unless Shift is held, and keeps a
 // shell running after it, behind ttylogin, which asks for the same account.
 // Started from the install disc, which can't be written to, there's no account to
@@ -49,6 +57,7 @@ int main(void) {
     struct statfs fs;
     bool disc = statfs("/", &fs) == 0 && !strcmp(fs.f_type, "iso9660");
 
+    signal(SIGPWR, power_button);
     ioctl(STDIN_FILENO, KEYBOARD_GET_MODIFIERS, &modifiers);
     if (modifiers & KEY_MOD_SHIFT)
         printf("init: Shift is held, so starting the shell\n");

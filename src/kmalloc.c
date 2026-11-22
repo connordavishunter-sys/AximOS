@@ -5,8 +5,11 @@
 
 // Pages are split into equal objects, one size per page. The direct map makes a
 // page's address its slab header, and empty pages go back to the page allocator.
+// Anything bigger gets pages of its own, mapped together, with a header saying how
+// many.
 
 #define CLASS_COUNT 8
+#define LARGE_HEADER 16 // keeping what follows aligned
 
 struct slab {
     struct slab *prev;
@@ -66,8 +69,15 @@ void *kmalloc(size_t size) {
 
     while (index < CLASS_COUNT && class_sizes[index] < size)
         index++;
-    if (index == CLASS_COUNT)
-        return NULL;
+    if (index == CLASS_COUNT) {
+        size_t pages = (size + LARGE_HEADER + PAGE_SIZE - 1) / PAGE_SIZE;
+        uint8_t *base = mm_alloc_kernel_range(pages);
+
+        if (!base)
+            return NULL;
+        *(size_t *)base = pages;
+        return base + LARGE_HEADER;
+    }
 
     struct slab *slab = partial[index] ? partial[index] : new_slab(index);
     if (!slab)
@@ -87,6 +97,12 @@ void *kmalloc(size_t size) {
 void kfree(void *ptr) {
     if (!ptr)
         return;
+    if (mm_is_kernel_range(ptr)) {
+        uint8_t *base = (uint8_t *)ptr - LARGE_HEADER;
+
+        mm_free_kernel_range(base, *(size_t *)base);
+        return;
+    }
 
     struct slab *slab = (struct slab *)((uint64_t)ptr & ~(uint64_t)(PAGE_SIZE - 1));
 

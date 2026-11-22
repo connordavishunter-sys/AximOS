@@ -538,6 +538,42 @@ void mm_free_kernel_stack(uint64_t top) {
     free_stacks = top;
 }
 
+void *mm_alloc_kernel_range(size_t pages) {
+    uint64_t base = kernel_vm_next + PAGE_SIZE; // a guard page below, as for stacks
+
+    kernel_vm_next = base + pages * PAGE_SIZE;
+    for (size_t i = 0; i < pages; i++) {
+        uint64_t phys = mm_alloc_kernel_page();
+
+        if (phys == 0 || !mm_map_page(base + i * PAGE_SIZE, phys, PAGE_WRITE | PAGE_NO_EXEC)) {
+            if (phys)
+                mm_free_kernel_page(phys);
+            mm_free_kernel_range((void *)base, i);
+            return NULL;
+        }
+    }
+    return (void *)base;
+}
+
+// The addresses aren't used again, so no CPU can still have the old pages in its TLB
+// for anything that's allowed to touch them.
+void mm_free_kernel_range(void *start, size_t pages) {
+    for (size_t i = 0; i < pages; i++) {
+        uint64_t virt = (uint64_t)start + i * PAGE_SIZE;
+        uint64_t *entry = walk(virt, false);
+
+        if (!entry || !(*entry & PTE_PRESENT))
+            continue;
+        mm_free_kernel_page(*entry & PTE_ADDR);
+        *entry = 0;
+        __asm__ volatile("invlpg (%0)" : : "r"(virt));
+    }
+}
+
+bool mm_is_kernel_range(const void *virt) {
+    return (uint64_t)virt >= KERNEL_VM_BASE;
+}
+
 static void *map_kernel_range(uint64_t phys, size_t size, uint64_t flags) {
     uint64_t offset = phys % PAGE_SIZE;
     uint64_t base = kernel_vm_next;
@@ -557,6 +593,44 @@ static void *map_kernel_range(uint64_t phys, size_t size, uint64_t flags) {
 
 void *mm_map_device(uint64_t phys, size_t size) {
     return map_kernel_range(phys, size, PTE_NO_CACHE | PTE_WRITE_THROUGH);
+}
+
+// Mappings made for mm_map_physical, kept to be given out again, as what asks for
+// them maps the same few places over and over.
+#define KEPT_MAPPINGS 64
+
+struct kept_mapping {
+    uint64_t phys, size;
+    uint8_t *virt;
+};
+
+static struct kept_mapping kept[KEPT_MAPPINGS];
+static int kept_count;
+
+void *mm_map_physical(uint64_t phys, size_t size) {
+    bool cached = false;
+
+    for (uint64_t i = 0; i < memmap->entry_count; i++) {
+        const struct limine_memmap_entry *e = memmap->entries[i];
+
+        if (phys < e->base || phys + size > e->base + e->length)
+            continue;
+        // The direct map has all of memory but the firmware's own.
+        if (e->type == LIMINE_MEMMAP_USABLE || e->type == LIMINE_MEMMAP_ACPI_RECLAIMABLE
+            || e->type == LIMINE_MEMMAP_BOOTLOADER_RECLAIMABLE || e->type == LIMINE_MEMMAP_EXECUTABLE_AND_MODULES)
+            return mm_phys_to_virt(phys);
+        cached = e->type == LIMINE_MEMMAP_ACPI_NVS;
+    }
+    for (int i = 0; i < kept_count; i++) {
+        if (phys >= kept[i].phys && phys + size <= kept[i].phys + kept[i].size)
+            return kept[i].virt + (phys - kept[i].phys);
+    }
+
+    uint8_t *virt = map_kernel_range(phys, size, cached ? 0 : PTE_NO_CACHE | PTE_WRITE_THROUGH);
+
+    if (virt && kept_count < KEPT_MAPPINGS)
+        kept[kept_count++] = (struct kept_mapping){phys, size, virt};
+    return virt;
 }
 
 void *mm_map_framebuffer(uint64_t phys, size_t size) {

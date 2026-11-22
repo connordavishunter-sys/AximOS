@@ -74,6 +74,7 @@ void _start(void) {
     random_init();
 
     irq_enable_isa(IRQ_KEYBOARD);
+    acpi_start();
     if (have_mouse) {
         irq_enable_isa(IRQ_MOUSE);
         vfs_add_device(VFS_DEVICE_MOUSE);
@@ -105,6 +106,7 @@ void _start(void) {
     if (vfs_lookup("/", INIT_PATH, &init) != VFS_OK || process_spawn_init(&init, INIT_PATH) < 0)
         die("failed to load " INIT_PATH);
 
+    acpi_start_worker();
     audio_init();
     if (audio_present()) {
         vfs_add_device(VFS_DEVICE_AUDIO);

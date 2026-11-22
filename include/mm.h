@@ -92,5 +92,16 @@ int64_t mm_copy_user_string(char *dest, uint64_t src, size_t max);
 uint64_t mm_alloc_kernel_stack(void);
 void mm_free_kernel_stack(uint64_t top);
 
+// Zeroed kernel memory of several pages, which needn't be together in physical
+// memory, or NULL. mm_is_kernel_range tells these apart from the direct map.
+void *mm_alloc_kernel_range(size_t pages);
+void mm_free_kernel_range(void *start, size_t pages);
+bool mm_is_kernel_range(const void *virt);
+
 // Maps device registers uncached, returning 0 when memory is exhausted.
 void *mm_map_device(uint64_t phys, size_t size);
+
+// Reaches any physical memory, the firmware's included, as ACPI asks: RAM through
+// the direct map, the firmware's own memory cached, and anything else uncached.
+// What it maps stays, and is given out again for the same place.
+void *mm_map_physical(uint64_t phys, size_t size);

@@ -14,6 +14,12 @@ DISK_SIZE_MB := 512
 
 OBJS := $(patsubst src/%,$(BUILD)/%.o,$(basename $(wildcard src/*.c src/*.S)))
 
+# uACPI, which runs the firmware's ACPI code, is built into the kernel from ports.
+UACPI := $(BUILD)/ports/uACPI-7.0.0
+UACPI_SOURCES := $(addprefix $(UACPI)/source/,default_handlers.c event.c interpreter.c io.c mutex.c namespace.c \
+	notify.c opcodes.c opregion.c osi.c registers.c resources.c sleep.c stdlib.c tables.c types.c uacpi.c utilities.c)
+UACPI_OBJS := $(patsubst $(UACPI)/source/%.c,$(BUILD)/uacpi/%.o,$(UACPI_SOURCES))
+
 LIBC := $(BUILD)/user/libc.a
 CRT0 := $(BUILD)/user/libc/crt0.o
 LIBC_OBJS := $(filter-out $(CRT0) $(BUILD)/user/libc/ld.o,$(patsubst user/%,$(BUILD)/user/%.o,$(basename $(wildcard user/libc/*.c user/libc/*.S))))
@@ -82,7 +88,7 @@ BASE_CFLAGS := -std=gnu23 -O2 -g -Wall -Wextra -MMD -MP \
 
 # The kernel never touches the floating point registers, so an interrupt doesn't
 # have to save them. They only change hands when processes switch.
-CFLAGS := $(BASE_CFLAGS) -fno-omit-frame-pointer -Iinclude -Iabi -mcmodel=kernel -mno-80387 -mno-mmx -mno-sse -mno-sse2
+CFLAGS := $(BASE_CFLAGS) -fno-omit-frame-pointer -Iinclude -Iabi -I$(UACPI)/include -mcmodel=kernel -mno-80387 -mno-mmx -mno-sse -mno-sse2
 
 # Programs are built small: each function has its own section, so linking leaves out
 # whatever a program doesn't use. build/ keeps debug info and the disk gets it stripped.
@@ -138,6 +144,15 @@ $(BUILD)/%.o: src/%.c
 $(BUILD)/%.o: src/%.S
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -c $< -o $@
+
+# Its code is as it comes, so its warnings are left to it.
+$(UACPI_OBJS): $(BUILD)/uacpi/%.o: $(UACPI)/source/%.c
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) -w -c $< -o $@
+
+$(OBJS) $(UACPI_SOURCES): | $(UACPI)/LICENSE
+$(UACPI)/LICENSE:
+	ports/build.sh uacpi
 
 $(BUILD)/user/%.o: user/%.c
 	@mkdir -p $(@D)
@@ -209,8 +224,8 @@ $(BUILD)/user/codecs/%.o: user/codecs/%.c | $(CODEC_ARCHIVES)
 $(CODEC_SOS): $(BUILD)/user/lib%.so: $(BUILD)/user/codecs/%.o $$(CODEC_LIBS_$$*) $(LIBAUDIO_SO) $(LIBC_SO)
 	$(SHARED) -soname lib$*.so $^ $(LIBGCC) -o $@
 
-$(KERNEL): $(OBJS) src/linker.ld
-	$(LD) $(LDFLAGS) -T src/linker.ld $(OBJS) -o $@
+$(KERNEL): $(OBJS) $(UACPI_OBJS) src/linker.ld
+	$(LD) $(LDFLAGS) -T src/linker.ld $(OBJS) $(UACPI_OBJS) -o $@
 
 $(LIBC): $(LIBC_OBJS)
 	rm -f $@
@@ -354,4 +369,4 @@ help:
 clean:
 	rm -rf $(BUILD)
 
--include $(OBJS:.o=.d) $(LIBC_OBJS:.o=.d) $(LIBGUI_SO_OBJS:.o=.d) $(PROGRAM_OBJS:.o=.d) $(CRT0:.o=.d)
+-include $(OBJS:.o=.d) $(UACPI_OBJS:.o=.d) $(LIBC_OBJS:.o=.d) $(LIBGUI_SO_OBJS:.o=.d) $(PROGRAM_OBJS:.o=.d) $(CRT0:.o=.d)

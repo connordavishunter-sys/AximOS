@@ -33,6 +33,11 @@ bool process_get_info(int pid, struct process_info *out);
 // Creates the first process from an already resolved file.
 int process_spawn_init(const struct vfs_node *node, const char *path);
 
+// Starts a thread that runs entry(argument) in the kernel, holding the kernel lock
+// as all kernel code does, and never returns. It has no process ID, so nothing in
+// ring 3 sees it or can signal it.
+int process_spawn_kernel_thread(void (*entry)(void *), void *argument, const char *name);
+
 // What each CPU runs when it has nothing else to do. It takes over from whatever
 // called it, which must hold the kernel lock.
 [[noreturn]] void process_idle_loop(void);
@@ -86,6 +91,9 @@ int process_set_tty(struct tty *tty);
 
 // Sends a signal to the calling process.
 void process_signal_self(int signal);
+
+// From the kernel itself, as nothing else may signal init.
+void process_signal_init(int signal);
 
 // Sends a signal the way kill() does, where pid can also name a process group.
 int process_kill(int pid, int signal);

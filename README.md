@@ -28,7 +28,8 @@ with the dash shell.
 - Intel HDA sound, with a mixer for several programs at once
 - Pseudo-terminals, a framebuffer console, PS/2 keyboard and mouse, and the VMware/QEMU
   absolute pointer
-- ACPI for shutting down and rebooting
+- ACPI through [uACPI](https://github.com/uACPI/uACPI), which runs the firmware's own code:
+  shutting down and rebooting, the power button, which shuts down cleanly, and the lid
 - Clocks measured by the PIT, or the HPET or what the CPU says where the PIT is switched off
 - The kernel's log on screen while it boots and in `/proc/log`, and a crash shown on screen
   with where the kernel was, by function name, for machines without a serial port
@@ -230,7 +231,7 @@ AximOS is developed and tested in QEMU. It hasn't been tried on real hardware ye
 
 ## Credits
 
-AximOS uses [Limine](https://github.com/limine-bootloader/limine),
+AximOS uses [Limine](https://github.com/limine-bootloader/limine), [uACPI](https://github.com/uACPI/uACPI),
 [dash](http://gondor.apana.org.au/~herbert/dash/), [Lua](https://www.lua.org),
 [Mbed TLS](https://github.com/Mbed-TLS/mbedtls), [zlib](https://zlib.net), [curl](https://curl.se),
 [NetSurf](https://www.netsurf-browser.org), [libwebp](https://chromium.googlesource.com/webm/libwebp),

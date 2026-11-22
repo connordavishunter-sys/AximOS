@@ -461,6 +461,40 @@ int process_spawn_init(const struct vfs_node *file, const char *path) {
     return 0;
 }
 
+// Where a kernel thread starts, without the kernel lock, which its creator's
+// switch to it gave up.
+[[noreturn]] static void kernel_thread_start(void (*entry)(void *), void *argument) {
+    kernel_lock();
+    entry(argument);
+    die("a kernel thread returned");
+}
+
+int process_spawn_kernel_thread(void (*entry)(void *), void *argument, const char *name) {
+    struct process *p = new_process(NULL);
+
+    if (!p)
+        return -ENOMEM;
+
+    // Its stack ends below the frame that starts it, as a call would leave it.
+    struct interrupt_frame frame = {
+        .rip = (uint64_t)kernel_thread_start,
+        .cs = GDT_KERNEL_CODE,
+        .rflags = RFLAGS_RESERVED,
+        .rsp = (p->stack_top - sizeof(struct interrupt_frame) - 64) & ~15ULL,
+        .ss = GDT_KERNEL_DATA,
+        .rdi = (uint64_t)entry,
+        .rsi = (uint64_t)argument,
+    };
+
+    frame.rsp -= 8;
+    p->s->pml4 = mm_kernel_address_space();
+    memcpy(p->s->exe, name, strlen(name) + 1);
+    memcpy(p->fpu, fpu_initial, FPU_STATE_SIZE);
+    prepare_stack(p, &frame);
+    p->state = PROCESS_RUNNABLE;
+    return 0;
+}
+
 void process_idle_loop(void) {
     struct cpu *cpu = this_cpu();
 
@@ -705,6 +739,11 @@ bool process_signal_group(int pgid, int signal) {
         found = true;
     }
     return found;
+}
+
+void process_signal_init(int signal) {
+    if (init)
+        send_to_process(init->s, signal);
 }
 
 void process_signal_self(int signal) {

@@ -315,6 +315,8 @@ void irq_handle(const struct interrupt_frame *frame) {
         audio_tick();
         keyboard_tick();
         xhci_tick();
+    } else if (vector >= IRQ_ISA_BASE && vector < IRQ_ISA_BASE + 16) {
+        acpi_handle_irq(vector - IRQ_ISA_BASE);
     }
 
     if (vector == VECTOR_TIMER && !this_cpu()->running)

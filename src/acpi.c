@@ -2,8 +2,14 @@
 #include <io.h>
 #include <limine.h>
 #include <mm.h>
+#include <process.h>
 #include <serial.h>
 #include <string.h>
+#include <uacpi/event.h>
+#include <uacpi/notify.h>
+#include <uacpi/sleep.h>
+#include <uacpi/uacpi.h>
+#include <uacpi/utilities.h>
 
 #define ISA_IRQ_COUNT 16
 
@@ -19,6 +25,10 @@
 #define SLEEP_TYPE_SHIFT 10
 #define SLEEP_ENABLE (1 << 13)
 #define PM1_SCI_ENABLE 1
+#define FADT_POWER_BUTTON_IS_DEVICE (1 << 4) // rather than the fixed one
+#define ACPI_NOTIFY_STATUS 0x80 // what a button or the lid sends when pressed or moved
+#define ACPI_HID_POWER_BUTTON "PNP0C0C"
+#define ACPI_HID_LID "PNP0C0D"
 #define FADT_RESET_SUPPORTED (1 << 10)
 #define ADDRESS_SPACE_MEMORY 0
 #define ADDRESS_SPACE_IO 1
@@ -86,7 +96,10 @@ struct fadt {
     uint32_t pm1b_event;
     uint32_t pm1a_control;
     uint32_t pm1b_control;
-    uint8_t reserved1[32];
+    uint32_t pm2_control, pm_timer, gpe0, gpe1;
+    uint8_t pm1_event_length, pm1_control_length, pm2_control_length, pm_timer_length;
+    uint8_t gpe0_length, gpe1_length, gpe1_base, cstate_control;
+    uint8_t reserved1[16];
     uint32_t flags;
     struct generic_address reset_register;
     uint8_t reset_value;
@@ -95,9 +108,12 @@ struct fadt {
     uint64_t dsdt_64;
 } __attribute__((packed));
 
+static_assert(offsetof(struct fadt, flags) == 112 && offsetof(struct fadt, dsdt_64) == 140);
+
 static uint64_t local_apic_address;
 static uint64_t io_apic_address;
 static struct acpi_isa_route isa_routes[ISA_IRQ_COUNT];
+static uint16_t isa_flags[ISA_IRQ_COUNT]; // as overridden, where 0 is the bus's usual
 static const struct fadt *fadt;
 static uint16_t sleep_type_a;
 static uint16_t sleep_type_b;
@@ -152,6 +168,7 @@ static void parse_madt(const struct madt *madt) {
 
             memcpy(&gsi, &entry[4], sizeof(gsi));
             memcpy(&flags, &entry[8], sizeof(flags));
+            isa_flags[entry[3]] = flags;
             isa_routes[entry[3]] = (struct acpi_isa_route){
                 .gsi = gsi,
                 .active_low = (flags & OVERRIDE_POLARITY_MASK) == OVERRIDE_POLARITY_LOW,
@@ -190,6 +207,15 @@ static void find_sleep_type(const struct table_header *dsdt) {
         can_power_off = true;
         return;
     }
+}
+
+static bool running; // uACPI, which runs the firmware's own code from here on
+static uacpi_namespace_node *lid;
+
+static bool step(uacpi_status status, const char *what) {
+    if (status != UACPI_STATUS_OK)
+        kprintf("acpi: %s failed: %s\n", what, uacpi_status_to_string(status));
+    return status == UACPI_STATUS_OK;
 }
 
 bool acpi_init(void) {
@@ -242,6 +268,8 @@ struct acpi_isa_route acpi_isa_route(int irq) {
 }
 
 void acpi_power_off(void) {
+    if (running && step(uacpi_prepare_for_sleep_state(UACPI_SLEEP_STATE_S5), "preparing to power off"))
+        step(uacpi_enter_sleep_state(UACPI_SLEEP_STATE_S5), "powering off");
     if (!fadt || !can_power_off || fadt->pm1a_control == 0)
         return;
 
@@ -258,6 +286,8 @@ void acpi_power_off(void) {
 }
 
 void acpi_reset(void) {
+    if (running)
+        step(uacpi_reboot(), "restarting");
     if (!fadt || fadt->header.length < offsetof(struct fadt, firmware_ctrl_64)
         || !(fadt->flags & FADT_RESET_SUPPORTED))
         return;
@@ -272,4 +302,73 @@ void acpi_reset(void) {
         if (mapped)
             *mapped = fadt->reset_value;
     }
+}
+
+uint64_t acpi_rsdp_address(void) {
+    return rsdp_request.response ? mm_virt_to_phys(rsdp_request.response->address) : 0;
+}
+
+// The SCI is active low and level triggered, unless the MADT says otherwise.
+void acpi_route_sci(int irq) {
+    uint16_t flags = isa_flags[irq];
+
+    isa_routes[irq].active_low = (flags & OVERRIDE_POLARITY_MASK) == 0 || (flags & OVERRIDE_POLARITY_MASK) == OVERRIDE_POLARITY_LOW;
+    isa_routes[irq].level_triggered = (flags & OVERRIDE_TRIGGER_MASK) == 0 || (flags & OVERRIDE_TRIGGER_MASK) == OVERRIDE_TRIGGER_LEVEL;
+}
+
+
+// Either kind of power button shuts down, as the desktop's Shut down does.
+static uacpi_interrupt_ret fixed_power_button(uacpi_handle unused) {
+    (void)unused;
+    kprintf("acpi: power button pressed\n");
+    process_signal_init(SIGPWR);
+    return UACPI_INTERRUPT_HANDLED;
+}
+
+static uacpi_status device_power_button(uacpi_handle unused, uacpi_namespace_node *node, uacpi_u64 value) {
+    (void)unused, (void)node;
+    if (value == ACPI_NOTIFY_STATUS)
+        fixed_power_button(NULL);
+    return UACPI_STATUS_OK;
+}
+
+static uacpi_iteration_decision found_power_button(void *unused, uacpi_namespace_node *node, uacpi_u32 depth) {
+    (void)unused, (void)depth;
+    uacpi_install_notify_handler(node, device_power_button, NULL);
+    return UACPI_ITERATION_DECISION_CONTINUE;
+}
+
+int acpi_lid_open(void) {
+    uacpi_u64 open;
+
+    return lid && uacpi_eval_simple_integer(lid, "_LID", &open) == UACPI_STATUS_OK ? open != 0 : -1;
+}
+
+static uacpi_status lid_changed(uacpi_handle unused, uacpi_namespace_node *node, uacpi_u64 value) {
+    (void)unused, (void)node;
+    if (value == ACPI_NOTIFY_STATUS)
+        kprintf("acpi: lid %s\n", acpi_lid_open() ? "opened" : "closed");
+    return UACPI_STATUS_OK;
+}
+
+static uacpi_iteration_decision found_lid(void *unused, uacpi_namespace_node *node, uacpi_u32 depth) {
+    (void)unused, (void)depth;
+    lid = node;
+    uacpi_install_notify_handler(node, lid_changed, NULL);
+    return UACPI_ITERATION_DECISION_BREAK;
+}
+
+void acpi_start(void) {
+    if (!step(uacpi_initialize(0), "starting") || !step(uacpi_namespace_load(), "loading the firmware's tables")
+        || !step(uacpi_set_interrupt_model(UACPI_INTERRUPT_MODEL_IOAPIC), "choosing the I/O APIC")
+        || !step(uacpi_namespace_initialize(), "setting up the devices"))
+        return;
+    running = true;
+    step(uacpi_finalize_gpe_initialization(), "turning on events");
+    if (!(fadt && fadt->flags & FADT_POWER_BUTTON_IS_DEVICE))
+        step(uacpi_install_fixed_event_handler(UACPI_FIXED_EVENT_POWER_BUTTON, fixed_power_button, NULL),
+             "using the power button");
+    uacpi_find_devices(ACPI_HID_POWER_BUTTON, found_power_button, NULL);
+    uacpi_find_devices(ACPI_HID_LID, found_lid, NULL);
+    kprintf("acpi: running the firmware's code%s\n", lid ? (acpi_lid_open() ? ", lid open" : ", lid closed") : "");
 }

@@ -46,6 +46,11 @@ mkdir -p "$root/build/ports" "$root/ports/dist"
 cd "$root/build/ports"
 
 case $1 in
+uacpi) # which the kernel builds in, to run the firmware's ACPI code
+	fetch https://github.com/uACPI/uACPI/archive/refs/tags 7.0.0.tar.gz \
+		4ccdb4c06d06c54116920eb861adf3a87efd3285c762e2e6f3529b52c6d20fa5
+	[ -d uACPI-7.0.0 ] || tar xf "$root/ports/dist/7.0.0.tar.gz"
+	;;
 stb) # only stb_truetype, which libgui includes
 	fetch https://raw.githubusercontent.com/nothings/stb/9600522de53973336fa033a289858a4354cbb04c stb_truetype.h \
 		428cfe93520f2aed5e413a220b0db5bba5b17e2ebe5a64e4a8efa9eeeb67ec5f
