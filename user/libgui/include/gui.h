@@ -9,6 +9,11 @@
 // 0x00RRGGBB, like the screen's.
 
 #define GUI_SOCKET "/tmp/wm.sock"
+
+// Where the system's files are: the root on AximOS, and the built system on Linux.
+#ifndef GUI_ROOT
+#define GUI_ROOT ""
+#endif
 #define GUI_TITLE_MAX 64
 #define GUI_PATH_MAX 1024
 
@@ -270,7 +275,7 @@ const char *gui_app_for(const char *path);
 
 // Apps are in /system/bin/gui, or a folder in it, as the start menu shows them.
 // Finds one by name, returning false if there's none.
-#define GUI_APPS "/system/bin/gui"
+#define GUI_APPS GUI_ROOT "/system/bin/gui"
 bool gui_app_path(const char *name, char path[GUI_PATH_MAX]);
 
 // Every app's name, sorted, up to max, returning how many there are.
@@ -280,7 +285,7 @@ int gui_app_names(char (*names)[32], int max);
 bool gui_is_program(const char *path);
 
 // Files opened lately, newest first, a path to a line in GUI_RECENT.
-#define GUI_RECENT "/system/etc/recent"
+#define GUI_RECENT GUI_ROOT "/system/etc/recent"
 #define GUI_RECENT_MAX 20
 void gui_recent_add(const char *path);
 int gui_recent_list(char (*paths)[GUI_PATH_MAX], int max);
@@ -288,8 +293,8 @@ void gui_recent_clear(void);
 
 // The trash is GUI_TRASH, where each thing has a random name, with what it was
 // called and where it was in GUI_TRASH_DB, a line each: the name, a tab, the path.
-#define GUI_TRASH "/trash"
-#define GUI_TRASH_DB "/system/etc/trash.db"
+#define GUI_TRASH GUI_ROOT "/trash"
+#define GUI_TRASH_DB GUI_ROOT "/system/etc/trash.db"
 
 // Moves a file, or a folder and all in it, to the trash.
 bool gui_trash(const char *path);
@@ -322,7 +327,7 @@ const struct gui_screen *gui_screen(void);
 
 // The wallpaper, an image's path or "none", kept in /system/etc/wallpaper, and the
 // ones that come with the system.
-#define GUI_WALLPAPERS "/system/share/wallpapers"
+#define GUI_WALLPAPERS GUI_ROOT "/system/share/wallpapers"
 void gui_wallpaper_get(char path[GUI_PATH_MAX]);
 bool gui_wallpaper_set(const char *path);
 

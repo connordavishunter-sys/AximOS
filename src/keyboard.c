@@ -1,6 +1,7 @@
 #include <errno_values.h>
 #include <io.h>
 #include <key_event.h>
+#include <key_text.h>
 #include <irq.h>
 #include <keyboard.h>
 #include <mouse.h>
@@ -38,25 +39,6 @@
 #define BUFFER_SIZE 4096
 #define EVENT_COUNT 256
 #define CTRL_C 0x03
-
-// Scancode set 1. The keypad acts as if num lock were always on.
-static const char keymap[] = {
-    0,    0x1B, '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', 0x7F, '\t',
-    'q',  'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '[', ']', '\r', 0,  'a',  's',
-    'd',  'f', 'g', 'h', 'j', 'k', 'l', ';', '\'', '`', 0,  '\\', 'z', 'x', 'c',  'v',
-    'b',  'n', 'm', ',', '.', '/', 0,   '*', 0,   ' ', 0,   0,   0,   0,   0,    0,
-    0,    0,   0,   0,   0,   0,   0,   '7', '8', '9', '-', '4', '5', '6', '+',  '1',
-    '2',  '3', '0', '.',
-};
-
-static const char keymap_shift[] = {
-    0,    0x1B, '!', '@', '#', '$', '%', '^', '&', '*', '(', ')', '_', '+', 0x7F, '\t',
-    'Q',  'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P', '{', '}', '\r', 0,  'A',  'S',
-    'D',  'F', 'G', 'H', 'J', 'K', 'L', ':', '"', '~', 0,   '|', 'Z', 'X', 'C',  'V',
-    'B',  'N', 'M', '<', '>', '?', 0,   '*', 0,   ' ', 0,   0,   0,   0,   0,    0,
-    0,    0,   0,   0,   0,   0,   0,   '7', '8', '9', '-', '4', '5', '6', '+',  '1',
-    '2',  '3', '0', '.',
-};
 
 static char buffer[BUFFER_SIZE];
 static size_t head;
@@ -169,25 +151,6 @@ static void update_modifiers(uint16_t code, bool pressed) {
     modifiers = pressed ? modifiers | bit : modifiers & ~bit;
 }
 
-// The character a key types with the modifiers held now, or 0.
-static char key_text(uint16_t code) {
-    if (code == KEY_EXTENDED + KEY_ENTER)
-        return '\r';
-    if (code == (KEY_EXTENDED | 0x35))
-        return '/';
-    if (code >= sizeof(keymap))
-        return 0;
-
-    char c = modifiers & KEY_MOD_SHIFT ? keymap_shift[code] : keymap[code];
-    bool letter = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
-
-    if (letter && (modifiers & KEY_MOD_CAPS_LOCK))
-        c ^= 0x20;
-    if (letter && (modifiers & KEY_MOD_CTRL))
-        c &= 0x1F;
-    return c;
-}
-
 // What the console gets for keys that type nothing themselves.
 static const char *key_sequence(uint16_t code) {
     switch (code) {
@@ -211,7 +174,7 @@ static const char *key_sequence(uint16_t code) {
 
 static void to_console(uint16_t code) {
     const char *sequence = key_sequence(code);
-    char c = key_text(code);
+    char c = key_event_text(code, modifiers);
 
     if (sequence) {
         push(sequence, strlen(sequence));
@@ -236,7 +199,7 @@ static void deliver(uint16_t code, bool pressed) {
     if (events_open) {
         if (events_count < EVENT_COUNT) {
             events[(events_head + events_count++) % EVENT_COUNT] = (struct key_event){
-                .code = code, .pressed = pressed, .modifiers = modifiers, .text = pressed ? key_text(code) : 0,
+                .code = code, .pressed = pressed, .modifiers = modifiers, .text = pressed ? key_event_text(code, modifiers) : 0,
             };
             process_wakeup(events);
         }

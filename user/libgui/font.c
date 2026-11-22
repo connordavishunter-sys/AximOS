@@ -13,8 +13,8 @@
 // what's laid out in columns stays as it is, and only a font whose characters are
 // all as wide will do for it. DejaVu Sans is for everything else, each character
 // as wide as it is. Without a font, the bitmap one is used.
-#define MONO_FONT "/system/share/fonts/mono.ttf"
-#define SANS_FONT "/system/share/fonts/DejaVuSans.ttf"
+#define MONO_FONT GUI_ROOT "/system/share/fonts/mono.ttf"
+#define SANS_FONT GUI_ROOT "/system/share/fonts/DejaVuSans.ttf"
 #define SANS_EM 13 // pixels to its em, which makes it look the size of the monospaced one
 #define MAX_FONT (4 * 1024 * 1024)
 #define MAX_SCALE 4

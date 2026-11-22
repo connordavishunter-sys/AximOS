@@ -117,6 +117,7 @@ AximOS builds on Linux. You need:
 - QEMU (`qemu-system-x86_64`) and OVMF, its UEFI firmware (`/usr/share/edk2/x64/OVMF.4m.fd`), to run it
 - Python 3 with Pillow and NumPy for the tests
 - `gperf`, `flex`, `bison` and `pkg-config` to build NetSurf
+- `sdl2`, only for `make linux`
 
 On Arch or CachyOS:
 
@@ -149,6 +150,7 @@ make run
 | `make run-usb`     | The same, with the ISO on a USB stick instead of a CD |
 | `make build-run`   | Rebuild what changed, then run                     |
 | `make debug`       | Also build `build/aximos-debug.iso`, which boots to the shell instead of the desktop |
+| `make linux`       | Build the calculator, Snake, the editor and Paint for Linux, in `build/linux`, through SDL2 |
 | `make test`        | Run the tests                                      |
 | `make clean`       | Delete everything built                            |
 

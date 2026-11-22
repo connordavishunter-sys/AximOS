@@ -177,7 +177,7 @@ void gui_draw_image(struct gui_canvas *canvas, int x, int y, const struct gui_im
     }
 }
 
-#define ICONS "/system/share/icons"
+#define ICONS GUI_ROOT "/system/share/icons"
 #define MAX_ICONS 16
 
 const struct gui_image *gui_icon(const char *name) {

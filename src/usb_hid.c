@@ -1,4 +1,5 @@
 #include <key_event.h>
+#include <key_usage.h>
 #include <keyboard.h>
 #include <kmalloc.h>
 #include <mouse.h>
@@ -29,22 +30,6 @@
 #define KEYS 6
 #define ROLLOVER 0x01 // in every key's place when too many are held
 
-#define E(code) (KEY_EXTENDED | (code))
-
-// From the HID usage of each key to scancode set 1.
-static const uint16_t usage_keys[] = {
-    [0x04] = 0x1E, 0x30, 0x2E, 0x20, 0x12, 0x21, 0x22, 0x23, 0x17, 0x24, 0x25, 0x26, 0x32, // a to m
-    0x31, 0x18, 0x19, 0x10, 0x13, 0x1F, 0x14, 0x16, 0x2F, 0x11, 0x2D, 0x15, 0x2C,          // n to z
-    0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B,                            // 1 to 0
-    KEY_ENTER, KEY_ESCAPE, KEY_BACKSPACE, KEY_TAB, KEY_SPACE, 0x0C, 0x0D, 0x1A, 0x1B,     // to ]
-    0x2B, 0x2B, 0x27, 0x28, 0x29, 0x33, 0x34, 0x35, KEY_CAPS_LOCK,                         // \ to caps lock
-    0x3B, 0x3C, 0x3D, 0x3E, 0x3F, 0x40, 0x41, 0x42, 0x43, 0x44, KEY_F11, KEY_F12,          // F1 to F12
-    KEY_PRINT_SCREEN, 0x46, 0, KEY_INSERT, KEY_HOME, KEY_PAGE_UP, KEY_DELETE, KEY_END,     // to end
-    KEY_PAGE_DOWN, KEY_RIGHT, KEY_LEFT, KEY_DOWN, KEY_UP,                                  // to up
-    0x45, E(0x35), 0x37, 0x4A, 0x4E, E(0x1C), 0x4F, 0x50, 0x51, 0x4B, 0x4C, 0x4D,          // keypad
-    0x47, 0x48, 0x49, 0x52, 0x53, 0x56, E(0x5D),                                           // to menu
-};
-
 // The modifier byte's bits, in order.
 static const uint16_t modifier_keys[8] = {
     KEY_LEFT_CTRL, KEY_LEFT_SHIFT, KEY_LEFT_ALT, KEY_LEFT_SUPER,
@@ -57,7 +42,7 @@ struct keyboard {
 };
 
 static void send_key(uint8_t usage, uint8_t modifiers, bool pressed) {
-    uint16_t code = usage < sizeof(usage_keys) / sizeof(usage_keys[0]) ? usage_keys[usage] : 0;
+    uint16_t code = usage < sizeof(key_usages) / sizeof(key_usages[0]) ? key_usages[usage] : 0;
 
     // As a PS/2 keyboard sends it, which is what takes a window's picture.
     if (code == KEY_PRINT_SCREEN && modifiers & 0x44)

@@ -4,7 +4,9 @@
 #include <dlfcn.h>
 #include <stdlib.h>
 
+#ifndef LIBWEBP // which Linux builds name as their own
 #define LIBWEBP "/system/lib/libwebp.so"
+#endif
 
 bool webp_decode(const uint8_t *data, size_t size, struct gui_image *image) {
     static uint8_t *(*decode)(const uint8_t *, size_t, int *, int *); // WebPDecodeBGRA

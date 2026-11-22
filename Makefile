@@ -131,7 +131,7 @@ QEMU_Q35 := $(QEMU_BASE) -M q35 -drive file=$(DISK),format=raw,if=none,id=disk \
 INSTALL_DISK := $(BUILD)/install.img
 INSTALL_DISK_MB := 2048
 
-.PHONY: all debug help built run run-ide run-installer run-usb build-run test clean
+.PHONY: all debug linux help built run run-ide run-installer run-usb build-run test clean
 
 # A recipe that fails leaves nothing behind that looks up to date.
 .DELETE_ON_ERROR:
@@ -336,6 +336,24 @@ $(DEBUG_ISO): $(ISO)
 	touch $(BUILD)/iso_debug/system/etc/debug
 	$(call make_iso,$(BUILD)/iso_debug)
 
+# Apps built for Linux, with libgui showing their windows through SDL2. They use the
+# built system's fonts, icons and settings, as on AximOS.
+LINUX := $(BUILD)/linux
+LINUX_APPS := calculator snake editor paint
+LINUX_GUI := $(filter-out user/libgui/gui.c,$(wildcard user/libgui/*.c)) linux/gui_sdl.c
+LINUX_CFLAGS := -std=gnu23 -O2 -g -Wall -Wextra -Wno-format-truncation -D_GNU_SOURCE -DGUI_ROOT='"$(abspath $(SYSTEM))"' \
+	-DLIBWEBP='"libwebp.so.7"' -include linux/compat.h -Iuser/libgui/include -idirafter abi -isystem ports/dist \
+	$(shell pkg-config --cflags sdl2 2>/dev/null)
+
+linux: $(LINUX_APPS:%=$(LINUX)/%) $(SYSTEM)
+
+$(LINUX)/%.o: %.c ports/dist/stb_truetype.h
+	@mkdir -p $(@D)
+	$(CC) $(LINUX_CFLAGS) -MMD -MP -c $< -o $@
+
+$(LINUX_APPS:%=$(LINUX)/%): $(LINUX)/%: $$(addprefix $(LINUX)/,$$(subst .c,.o,$$(wildcard user/$$*/*.c) $(LINUX_GUI)))
+	$(CC) $^ -lm $(shell pkg-config --libs sdl2 2>/dev/null) -o $@
+
 # These run what's already built. make build-run rebuilds what changed first.
 built:
 	@test -f $(ISO) -a -f $(DISK) || { echo "Nothing built yet: run make first"; exit 1; }
@@ -382,4 +400,4 @@ help:
 clean:
 	rm -rf $(BUILD)
 
--include $(OBJS:.o=.d) $(UACPI_OBJS:.o=.d) $(LIBC_OBJS:.o=.d) $(LIBGUI_SO_OBJS:.o=.d) $(PROGRAM_OBJS:.o=.d) $(CRT0:.o=.d)
+-include $(OBJS:.o=.d) $(UACPI_OBJS:.o=.d) $(LIBC_OBJS:.o=.d) $(LIBGUI_SO_OBJS:.o=.d) $(PROGRAM_OBJS:.o=.d) $(CRT0:.o=.d) $(wildcard $(LINUX)/*/*.d $(LINUX)/*/*/*.d)

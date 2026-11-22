@@ -35,8 +35,8 @@
 //
 // Anything missing or not understood is left as it is by default.
 
-#define SETTINGS "/system/etc/gui.conf"
-#define WALLPAPER "/system/etc/wallpaper"
+#define SETTINGS GUI_ROOT "/system/etc/gui.conf"
+#define WALLPAPER GUI_ROOT "/system/etc/wallpaper"
 #define DEFAULT_WALLPAPER GUI_WALLPAPERS "/default.jpg"
 
 const char *const gui_accent_names[GUI_ACCENTS] = {"Blue", "Red", "Green", "Purple", "Pink", "Orange", "Yellow",
@@ -256,9 +256,9 @@ bool gui_is_program(const char *path) {
 
 // Time zones are set as tz sets them: the zone's rules copied to LOCALTIME, and its
 // name kept in ZONE_NAME.
-#define ZONES "/system/share/zoneinfo"
-#define LOCALTIME "/system/etc/localtime"
-#define ZONE_NAME "/system/etc/timezone"
+#define ZONES GUI_ROOT "/system/share/zoneinfo"
+#define LOCALTIME GUI_ROOT "/system/etc/localtime"
+#define ZONE_NAME GUI_ROOT "/system/etc/timezone"
 
 static void collect_zones(const char *relative, char ***names, int *count, int *room) {
     char path[GUI_PATH_MAX];
