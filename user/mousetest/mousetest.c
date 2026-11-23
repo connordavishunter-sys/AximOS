@@ -1,3 +1,4 @@
+#include <aximos.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <mouse_event.h>

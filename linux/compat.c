@@ -2,15 +2,7 @@
 #include <ifaddrs.h>
 #include <net/if.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
-
-void help_option(int argc, char **argv, const char *text) {
-    if (argc > 1 && strcmp(argv[1], "-h") == 0) {
-        fputs(text, stdout);
-        exit(0);
-    }
-}
 
 int net_info(struct net_info *out) {
     struct ifaddrs *list;

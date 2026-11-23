@@ -13,8 +13,8 @@ AximOS used to have a kernel of its own as well, which is kept at the `kernel-fi
 AximOS is moving onto Linux, a phase at a time:
 
 1. **Booting to a shell** (done): Linux, glibc, AximOS's init and dash, in QEMU
-2. **The command line**: AximOS's own tools ported to glibc, and the system tools written,
-   with eudev for devices
+2. **The command line** (done): AximOS's own tools ported to glibc, the system tools
+   written, accounts, and eudev for devices
 3. **The desktop**: wm on DRM behind its log-in screen, through seatd, and the apps
 4. **Real hardware**: an install image, the full kernel, firmware, and the Lenovo laptop
 5. **Network and sound**: an AximOS DHCP daemon, iwd for Wi-Fi, and an ALSA mixer
@@ -24,6 +24,29 @@ The desktop and apps below are what's being brought over. They already run on a 
 desktop through `make linux`.
 
 ## Features
+
+### System
+
+- Linux 7.3, with glibc 2.44 built for AximOS, booted by [Limine](https://limine-bootloader.org)
+- AximOS's own init, which mounts what Linux shares, starts the services in
+  `/system/etc/services`, one file each, restarting those that ask, and keeps a login on the
+  screen and the serial port
+- eudev for device files and their permissions, which loads drivers for new devices through
+  AximOS's own `modprobe`
+- Accounts in `/etc/passwd` and `/etc/shadow`, hashed with yescrypt. The first boot makes
+  the first account, which is in the `admin` group and can run commands as root with `sudo`
+
+### Command line
+
+`dash`, with AximOS's line editor: the arrow keys, Home and End, Tab completion, Ctrl+W
+and Ctrl+arrows edit the line, and Ctrl+R searches the history, which is kept in `~/.history`.
+
+AximOS's own tools: `ls cat cp mv rm mkdir rmdir touch rename ln chmod chown stat find grep
+sort head tail wc more du df free ps top kill date tz sleep env echo clear text axfetch`,
+system tools `mount umount dmesg uname hostname sync lsmod insmod rmmod modprobe`, accounts
+with `id whoami passwd useradd sudo`, `disk` (lists drives, partitions them with GPT, and
+formats them as ext4 or FAT32), and `host nc ping`. Run any of them with `--help`. ext4 is
+made and checked by [e2fsprogs](https://e2fsprogs.sourceforge.net)' `mkfs.ext4` and `e2fsck`.
 
 ### Desktop
 
@@ -107,10 +130,11 @@ Then:
 make
 ```
 
-This builds `build/aximos.iso`. The first build downloads the source of Linux, glibc and
-dash into `ports/dist` and checks their SHA-256 sums, then builds glibc into `build/root`,
-which holds the system's files, and Linux and the system against it. That takes a few
-minutes; after that only what changed is built again.
+This builds `build/aximos.iso`. The first build downloads the source of Linux, glibc,
+dash, libxcrypt, util-linux, e2fsprogs and eudev into `ports/dist` and checks their SHA-256
+sums, then builds glibc into `build/root`, which holds the system's files, and Linux and
+the system against it. That takes a few minutes; after that only what changed is built
+again.
 
 | Target        | What it does                                                    |
 |---------------|-----------------------------------------------------------------|
@@ -158,8 +182,9 @@ console back. The apps also run by themselves, in windows of their own, from
 make test
 ```
 
-Each `tests/*_test.py` boots its own QEMU, types into the shell on the serial port, and
-checks what happens. Several run at once, the slowest first; `make test JOBS=2` runs
+Each `tests/*_test.py` boots its own QEMU, makes the first account and logs in on the
+serial port, types into the shell, and checks what happens. `utils_test.py` runs the
+same commands with the host's GNU tools and compares. Several run at once, the slowest first; `make test JOBS=2` runs
 fewer, and `make test TESTS="tests/boot_test.py"` runs just the ones named. The tests in
 `tests/pending` are for the desktop and apps, from before the move to Linux, and come
 back as those do.
@@ -168,9 +193,11 @@ back as those do.
 
 ```
 kernel/          how Linux is configured, and what the initramfs has besides the system
-ports/           downloads and builds Linux, glibc and dash, into build/root
+ports/           downloads and builds Linux, glibc, dash, libxcrypt, util-linux's libraries,
+                 e2fsprogs and eudev, into build/root
 abi/             structures wm, libgui and the apps share, such as key and mouse events
 user/init/       the first program Linux runs
+user/libaximos/  what AximOS's programs share beyond glibc: the line editor, accounts, /proc
 user/libgui/     the GUI toolkit
 user/libaudio/   reading and writing sound files, through user/codecs/
 user/wm/         the window manager
@@ -188,5 +215,7 @@ programs expect, link into it.
 
 AximOS uses [Linux](https://kernel.org), [glibc](https://www.gnu.org/software/libc/),
 [Limine](https://github.com/limine-bootloader/limine), [dash](http://gondor.apana.org.au/~herbert/dash/),
+[libxcrypt](https://github.com/besser82/libxcrypt), [util-linux](https://github.com/util-linux/util-linux)'s
+libblkid and libuuid, [e2fsprogs](https://e2fsprogs.sourceforge.net), [eudev](https://github.com/eudev-project/eudev),
 [stb_truetype](https://github.com/nothings/stb) and the [DejaVu](https://dejavu-fonts.github.io) fonts.
 Each is under its own license.

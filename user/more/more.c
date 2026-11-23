@@ -1,3 +1,4 @@
+#include <aximos.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <string.h>
@@ -62,6 +63,7 @@ static bool prompt_user(uint64_t offset, uint32_t size) {
         printf("--More--(%d%%)", (int)(offset * 100 / size));
     else
         printf("--More--");
+    fflush(stdout);
 
     for (;;) {
         char key;

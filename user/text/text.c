@@ -1,4 +1,6 @@
+#include <aximos.h>
 #include <errno.h>
+#include <limits.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <poll.h>
@@ -9,7 +11,7 @@
 #include <termios.h>
 #include <unistd.h>
 
-#define CTRL(c) ((c) & 0x1F)
+#define CONTROL(c) ((c) & 0x1F)
 #define TAB_WIDTH 8
 #define HELP "ctrl-s to save, ctrl-q to exit"
 #define MESSAGE_SIZE (PATH_MAX + 64)
@@ -297,7 +299,7 @@ static bool prompt_for_name(char *name, size_t size) {
 
         if (key == '\n' && len > 0) {
             accepted = done = true;
-        } else if (key == CTRL('q') || key == KEY_EOF) {
+        } else if (key == CONTROL('q') || key == KEY_EOF) {
             done = true;
         } else if ((key == 0x7F || key == '\b') && len > 0) {
             len--;
@@ -450,13 +452,13 @@ static bool handle_key(int key) {
     switch (key) {
     case KEY_EOF:
         return false;
-    case CTRL('q'):
+    case CONTROL('q'):
         if (!modified || was_warned)
             return false;
         warned = true;
         snprintf(message, sizeof(message), "unsaved changes! ctrl-q again to exit without saving");
         break;
-    case CTRL('s'):
+    case CONTROL('s'):
         save();
         break;
     case KEY_UP:

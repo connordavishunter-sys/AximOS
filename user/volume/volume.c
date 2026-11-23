@@ -1,3 +1,4 @@
+#include <aximos.h>
 #include <audio_types.h>
 #include <fcntl.h>
 #include <stdio.h>

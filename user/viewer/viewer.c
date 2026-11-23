@@ -1,3 +1,4 @@
+#include <aximos.h>
 #include <dirent.h>
 #include <gui.h>
 #include <stdio.h>

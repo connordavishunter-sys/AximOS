@@ -1,3 +1,5 @@
+#include <dirent.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <stdio.h>
@@ -8,18 +10,38 @@
 #include <sys/reboot.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
-// The first program Linux runs. It mounts what the kernel shares through files, runs
-// the shell on the console, and collects every orphan. SIGUSR2 turns the computer off
-// and SIGTERM restarts it, as busybox's init does, and Ctrl+Alt+Del sends SIGINT.
+// The first program Linux runs. It mounts what the kernel shares through files,
+// starts the services in SERVICES, and keeps a login on the screen's first console
+// and on the serial port, if there's one. SIGUSR2 turns the computer off and SIGTERM
+// restarts it, as busybox's init does, and Ctrl+Alt+Del sends SIGINT.
+//
+// Each service is a file of lines: "command" and what to run, "after" and services
+// that start first, and "once" for one that runs to the end before those after it
+// start, or "restart" for one that's started again if it stops.
 
+#define SERVICES "/system/etc/services"
+#define LOGIN_PATH "/system/bin/ttylogin"
 #define SHELL_PATH "/system/bin/dash"
-#define TTYLOGIN_PATH "/system/bin/ttylogin"
-#define EXEC_FAILED 127
+#define MAX_SERVICES 64
+#define MAX_TEXT 512
 #define STOP_WAIT_US 2000000 // for programs to finish before they're made to
+#define TOO_SOON 5           // seconds: one that stops sooner than this...
+#define GIVE_UP 5            // ...this many times running isn't started again
 
-static char *const env[] = {"PATH=/system/bin", "HOME=/root", "SHELL=" SHELL_PATH, "TERM=linux", "PS1=$PWD# ", NULL};
+struct service {
+    char name[64], command[MAX_TEXT], after[MAX_TEXT], console[32];
+    bool once, restart, started;
+    pid_t pid;
+    time_t since;
+    int quick_stops;
+};
+
+static char *const env[] = {"PATH=/system/bin", "HOME=/root", "SHELL=" SHELL_PATH, "TERM=linux", NULL};
+static struct service services[MAX_SERVICES];
+static int count;
 static volatile sig_atomic_t stop; // how the computer should stop, once asked
 
 static void mount_all(void) {
@@ -35,48 +57,187 @@ static void mount_all(void) {
     }
 }
 
-// The terminal the kernel writes its messages to last, which is the one on the
-// command line's last console=, so the shell's where those are.
-static void open_console(char *path, size_t size) {
-    char names[128] = "console";
-    FILE *f = fopen("/sys/class/tty/console/active", "r");
+// The first line of a small file, or "" without it.
+static void read_line(const char *path, char *out, size_t size) {
+    FILE *f = fopen(path, "r");
 
-    if (f) {
-        if (!fgets(names, sizeof(names), f))
-            strcpy(names, "console");
+    out[0] = '\0';
+    if (f && fgets(out, size, f))
+        out[strcspn(out, "\n")] = '\0';
+    if (f)
         fclose(f);
-    }
-    names[strcspn(names, "\n")] = '\0';
-    snprintf(path, size, "/dev/%s", strrchr(names, ' ') ? strrchr(names, ' ') + 1 : names);
 }
 
-// Runs a program in a session of its own, with the console for its terminal, and
-// waits for it, collecting any orphans meanwhile.
-static int run(const char *path, const char *console) {
-    pid_t child = fork();
-    int status;
+static void write_line(const char *path, const char *text) {
+    FILE *f = fopen(path, "w");
 
-    if (child == 0) {
-        int fd = open(console, O_RDWR);
+    if (f) {
+        fputs(text, f);
+        fclose(f);
+    }
+}
 
-        setsid();
-        if (fd >= 0) {
-            ioctl(fd, TIOCSCTTY, 0);
-            dup2(fd, 0), dup2(fd, 1), dup2(fd, 2);
-            if (fd > 2)
-                close(fd);
+static void set_up(void) {
+    char name[64];
+
+    read_line("/etc/hostname", name, sizeof(name));
+    sethostname(name[0] ? name : "aximos", strlen(name[0] ? name : "aximos"));
+    write_line("/proc/sys/net/ipv4/ping_group_range", "0 2147483647"); // ping for everyone
+}
+
+static void add_service(const char *name, const char *path) {
+    FILE *f = fopen(path, "r");
+    char line[MAX_TEXT + 16];
+    struct service *s = &services[count];
+
+    if (!f || count == MAX_SERVICES)
+        return;
+    *s = (struct service){0};
+    snprintf(s->name, sizeof(s->name), "%s", name);
+    while (fgets(line, sizeof(line), f)) {
+        char *value = line + strcspn(line, " \t\n");
+
+        value += strspn(value, " \t");
+        value[strcspn(value, "\n")] = '\0';
+        if (!strncmp(line, "command", 7))
+            snprintf(s->command, sizeof(s->command), "%s", value);
+        else if (!strncmp(line, "after", 5))
+            snprintf(s->after, sizeof(s->after), "%s", value);
+        s->once |= !strncmp(line, "once", 4);
+        s->restart |= !strncmp(line, "restart", 7);
+    }
+    fclose(f);
+    count += s->command[0] != '\0';
+}
+
+// A login on each console there is: the screen's first, and the serial port, which
+// is there only if the kernel found one on it.
+static void add_console(const char *tty) {
+    char path[64], type[16] = "1";
+    struct service *s = &services[count];
+
+    snprintf(path, sizeof(path), "/sys/class/tty/%s/type", tty);
+    if (strncmp(tty, "ttyS", 4) == 0)
+        read_line(path, type, sizeof(type));
+    if (atoi(type) == 0 || count == MAX_SERVICES)
+        return;
+    *s = (struct service){.restart = true};
+    snprintf(s->name, sizeof(s->name), "login on %s", tty);
+    snprintf(s->command, sizeof(s->command), "%s", access(LOGIN_PATH, X_OK) == 0 ? LOGIN_PATH : SHELL_PATH);
+    snprintf(s->console, sizeof(s->console), "/dev/%s", tty);
+    count++;
+}
+
+static void read_services(void) {
+    DIR *dir = opendir(SERVICES);
+    struct dirent *e;
+    char path[300];
+
+    while (dir && (e = readdir(dir))) {
+        if (e->d_name[0] != '.') {
+            snprintf(path, sizeof(path), SERVICES "/%s", e->d_name);
+            add_service(e->d_name, path);
         }
-        execve(path, (char *const[]){(char *)path, NULL}, env);
-        fprintf(stderr, "init: can't run %s\n", path);
-        _exit(EXEC_FAILED);
     }
-    while (child > 0 && !stop) {
-        pid_t done = wait(&status);
+    if (dir)
+        closedir(dir);
+    add_console("tty1");
+    add_console("ttyS0");
+}
 
-        if (done == child)
-            return status;
+// A login runs in a session of its own, with its console as its terminal. Services
+// get /dev/null, and write to the kernel's console.
+static pid_t start(struct service *s) {
+    pid_t pid = fork();
+
+    if (pid == 0) {
+        int in = open(s->console[0] ? s->console : "/dev/null", O_RDWR), out = s->console[0] ? in : open("/dev/console", O_WRONLY);
+        sigset_t none;
+
+        sigemptyset(&none);
+        sigprocmask(SIG_SETMASK, &none, NULL);
+        setsid();
+        if (s->console[0])
+            ioctl(in, TIOCSCTTY, 0);
+        dup2(in, 0), dup2(out, 1), dup2(out, 2);
+        if (in > 2)
+            close(in);
+        if (out > 2 && out != in)
+            close(out);
+        execve("/system/bin/sh", (char *const[]){"sh", "-c", s->command, NULL}, env);
+        _exit(127);
     }
-    return child > 0 ? 0 : EXEC_FAILED << 8;
+    s->pid = pid;
+    s->since = time(NULL);
+    s->started = true;
+    return pid;
+}
+
+static struct service *find(const char *name) {
+    for (int i = 0; i < count; i++) {
+        if (!strcmp(services[i].name, name))
+            return &services[i];
+    }
+    return NULL;
+}
+
+// Whether those it comes after have started, and the ones run once have finished.
+// Logins come after every service that's run once, as those set the system up.
+static bool ready(const struct service *s) {
+    char after[MAX_TEXT];
+
+    for (int i = 0; s->console[0] && i < count; i++) {
+        if (services[i].once && (!services[i].started || services[i].pid))
+            return false;
+    }
+
+    snprintf(after, sizeof(after), "%s", s->after);
+    for (char *name = strtok(after, " "); name; name = strtok(NULL, " ")) {
+        struct service *before = find(name);
+
+        if (before && (!before->started || (before->once && before->pid)))
+            return false;
+    }
+    return true;
+}
+
+static struct service *of(pid_t pid) {
+    for (int i = 0; i < count; i++) {
+        if (services[i].pid == pid)
+            return &services[i];
+    }
+    return NULL;
+}
+
+// Starts what's ready, then waits for something to stop, until there's nothing left
+// to start and the computer's asked to stop.
+static void run(void) {
+    while (!stop) {
+        for (int i = 0; i < count; i++) {
+            if (!services[i].started && ready(&services[i]))
+                start(&services[i]);
+        }
+
+        int status;
+        pid_t pid = wait(&status);
+        struct service *s = pid > 0 ? of(pid) : NULL;
+
+        if (pid < 0 && errno == ECHILD)
+            pause(); // nothing running, until asked to stop
+
+        if (!s)
+            continue; // an orphan, or a signal
+        s->pid = 0;
+        if (s->once && (!WIFEXITED(status) || WEXITSTATUS(status)))
+            fprintf(stderr, "init: %s failed\n", s->name);
+        if (!s->restart || stop)
+            continue;
+        s->quick_stops = time(NULL) - s->since < TOO_SOON ? s->quick_stops + 1 : 0;
+        if (s->quick_stops < GIVE_UP)
+            start(s);
+        else
+            fprintf(stderr, "init: %s keeps stopping, so it's left stopped\n", s->name);
+    }
 }
 
 static void asked(int signal) {
@@ -94,28 +255,18 @@ static void shut_down(void) {
 }
 
 int main(void) {
-    char console[64];
-    int sigs[] = {SIGTERM, SIGUSR2, SIGINT};
+    int signals[] = {SIGTERM, SIGUSR2, SIGINT};
 
     if (getpid() != 1) {
         fprintf(stderr, "init: only runs as the first program\n");
         return 1;
     }
-    for (size_t i = 0; i < sizeof(sigs) / sizeof(sigs[0]); i++)
-        sigaction(sigs[i], &(struct sigaction){.sa_handler = asked}, NULL); // no SA_RESTART, so wait stops
+    for (size_t i = 0; i < sizeof(signals) / sizeof(signals[0]); i++)
+        sigaction(signals[i], &(struct sigaction){.sa_handler = asked}, NULL); // no SA_RESTART, so wait stops
     reboot(RB_DISABLE_CAD); // Ctrl+Alt+Del comes here as SIGINT
     mount_all();
-    sethostname("aximos", 6);
-    open_console(console, sizeof(console));
-
-    // ttylogin once it's there, and the shell without it, again each time it ends.
-    while (!stop) {
-        int status = run(access(TTYLOGIN_PATH, X_OK) == 0 ? TTYLOGIN_PATH : SHELL_PATH, console);
-
-        if (!stop && WIFEXITED(status) && WEXITSTATUS(status) == EXEC_FAILED) {
-            fprintf(stderr, "init: nothing to run, so stopping\n");
-            stop = SIGUSR2;
-        }
-    }
+    set_up();
+    read_services();
+    run();
     shut_down();
 }

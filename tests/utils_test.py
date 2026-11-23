@@ -1,6 +1,7 @@
-"""Runs each line of utils_cases.txt on AximOS and on the host's GNU tools and compares."""
+"""Runs each line of utils_cases.txt on AximOS and on the host's GNU tools and compares.
+The files go in on a FAT drive, made by mtools, which the output comes back out on."""
 import os, random, re, subprocess
-from vm import VM, WORK, check, disk_copy, finish, get, put
+from vm import VM, WORK, check, finish
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -45,16 +46,18 @@ make_corpus(guest_dir)
 host = subprocess.run(['sh', '-c', script], cwd=host_dir, capture_output=True, text=True, errors='replace',
                       env=dict(os.environ, LC_ALL='C')).stdout
 
-img = disk_copy('utils')
-put(img, guest_dir, '/home/c')
+drive = WORK + '/files.img'
 open(WORK + '/t.sh', 'w').write(script)
-put(img, WORK + '/t.sh', '/home/t.sh')
-v = VM(disk=img)
-check('prompt at boot', v.wait('/$ ', 30), v.text())
-v.type('cd /home/c; dash /home/t.sh > /home/out 2>/dev/null; shutdown\n')
-check('script finishes and powers off', v.exited(240), v.text()[-300:])
+subprocess.run(['mkfs.fat', '-C', drive, str(32 * 1024)], check=True, capture_output=True)
+subprocess.run(['mcopy', '-s', '-i', drive, guest_dir, WORK + '/t.sh', '::/'], check=True)
+v = VM(extra=['-drive', f'file={drive},format=raw,if=none,id=files', '-device', 'ide-hd,drive=files,bus=ide.1'])
+v.login()
+v.sudo('mount -o uid=1000,gid=100 /dev/sda /mnt')
+v.type('cd /mnt/c; dash /mnt/t.sh > /mnt/out 2>/dev/null; cd; sync; echo DONE\n')
+check('the script finishes', v.wait('DONE\n', 240), v.text()[-300:])
+v.sudo('umount /mnt')
 v.close()
-get(img, '/home/out', WORK + '/out')
+subprocess.run(['mcopy', '-o', '-i', drive, '::/out', WORK + '/out'], check=True)
 
 ours, theirs = by_case(open(WORK + '/out', errors='replace').read()), by_case(host)
 for i, c in enumerate(cases):

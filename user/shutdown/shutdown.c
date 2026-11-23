@@ -1,12 +1,14 @@
+#include <aximos.h>
+#include <signal.h>
 #include <stdio.h>
-#include <sys/reboot.h>
-#include <unistd.h>
 
 int main(int argc, char **argv) {
     help_option(argc, argv, "usage: shutdown\n"
-                            "Turns the computer off.\n");
+                            "Turns off the computer, once init has asked every program to finish.\n");
 
-    reboot(RB_POWER_OFF);
-    printf("shutdown: failed\n");
-    return 1;
+    if (kill(1, SIGUSR2) < 0) {
+        perror("shutdown");
+        return 1;
+    }
+    return 0;
 }

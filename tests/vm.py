@@ -1,6 +1,6 @@
 """Boots AximOS in QEMU. What's typed goes to the shell on the serial port, and keys
 and the mouse go through the monitor to the keyboard and mouse."""
-import json, os, re, shutil, socket, subprocess, tempfile, threading, time
+import json, os, re, shlex, shutil, socket, subprocess, tempfile, threading, time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BUILD = ROOT + '/build'
@@ -75,6 +75,22 @@ class VM:
         self.type(line + '\n')
         time.sleep(secs)
         return self.text(at)
+
+    def login(self, name='tester', password='secret'):
+        """Makes the first account, as the first boot asks, then logs in as it."""
+        assert self.wait('Make an account', 30), self.text()
+        self.type(f'{name}\n{password}\n{password}\n')
+        assert self.wait('login: ', 10), self.text()
+        at = self.mark()
+        self.type(f'{name}\n{password}\n')
+        assert self.wait('$ ', 10, at), self.text(at)
+
+    def sudo(self, line, secs=2.0, password='secret'):
+        """Runs a command line as root, giving the password sudo asks for."""
+        at = self.mark()
+        self.type(f'sudo sh -c {shlex.quote(line)}\n')
+        assert self.wait('Password for ', 5, at), self.text(at)
+        return self.run(password, secs)
 
     def command(self, line):
         """Runs a QEMU monitor command, without waiting for it to finish."""

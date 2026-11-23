@@ -1,3 +1,4 @@
+#include <aximos.h>
 #include <ctype.h>
 #include <errno.h>
 #include <gui.h>

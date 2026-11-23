@@ -16,9 +16,18 @@ INITRAMFS := $(BUILD)/initramfs.cpio.zst
 
 # Programs are built by the host's GCC against the system's own glibc.
 TARGET_CC := gcc --sysroot=$(ROOT)
-TARGET_CFLAGS := -std=gnu23 -O2 -Wall -Wextra -Iabi
+TARGET_CFLAGS := -std=gnu23 -O2 -Wall -Wextra -Wno-format-truncation -D_GNU_SOURCE -Iabi
 
-.PHONY: all debug linux run test clean help FORCE
+# The command-line programs, each from its folder in user/, linked against
+# libaximos.so, which has what they share beyond glibc.
+TOOLS := cat clear cp date df du echo env find free grep head kill ls mkdir more mv ps reboot rename rm rmdir \
+	shutdown sleep sort stat tail text top touch tz wc counter hello host nc ping mount umount dmesg uname \
+	hostname ln chmod chown id whoami sync lsmod insmod rmmod modprobe ttylogin sudo passwd useradd disk axfetch
+LIBS_disk := -lblkid
+SETUID := sudo passwd# which start as root, whoever runs them
+LIBAXIMOS := $(ROOT)/system/lib/libaximos.so
+
+.PHONY: all debug tools linux run test clean help FORCE
 .SECONDEXPANSION:
 
 all: $(ISO)
@@ -26,17 +35,31 @@ all: $(ISO)
 # For now the same as all: the kernel with only what QEMU and the laptop need.
 debug: all
 
-# Each part of ports/build.sh, built once, after those it needs.
-$(STAMPS)/%: ports/build.sh
+# Each part of ports/build.sh, built once, after those it needs. Deleting its stamp
+# builds it again.
+$(STAMPS)/%:
 	sh ports/build.sh $*
 	@mkdir -p $(@D) && touch $@
 $(STAMPS)/linux: $(STAMPS)/skeleton
 $(STAMPS)/glibc: $(STAMPS)/linux
-$(STAMPS)/dash: $(STAMPS)/glibc
+$(STAMPS)/dash: $(STAMPS)/glibc $(LIBAXIMOS) ports/dash.patch
+$(STAMPS)/libxcrypt $(STAMPS)/util-linux: $(STAMPS)/glibc
+$(STAMPS)/e2fsprogs $(STAMPS)/eudev: $(STAMPS)/util-linux
+PORTS := dash libxcrypt util-linux e2fsprogs eudev
 
 $(ROOT)/system/bin/init: user/init/init.c $(STAMPS)/glibc
 	$(TARGET_CC) $(TARGET_CFLAGS) $< -o $@
 	ln -sfn system/bin/init $(ROOT)/init
+
+$(LIBAXIMOS): $(wildcard user/libaximos/*.c user/libaximos/include/*.h) $(STAMPS)/libxcrypt
+	cp user/libaximos/include/*.h $(ROOT)/system/include/
+	$(TARGET_CC) $(TARGET_CFLAGS) -fPIC -shared -Wl,-soname,libaximos.so $(filter %.c,$^) -lcrypt -o $@
+
+$(TOOLS:%=$(ROOT)/system/bin/%): $(ROOT)/system/bin/%: $$(wildcard user/$$*/*.c) $(LIBAXIMOS)
+	$(TARGET_CC) $(TARGET_CFLAGS) $(filter %.c,$^) -laximos $(LIBS_$*) -o $@
+	$(if $(filter $*,$(SETUID)),chmod 4755 $@)
+
+tools: $(TOOLS:%=$(ROOT)/system/bin/%)
 
 # The kernel's own make decides what needs building again.
 $(KERNEL_BUILD)/.config: kernel/debug.config $(STAMPS)/linux
@@ -49,7 +72,7 @@ $(KERNEL): $(KERNEL_BUILD)/.config FORCE
 	$(MAKE) -s -C $(LINUX_SRC) O=$(abspath $(KERNEL_BUILD)) -j$$(nproc) bzImage
 
 # Until the system has a disk of its own, all of it is the initramfs.
-$(INITRAMFS): $(ROOT)/system/bin/init $(STAMPS)/dash $(KERNEL) kernel/initramfs.list FORCE
+$(INITRAMFS): $(ROOT)/system/bin/init tools $(PORTS:%=$(STAMPS)/%) $(KERNEL) kernel/initramfs.list FORCE
 	cp -r rootfs/. $(ROOT)/
 	rsync -a --delete --exclude /system/include --exclude '*.a' --exclude '*.o' $(ROOT)/ $(IMAGE)/
 	cd $(KERNEL_BUILD) && $(abspath $(LINUX_SRC))/usr/gen_initramfs.sh -o $(abspath $(BUILD))/initramfs.cpio \
@@ -72,12 +95,12 @@ $(ISO): $(KERNEL) $(INITRAMFS) limine.conf
 # rootfs, with the apps in the start menu's folders.
 LINUX := $(BUILD)/linux
 LINUX_APPS := calculator snake editor paint
-LINUX_GUI := $(wildcard user/libgui/*.c) linux/gui_sdl.c linux/gui_switch.c linux/compat.c
+LINUX_GUI := $(wildcard user/libgui/*.c) user/libaximos/util.c linux/gui_sdl.c linux/gui_switch.c linux/compat.c
 LINUX_WM := $(filter-out user/wm/display_aximos.c,$(wildcard user/wm/*.c)) $(wildcard linux/wm_*.c) linux/evdev.c
 LINUX_LIBS := sdl2 libdrm
 LINUX_CFLAGS := -std=gnu23 -O2 -g -Wall -Wextra -Wno-format-truncation -D_GNU_SOURCE -DGUI_ROOT='"$(abspath $(LINUX))/root"' \
 	-DGUI_APPS='"$(abspath $(LINUX))/apps"' -DGUI_BIN='"/usr/bin"' -DLIBWEBP='"libwebp.so.7"' -include linux/compat.h \
-	-Iuser/libgui/include -idirafter abi -isystem ports/dist $(shell pkg-config --cflags $(LINUX_LIBS) 2>/dev/null)
+	-Iuser/libgui/include -Iuser/libaximos/include -idirafter abi -isystem ports/dist $(shell pkg-config --cflags $(LINUX_LIBS) 2>/dev/null)
 linux_objs = $(addprefix $(LINUX)/,$(subst .c,.o,$(1) $(LINUX_GUI)))
 app_dir = $(foreach f,Accessories Games,$(if $(filter $(1),$(APPS_$(f))),$(f)/))
 APPS_Accessories := calculator editor paint

@@ -1,3 +1,4 @@
+#include <aximos.h>
 #include <audio.h>
 #include <stdio.h>
 #include <stdlib.h>

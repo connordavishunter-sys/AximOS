@@ -1,14 +1,20 @@
+#include <aximos.h>
+#include <blkid/blkid.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/fs.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
-// Lists drives, partitions them with GPT, and makes FAT32 filesystems on them,
-// through /dev/disk, which takes a drive's filesystems away while it's open for
-// writing and mounts what's there when it's closed.
+// Lists drives, partitions them with GPT, and makes filesystems on them: FAT32 of
+// its own, as the firmware boots from, and ext4 through mkfs.ext4. A drive is
+// opened only if nothing has it mounted.
 
 #define SECTOR 512
 #define MAX_DISKS 16
@@ -22,14 +28,13 @@
 #define FAT_MIN_CLUSTERS 65525
 
 struct disk {
-    char name[16];
+    char name[32];
     uint64_t sectors;
     bool usable; // a disk that can be written to
-    bool busy;
 };
 
 struct partition {
-    int number;
+    char name[40];
     uint64_t first, count;
 };
 
@@ -44,25 +49,39 @@ static int fail(const char *what) {
     return 1;
 }
 
+// A number from a file in /sys, or 0.
+static uint64_t sys_number(const char *path) {
+    FILE *f = fopen(path, "r");
+    unsigned long long n = 0;
+
+    if (f) {
+        if (fscanf(f, "%llu", &n) != 1)
+            n = 0;
+        fclose(f);
+    }
+    return n;
+}
+
+// The drives Linux has, apart from those in memory, such as loop devices.
 static int disks(struct disk *out) {
-    FILE *f = fopen("/proc/disks", "r");
-    char line[128], kind[16], extra[32];
-    unsigned long long sectors;
-    unsigned size;
+    DIR *dir = opendir("/sys/block");
+    struct dirent *e;
+    char path[300];
     int n = 0;
 
-    if (!f)
-        return 0;
-    while (n < MAX_DISKS && fgets(line, sizeof(line), f)) {
-        extra[0] = '\0';
-        if (sscanf(line, "%15s %llu %u %15s %31[^\n]", out[n].name, &sectors, &size, kind, extra) < 4)
+    while (dir && n < MAX_DISKS && (e = readdir(dir))) {
+        if (e->d_name[0] == '.' || !strncmp(e->d_name, "loop", 4) || !strncmp(e->d_name, "ram", 3)
+            || !strncmp(e->d_name, "zram", 4))
             continue;
-        out[n].sectors = sectors * size / SECTOR;
-        out[n].usable = !strcmp(kind, "disk") && !strstr(extra, "read-only");
-        out[n].busy = strstr(extra, "busy");
+        snprintf(out[n].name, sizeof(out[n].name), "%s", e->d_name);
+        snprintf(path, sizeof(path), "/sys/block/%s/size", e->d_name);
+        out[n].sectors = sys_number(path);
+        snprintf(path, sizeof(path), "/sys/block/%s/ro", e->d_name);
+        out[n].usable = out[n].sectors && !sys_number(path);
         n++;
     }
-    fclose(f);
+    if (dir)
+        closedir(dir);
     return n;
 }
 
@@ -121,63 +140,77 @@ static void random_guid(uint8_t guid[16]) {
     guid[8] = (guid[8] & 0x3F) | 0x80;
 }
 
-// The partitions in a GPT, or failing that an MBR, numbered as the kernel names them.
-static int partitions(int fd, struct partition *out) {
-    static uint8_t table[GPT_TABLE_SECTORS * SECTOR];
-    uint8_t mbr[SECTOR], header[SECTOR];
+// The partitions the kernel found on a drive, in /sys/block/<drive>/<partition>.
+static int partitions(const char *drive, struct partition *out) {
+    char path[300];
+    struct dirent *e;
     int n = 0;
 
-    if (!transfer(fd, 0, mbr, 1, false) || mbr[510] != 0x55 || mbr[511] != 0xAA)
-        return 0;
-    if (mbr[446 + 4] != 0xEE) {
-        for (int i = 0; i < 4; i++) {
-            const uint8_t *e = &mbr[446 + 16 * i];
-            uint32_t first, count;
+    snprintf(path, sizeof(path), "/sys/block/%s", drive);
 
-            memcpy(&first, e + 8, 4);
-            memcpy(&count, e + 12, 4);
-            if (e[4] && count)
-                out[n++] = (struct partition){i + 1, first, count};
-        }
-        return n;
+    DIR *dir = opendir(path);
+
+    while (dir && n < MAX_PARTITIONS && (e = readdir(dir))) {
+        snprintf(path, sizeof(path), "/sys/block/%s/%s/partition", drive, e->d_name);
+        if (e->d_name[0] == '.' || access(path, F_OK))
+            continue;
+        snprintf(out[n].name, sizeof(out[n].name), "%s", e->d_name);
+        snprintf(path, sizeof(path), "/sys/block/%s/%s/start", drive, e->d_name);
+        out[n].first = sys_number(path);
+        snprintf(path, sizeof(path), "/sys/block/%s/%s/size", drive, e->d_name);
+        out[n].count = sys_number(path);
+        n++;
     }
-
-    uint64_t entries;
-    uint32_t count, size;
-
-    if (!transfer(fd, 1, header, 1, false) || memcmp(header, "EFI PART", 8))
-        return 0;
-    memcpy(&entries, header + 72, 8);
-    memcpy(&count, header + 80, 4);
-    memcpy(&size, header + 84, 4);
-    if (size != GPT_ENTRY_SIZE || count > GPT_ENTRIES || !transfer(fd, entries, table, GPT_TABLE_SECTORS, false))
-        return 0;
-    for (uint32_t i = 0; i < count && n < MAX_PARTITIONS; i++) {
-        static const uint8_t unused[16];
-        const uint8_t *e = &table[i * GPT_ENTRY_SIZE];
-        uint64_t first, last;
-
-        memcpy(&first, e + 32, 8);
-        memcpy(&last, e + 40, 8);
-        if (memcmp(e, unused, 16))
-            out[n++] = (struct partition){i + 1, first, last - first + 1};
-    }
+    if (dir)
+        closedir(dir);
     return n;
 }
 
-static void label_of(int fd, uint64_t lba, char label[12]) {
-    uint8_t boot[SECTOR];
+// What udev found on a device, which anyone can read, though only root can read
+// the device itself: lines like "E:ID_FS_TYPE=ext4" in /run/udev/data/b8:1.
+static void udev_found(const char *name, char *type, char *label, size_t size) {
+    char path[300], line[300], number[32] = "";
+    FILE *f;
 
-    label[0] = '\0';
-    if (transfer(fd, lba, boot, 1, false) && !memcmp(boot + 82, "FAT32   ", 8)) {
-        memcpy(label, boot + 71, 11);
-        for (int i = 11; i > 0 && (label[i] == '\0' || label[i] == ' '); i--)
-            label[i] = '\0';
-        if (!strcmp(label, "NO NAME"))
-            strcpy(label, "FAT32");
-    } else {
-        strcpy(label, "unformatted");
+    snprintf(path, sizeof(path), "/sys/class/block/%s/dev", name);
+    if ((f = fopen(path, "r"))) {
+        if (fgets(number, sizeof(number), f))
+            number[strcspn(number, "\n")] = '\0';
+        fclose(f);
     }
+    snprintf(path, sizeof(path), "/run/udev/data/b%s", number);
+    if (!number[0] || !(f = fopen(path, "r")))
+        return;
+    while (fgets(line, sizeof(line), f)) {
+        line[strcspn(line, "\n")] = '\0';
+        if (!strncmp(line, "E:ID_FS_TYPE=", 13))
+            snprintf(type, size, "%s", line + 13);
+        else if (!strncmp(line, "E:ID_FS_LABEL=", 14))
+            snprintf(label, size, "%s", line + 14);
+    }
+    fclose(f);
+}
+
+// What's on a drive or partition, as its type and label, as "ext4 AXIMOS".
+static void label_of(const char *name, char *out, size_t size) {
+    char path[64], type[32] = "", label[32] = "";
+    const char *found;
+
+    snprintf(path, sizeof(path), "/dev/%s", name);
+
+    blkid_probe probe = blkid_new_probe_from_filename(path);
+
+    if (probe && blkid_do_safeprobe(probe) == 0) {
+        if (blkid_probe_lookup_value(probe, "TYPE", &found, NULL) == 0)
+            snprintf(type, sizeof(type), "%s", found);
+        if (blkid_probe_lookup_value(probe, "LABEL", &found, NULL) == 0)
+            snprintf(label, sizeof(label), "%s", found);
+    } else if (!probe) {
+        udev_found(name, type, label, sizeof(type));
+    }
+    snprintf(out, size, "%s%s%s", type[0] ? type : "unformatted", label[0] ? " " : "", label);
+    if (probe)
+        blkid_free_probe(probe);
 }
 
 static void show_size(uint64_t sectors) {
@@ -189,29 +222,26 @@ static int list(void) {
     int count = disks(d);
 
     for (int i = 0; i < count; i++) {
-        char path[32], label[12];
         struct partition p[MAX_PARTITIONS];
-        int fd, n = 0;
+        char label[64];
+        int n = partitions(d[i].name, p);
 
-        printf("%-8s", d[i].name);
+        printf("%-10s", d[i].name);
         show_size(d[i].sectors);
         printf("  %s\n", d[i].usable ? "disk" : "disc or read-only");
-        snprintf(path, sizeof(path), "/dev/disk/%s", d[i].name);
-        if (!d[i].usable || (fd = open(path, O_RDONLY)) < 0)
+        if (!d[i].usable)
             continue;
-        n = partitions(fd, p);
         if (n == 0) {
-            label_of(fd, 0, label);
+            label_of(d[i].name, label, sizeof(label));
             if (strcmp(label, "unformatted"))
-                printf("  (whole) %s\n", label);
+                printf("  (whole)   %s\n", label);
         }
         for (int j = 0; j < n; j++) {
-            label_of(fd, p[j].first, label);
-            printf("  %s%-5d", d[i].name, p[j].number);
+            label_of(p[j].name, label, sizeof(label));
+            printf("  %-10s", p[j].name);
             show_size(p[j].count);
             printf("  %s\n", label);
         }
-        close(fd);
     }
     return 0;
 }
@@ -226,32 +256,25 @@ static bool confirm(const char *name) {
     return fgets(answer, sizeof(answer), stdin) && (answer[0] == 'y' || answer[0] == 'Y');
 }
 
-// Opens a drive by name, for writing, which it must be possible to.
+// Opens a drive or partition by name, for writing, which it must be possible to.
+// Opening it exclusively fails while anything has it mounted.
 static int open_drive(const char *name, struct disk *out) {
-    struct disk d[MAX_DISKS];
-    int count = disks(d);
-    char path[32];
+    char path[64];
+    int fd;
 
-    for (int i = 0; i < count; i++) {
-        if (strcmp(d[i].name, name))
-            continue;
-        if (!d[i].usable) {
-            dprintf(STDERR_FILENO, "disk: %s can't be written to\n", name);
-            return -1;
-        }
-        *out = d[i];
-        snprintf(path, sizeof(path), "/dev/disk/%s", name);
-
-        int fd = open(path, O_RDWR);
-
-        if (fd < 0 && errno == EBUSY)
-            dprintf(STDERR_FILENO, "disk: %s is in use\n", name);
-        else if (fd < 0)
-            fail(path);
-        return fd;
+    snprintf(path, sizeof(path), "/sys/class/block/%s/size", name);
+    *out = (struct disk){.sectors = sys_number(path)};
+    snprintf(out->name, sizeof(out->name), "%s", name);
+    snprintf(path, sizeof(path), "/dev/%s", name);
+    if (!out->sectors) {
+        dprintf(STDERR_FILENO, "disk: no drive or partition called %s\n", name);
+        return -1;
     }
-    dprintf(STDERR_FILENO, "disk: no drive called %s\n", name);
-    return -1;
+    if ((fd = open(path, O_RDWR | O_EXCL | O_CLOEXEC)) < 0 && errno == EBUSY)
+        dprintf(STDERR_FILENO, "disk: %s is in use, as something on it is mounted\n", name);
+    else if (fd < 0)
+        fail(path);
+    return fd;
 }
 
 static void put_header(uint8_t *h, uint64_t self, uint64_t other, uint64_t entries, uint64_t sectors,
@@ -350,6 +373,9 @@ static int partition(const char *name, char **sizes, int size_count) {
         && put(fd, 2, table, GPT_TABLE_SECTORS);
     put_header(header, d.sectors - 1, 1, d.sectors - 1 - GPT_TABLE_SECTORS, d.sectors, guid, table_crc);
     ok = ok && put(fd, d.sectors - 1 - GPT_TABLE_SECTORS, table, GPT_TABLE_SECTORS) && put(fd, d.sectors - 1, header, 1);
+    ok = ok && fsync(fd) == 0;
+    if (ok && ioctl(fd, BLKRRPART) < 0)
+        dprintf(STDERR_FILENO, "disk: Linux will see the new partitions once %s is restarted\n", name);
     close(fd);
     if (!ok)
         return fail(name);
@@ -365,9 +391,10 @@ static void u32(uint8_t *p, uint32_t v) {
     memcpy(p, &v, 4);
 }
 
-// FAT32 over count sectors from first, with clusters as big as Windows would
-// make them, which needs at least 65525 of them.
-static bool make_fat32(int fd, uint64_t first, uint64_t count, const char *label) {
+// FAT32 over count sectors, which start hidden sectors into the drive, with
+// clusters as big as Windows would make them, which needs at least 65525 of them.
+static bool make_fat32(int fd, uint64_t hidden, uint64_t count, const char *label) {
+    const uint64_t first = 0;
     uint32_t spc = count <= 532480 ? 1 : count <= 16777216 ? 8 : count <= 33554432 ? 16 : count <= 67108864 ? 32 : 64;
     uint32_t fat = (count - FAT_RESERVED + (256 * spc + 2) / 2 - 1) / ((256 * spc + 2) / 2);
     uint64_t data = FAT_RESERVED + 2 * (uint64_t)fat;
@@ -388,7 +415,7 @@ static bool make_fat32(int fd, uint64_t first, uint64_t count, const char *label
     boot[21] = 0xF8;
     u16(boot + 24, 63);
     u16(boot + 26, 255);
-    u32(boot + 28, first);
+    u32(boot + 28, hidden);
     u32(boot + 32, count);
     u32(boot + 36, fat);
     u32(boot + 44, 2); // the root directory's cluster
@@ -424,59 +451,59 @@ static bool make_fat32(int fd, uint64_t first, uint64_t count, const char *label
         && put(fd, first, boot, 1);
 }
 
+// ext4, through e2fsprogs' mkfs.ext4.
+static bool make_ext4(const char *name, const char *label) {
+    char path[64];
+    int status;
+    pid_t pid = fork();
+
+    snprintf(path, sizeof(path), "/dev/%s", name);
+    if (pid == 0) {
+        execlp("mkfs.ext4", "mkfs.ext4", "-q", "-F", "-L", label, path, (char *)NULL);
+        _exit(127);
+    }
+    return pid > 0 && waitpid(pid, &status, 0) == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
 // A drive, as sda, or one of its partitions, as sda1.
-static int format(const char *target, const char *label) {
-    struct disk d[MAX_DISKS], drive;
-    struct partition p[MAX_PARTITIONS];
-    int count = disks(d), best = -1;
-    size_t len = 0;
+static int format(const char *target, const char *type, const char *label) {
+    struct disk drive;
+    char path[300];
+    bool ext4 = !strcmp(type, "ext4");
+    int fd;
 
-    for (int i = 0; i < count; i++) {
-        size_t l = strlen(d[i].name);
-
-        if (!strncmp(target, d[i].name, l) && l > len && (!target[l] || (target[l] >= '0' && target[l] <= '9')))
-            best = i, len = l;
-    }
-    if (best < 0) {
-        dprintf(STDERR_FILENO, "disk: no drive called %s\n", target);
+    if (!ext4 && strcmp(type, "fat32")) {
+        dprintf(STDERR_FILENO, "disk: it can make ext4 or fat32, not %s\n", type);
         return 1;
     }
-
-    int fd = open_drive(d[best].name, &drive), number = target[len] ? atoi(target + len) : 0;
-    uint64_t first = 0, sectors = drive.sectors;
-
-    if (fd < 0)
+    if ((fd = open_drive(target, &drive)) < 0)
         return 1;
-    if (number) {
-        int n = partitions(fd, p), i = 0;
-
-        while (i < n && p[i].number != number)
-            i++;
-        if (i == n) {
-            dprintf(STDERR_FILENO, "disk: %s has no partition %d\n", d[best].name, number);
-            close(fd);
-            return 1;
-        }
-        first = p[i].first;
-        sectors = p[i].count;
-    }
-    if (!confirm(target) || !make_fat32(fd, first, sectors, label)) {
+    snprintf(path, sizeof(path), "/sys/class/block/%s/start", target);
+    if (!confirm(target)) {
         close(fd);
         return 1;
     }
-    close(fd);
-    printf("disk: formatted %s as FAT32\n", target);
+
+    bool ok = ext4 ? (close(fd), fd = -1, make_ext4(target, label)) : make_fat32(fd, sys_number(path), drive.sectors, label);
+
+    if (fd >= 0)
+        close(fd);
+    if (!ok) {
+        dprintf(STDERR_FILENO, "disk: couldn't format %s\n", target);
+        return 1;
+    }
+    printf("disk: formatted %s as %s\n", target, ext4 ? "ext4" : "FAT32");
     return 0;
 }
 
 int main(int argc, char **argv) {
     help_option(argc, argv, "usage: disk [list]\n"
                             "       disk partition DRIVE [MIB...|rest] [-y]\n"
-                            "       disk format DRIVE|PARTITION [LABEL] [-y]\n"
+                            "       disk format DRIVE|PARTITION ext4|fat32 [LABEL] [-y]\n"
                             "Lists the drives and what's on them, gives a drive a new GPT partition table,\n"
-                            "or makes a FAT32 filesystem on a drive or partition. partition makes one of\n"
-                            "each size given, the first the EFI system partition, and fills the drive\n"
-                            "without any. Both erase what was there, so they ask first, unless -y.\n");
+                            "or makes a filesystem on a drive or partition. partition makes one of each\n"
+                            "size given, the first the EFI system partition, and fills the drive without\n"
+                            "any. Both erase what was there, so they ask first, unless -y.\n");
 
     int n = 0;
 
@@ -490,8 +517,8 @@ int main(int argc, char **argv) {
         return list();
     if (!strcmp(argv[1], "partition") && n >= 2)
         return partition(argv[2], argv + 3, n - 2);
-    if (!strcmp(argv[1], "format") && (n == 2 || n == 3))
-        return format(argv[2], n == 3 ? argv[3] : "AXIMOS");
+    if (!strcmp(argv[1], "format") && (n == 3 || n == 4))
+        return format(argv[2], argv[3], n == 4 ? argv[4] : "AXIMOS");
     dprintf(STDERR_FILENO, "disk: try disk --help\n");
     return 1;
 }

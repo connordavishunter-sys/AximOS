@@ -1,5 +1,5 @@
+#include <aximos.h>
 #include <dirent.h>
-#include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdio.h>
@@ -8,55 +8,23 @@
 #include <termios.h>
 #include <unistd.h>
 
-#define FILE_MAX 2048
-#define MAX_PROCESSES 256
+#define MAX_PROCESSES 1024
 #define COMMAND_MAX 64
-#define MAX_CPUS 64
 #define CLEAR_TO_END_OF_LINE "\x1b[K"
 
 struct entry {
-    int pid;
+    int pid, threads, percent_tenths;
     char state;
-    int threads;
     long ticks;
-    long previous_ticks;
-    long memory_kb;
-    int percent_tenths;
+    uint64_t memory;
     char command[COMMAND_MAX];
 };
 
 static struct entry entries[MAX_PROCESSES], previous[MAX_PROCESSES];
 static int entry_count, previous_count;
-static long cpu_idle[MAX_CPUS], cpu_idle_before[MAX_CPUS];
-static long ticks, ticks_before;
-static int rate = 100, cpus;
+static struct cpu_times now, before;
 static struct termios original;
 static bool on_terminal;
-
-static bool read_text(const char *path, char *out, size_t size) {
-    int fd = open(path, O_RDONLY);
-
-    if (fd < 0)
-        return false;
-
-    ssize_t got = read(fd, out, size - 1);
-
-    close(fd);
-    if (got < 0)
-        return false;
-    out[got] = '\0';
-    return true;
-}
-
-static const char *field(const char *text, const char *name) {
-    size_t len = strlen(name);
-
-    for (const char *line = text; line; line = strchr(line, '\n'), line = line ? line + 1 : NULL) {
-        if (strncmp(line, name, len) == 0 && line[len] == ':')
-            return line + len + 2;
-    }
-    return "";
-}
 
 static void restore_terminal(void) {
     if (on_terminal)
@@ -70,21 +38,6 @@ static void on_signal(int signal) {
     _exit(128 + signal);
 }
 
-static void read_system(void) {
-    static char text[FILE_MAX];
-
-    memcpy(cpu_idle_before, cpu_idle, sizeof(cpu_idle));
-    ticks_before = ticks;
-    if (!read_text("/proc/stat", text, sizeof(text)))
-        return;
-
-    rate = atoi(field(text, "ticks_per_second"));
-    ticks = atol(field(text, "ticks"));
-    cpus = 0;
-    for (const char *p = strstr(text, "cpu_idle:"); p && cpus < MAX_CPUS; p = strstr(p + 1, "cpu_idle:"))
-        cpu_idle[cpus++] = atol(p + 10);
-}
-
 static long previous_ticks_of(int pid) {
     for (int i = 0; i < previous_count; i++) {
         if (previous[i].pid == pid)
@@ -94,39 +47,25 @@ static long previous_ticks_of(int pid) {
 }
 
 static void read_processes(long elapsed) {
-    static char status[FILE_MAX], command[FILE_MAX], path[64];
     DIR *proc = opendir("/proc");
     struct dirent *e;
+    struct process p;
 
     memcpy(previous, entries, sizeof(previous));
     previous_count = entry_count;
     entry_count = 0;
-    if (!proc)
-        return;
-
-    while ((e = readdir(proc)) && entry_count < MAX_PROCESSES) {
-        if (e->d_type != DT_DIR)
+    while (proc && (e = readdir(proc)) && entry_count < MAX_PROCESSES) {
+        if (!atoi(e->d_name) || !process_read(atoi(e->d_name), &p))
             continue;
-
-        snprintf(path, sizeof(path), "/proc/%s/status", e->d_name);
-        if (!read_text(path, status, sizeof(status)))
-            continue;
-        snprintf(path, sizeof(path), "/proc/%s/cmdline", e->d_name);
-        if (!read_text(path, command, sizeof(command)))
-            command[0] = '\0';
-        command[strcspn(command, "\n")] = '\0';
 
         struct entry *out = &entries[entry_count++];
 
-        out->pid = atoi(field(status, "Pid"));
-        out->state = field(status, "State")[0];
-        out->threads = atoi(field(status, "Threads"));
-        out->ticks = atol(field(status, "CpuTicks"));
-        out->memory_kb = atol(field(status, "Memory"));
-        out->percent_tenths = elapsed > 0 ? (out->ticks - previous_ticks_of(out->pid)) * 1000 / elapsed : 0;
-        snprintf(out->command, sizeof(out->command), "%s", command);
+        *out = (struct entry){p.pid, p.threads, 0, p.state, p.ticks, p.memory, ""};
+        out->percent_tenths = elapsed > 0 ? (p.ticks - previous_ticks_of(p.pid)) * 1000 / elapsed : 0;
+        snprintf(out->command, sizeof(out->command), "%s", p.command);
     }
-    closedir(proc);
+    if (proc)
+        closedir(proc);
 }
 
 static int by_usage(const void *left, const void *right) {
@@ -138,29 +77,26 @@ static int by_usage(const void *left, const void *right) {
 }
 
 static void draw(int rows, int cols) {
-    static char text[FILE_MAX];
-    long elapsed = ticks - ticks_before;
-    long seconds = ticks / (rate ? rate : 100);
+    long elapsed = now.ticks - before.ticks, seconds = now.ticks / sysconf(_SC_CLK_TCK);
+    struct memory m;
 
     printf("\x1b[H");
     printf("top - up %ld:%02ld:%02ld, %d processes" CLEAR_TO_END_OF_LINE "\n", seconds / 3600, seconds / 60 % 60, seconds % 60, entry_count);
 
     printf("CPU:");
-    for (int i = 0; i < cpus; i++) {
-        long idle = cpu_idle[i] - cpu_idle_before[i];
+    for (int i = 0; i < now.count; i++) {
+        long idle = now.idle[i] - before.idle[i];
         long busy = elapsed > 0 ? 100 - idle * 100 / elapsed : 0;
 
         printf(" %ld%%", busy < 0 ? 0 : busy);
     }
     printf(CLEAR_TO_END_OF_LINE "\n");
 
-    if (read_text("/proc/meminfo", text, sizeof(text))) {
-        long total = atol(field(text, "MemTotal")), free_kb = atol(field(text, "MemFree"));
-
+    if (memory_read(&m)) {
         printf("Mem: ");
-        print_size((total - free_kb) * 1024, 0);
+        print_size(m.total - m.available, 0);
         printf(" used of ");
-        print_size(total * 1024, 0);
+        print_size(m.total, 0);
     }
     printf(CLEAR_TO_END_OF_LINE "\n" CLEAR_TO_END_OF_LINE "\n");
 
@@ -172,7 +108,7 @@ static void draw(int rows, int cols) {
 
     for (int i = 0; i < entry_count && shown < rows - 6; i++, shown++) {
         printf("%6d %4c %3d ", entries[i].pid, entries[i].state, entries[i].threads);
-        print_size(entries[i].memory_kb * 1024, 9);
+        print_size(entries[i].memory, 9);
         printf(" %4d.%d  %.*s" CLEAR_TO_END_OF_LINE "\n", entries[i].percent_tenths / 10, entries[i].percent_tenths % 10,
                cols > 35 ? cols - 35 : 1, entries[i].command);
     }
@@ -220,8 +156,9 @@ int main(int argc, char **argv) {
         int rows = 25, cols = 80;
 
         termsize(&rows, &cols);
-        read_system();
-        read_processes(ticks - ticks_before);
+        before = now;
+        cpu_times(&now);
+        read_processes(now.ticks - before.ticks);
         draw(rows, cols);
 
         if (limit && update == limit)

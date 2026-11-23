@@ -1,3 +1,4 @@
+#include <aximos.h>
 #include "syntax.h"
 #include <errno.h>
 #include <fcntl.h>

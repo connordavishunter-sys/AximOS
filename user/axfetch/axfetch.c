@@ -1,16 +1,20 @@
+#include <aximos.h>
 #include <arpa/inet.h>
 #include <dirent.h>
 #include <fcntl.h>
-#include <netdb.h>
+#include <ifaddrs.h>
+#include <mntent.h>
+#include <net/if.h>
+#include <pwd.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/fb.h>
-#include <sys/statfs.h>
+#include <sys/statvfs.h>
 #include <sys/utsname.h>
 #include <unistd.h>
 
-#define TEXT_MAX 2048
+#define TEXT_MAX 8192
+#define NAME_MACHINE "x86_64"
 #define RESET "\x1b[0m"
 #define ACCENT "\x1b[1;36m"
 #define LOGO_LINES 12
@@ -55,8 +59,8 @@ static const char *field(const char *text, const char *name) {
     size_t len = strlen(name);
 
     for (const char *line = text; line; line = strchr(line, '\n'), line = line ? line + 1 : NULL) {
-        if (strncmp(line, name, len) == 0 && line[len] == ':')
-            return line + len + 2;
+        if (strncmp(line, name, len) == 0 && line[len + strspn(line + len, "\t ")] == ':')
+            return line + len + strspn(line + len, "\t ") + 2;
     }
     return "";
 }
@@ -110,86 +114,85 @@ static void add_cpu(void) {
     const char *model = field(text, "model name");
     int len = strcspn(model, "\n");
 
-    snprintf(value, sizeof(value), "%.*s (%d)", len > 70 ? 70 : len, model, atoi(field(text, "cpus")));
+    snprintf(value, sizeof(value), "%.*s (%ld)", len > 70 ? 70 : len, model, sysconf(_SC_NPROCESSORS_ONLN));
     add_info("CPU", value);
 }
 
 static void add_memory(void) {
-    static char text[TEXT_MAX];
+    struct memory m;
     char used[32], total[32], value[96];
 
-    if (!read_text("/proc/meminfo", text, sizeof(text)))
+    if (!memory_read(&m))
         return;
-
-    long total_kb = atol(field(text, "MemTotal"));
-    long free_kb = atol(field(text, "MemFree"));
-
-    format_size(used, sizeof(used), (total_kb - free_kb) * 1024ULL);
-    format_size(total, sizeof(total), total_kb * 1024ULL);
-    snprintf(value, sizeof(value), "%s / %s (%ld%%)", used, total, total_kb ? (total_kb - free_kb) * 100 / total_kb : 0);
+    format_size(used, sizeof(used), m.total - m.available);
+    format_size(total, sizeof(total), m.total);
+    snprintf(value, sizeof(value), "%s / %s (%d%%)", used, total, (int)(m.total ? (m.total - m.available) * 100 / m.total : 0));
     add_info("Memory", value);
 }
 
+// The root filesystem's size, and its type, as /proc/mounts says.
 static void add_disk(void) {
-    struct statfs fs;
-    char used[32], total[32], value[96];
+    struct statvfs fs;
+    char used[32], total[32], value[96], type[32] = "";
+    FILE *mounts = setmntent("/proc/mounts", "r");
+    struct mntent *m;
 
-    if (statfs("/", &fs) < 0)
+    while (mounts && (m = getmntent(mounts))) {
+        if (!strcmp(m->mnt_dir, "/"))
+            snprintf(type, sizeof(type), "%s", m->mnt_type);
+    }
+    if (mounts)
+        endmntent(mounts);
+    if (statvfs("/", &fs) < 0)
         return;
 
-    uint64_t size = fs.f_blocks * fs.f_bsize;
-    uint64_t taken = size - fs.f_bfree * fs.f_bsize;
+    uint64_t size = (uint64_t)fs.f_blocks * fs.f_frsize, taken = size - (uint64_t)fs.f_bfree * fs.f_frsize;
 
     format_size(used, sizeof(used), taken);
     format_size(total, sizeof(total), size);
-    snprintf(value, sizeof(value), "%s / %s (%lu%%) - %s", used, total, size ? (unsigned long)(taken * 100 / size) : 0, fs.f_type);
+    snprintf(value, sizeof(value), "%s / %s (%lu%%) - %s", used, total, size ? (unsigned long)(taken * 100 / size) : 0, type);
     add_info("Disk (/)", value);
 }
 
+// The screen's size, from the framebuffer Linux shows its console on.
 static void add_display(void) {
-    int fd = open("/dev/fb0", O_RDONLY);
-    struct fb_info fb;
-    char value[32];
+    char text[32];
+    int width, height;
 
-    if (fd < 0)
-        return;
-    if (fb_info(fd, &fb) == 0) {
-        snprintf(value, sizeof(value), "%ux%u", fb.width, fb.height);
-        add_info("Display", value);
+    if (read_text("/sys/class/graphics/fb0/virtual_size", text, sizeof(text)) && sscanf(text, "%d,%d", &width, &height) == 2) {
+        snprintf(text, sizeof(text), "%dx%d", width, height);
+        add_info("Display", text);
     }
-    close(fd);
 }
 
+// The first network card with an address.
 static void add_network(void) {
-    struct net_info net;
-    char value[64];
+    struct ifaddrs *list;
+    char value[64] = "no address";
 
-    if (net_info(&net) < 0)
+    if (getifaddrs(&list) < 0)
         return;
-    if (!net.has_device) {
-        add_info("Network", "no card");
-        return;
+    for (struct ifaddrs *i = list; i; i = i->ifa_next) {
+        if (i->ifa_addr && i->ifa_addr->sa_family == AF_INET && !(i->ifa_flags & IFF_LOOPBACK)) {
+            snprintf(value, sizeof(value), "%s (%s)", inet_ntoa(((struct sockaddr_in *)i->ifa_addr)->sin_addr), i->ifa_name);
+            break;
+        }
     }
-
-    struct in_addr address = {htonl(net.address)};
-
-    snprintf(value, sizeof(value), "%s (%s)", net.address ? inet_ntoa(address) : "no address", net.automatic ? "DHCP" : "static");
+    freeifaddrs(list);
     add_info("Network", value);
 }
 
-// Whatever started this is the shell, more surely than the environment says.
+// Whatever started this is the shell, more surely than the environment says, and
+// its program's name, as a login shell calls itself -sh.
 static void add_shell(void) {
-    static char text[TEXT_MAX];
-    char path[64], value[64];
+    char path[64], program[256];
+    ssize_t length;
 
-    snprintf(path, sizeof(path), "/proc/%d/status", getppid());
-    if (!read_text(path, text, sizeof(text)))
+    snprintf(path, sizeof(path), "/proc/%d/exe", getppid());
+    if ((length = readlink(path, program, sizeof(program) - 1)) <= 0)
         return;
-
-    const char *name = field(text, "Name");
-
-    snprintf(value, sizeof(value), "%.*s", (int)strcspn(name, "\n"), name);
-    add_info("Shell", value);
+    program[length] = '\0';
+    add_info("Shell", strrchr(program, '/') ? strrchr(program, '/') + 1 : program);
 }
 
 // Each file in a folder is a program, and so is each in the folders in it.
@@ -218,18 +221,11 @@ static void add_programs(void) {
     add_info("Programs", value);
 }
 
-// Who's logged in: USER, or the account's name, as login keeps it.
+// Who's running it.
 static const char *user_name(void) {
-    static char name[32] = "root";
-    FILE *f = fopen("/system/etc/account", "r");
+    struct passwd *p = getpwuid(getuid());
 
-    if (getenv("USER"))
-        return getenv("USER");
-    if (f && fscanf(f, "%31s", name) != 1)
-        snprintf(name, sizeof(name), "root");
-    if (f)
-        fclose(f);
-    return name;
+    return p ? p->pw_name : "root";
 }
 
 int main(int argc, char **argv) {
@@ -242,9 +238,9 @@ int main(int argc, char **argv) {
 
     uname(&name);
     snprintf(title, sizeof(title), ACCENT "%s@%s" RESET, user_name(), name.nodename);
-    snprintf(kernel, sizeof(kernel), "%s %s", name.sysname, name.machine);
-    add_info("OS", kernel);
-    add_info("Kernel", name.version);
+    snprintf(kernel, sizeof(kernel), "%s %s", name.sysname, name.release);
+    add_info("OS", "AximOS " NAME_MACHINE);
+    add_info("Kernel", kernel);
     add_uptime();
     add_programs();
     add_shell();

@@ -1,0 +1,2 @@
+# Each device names the driver it wants by an alias, which modprobe finds the module for.
+ACTION=="add", ENV{MODALIAS}=="?*", RUN+="/system/bin/modprobe -q -a $env{MODALIAS}"

@@ -1,12 +1,14 @@
+#include <aximos.h>
+#include <signal.h>
 #include <stdio.h>
-#include <sys/reboot.h>
-#include <unistd.h>
 
 int main(int argc, char **argv) {
     help_option(argc, argv, "usage: reboot\n"
-                            "Restarts the computer.\n");
+                            "Restarts the computer, once init has asked every program to finish.\n");
 
-    reboot(RB_AUTOBOOT);
-    printf("reboot: failed\n");
-    return 1;
+    if (kill(1, SIGTERM) < 0) {
+        perror("reboot");
+        return 1;
+    }
+    return 0;
 }

@@ -1,3 +1,4 @@
+#include <aximos.h>
 #include "display.h"
 #include <arpa/inet.h>
 #include <audio_types.h>
