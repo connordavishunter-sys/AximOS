@@ -1,32 +1,23 @@
-"""Checks the desktop starts at boot, behind its log-in screen, and that holding
-Shift starts the shell instead, as does a debug build, which has /system/etc/debug."""
-import time
-from vm import VM, WORK, check, disk_copy, finish, put
-
-v = VM(desktop=True)
-try:
-    check('the desktop starts by itself', v.wait('wm: running at', 30), v.text())
-    check('locked, behind the log-in screen', v.wait('login: welcome', 10), v.text())
-    at = v.mark()
-    v.key('meta_l-shift-q'); time.sleep(1)
-    check("which can't be got past by quitting", '/$ ' not in v.text(at), v.text(at))
-finally:
-    v.close()
+"""Checks Linux boots the ISO to AximOS's init, which mounts what the kernel shares
+and runs the shell on the serial console, and turns the computer off when asked."""
+from vm import VM, check, finish
 
 v = VM()
 try:
-    check('holding Shift starts the shell', v.wait('/$ ', 30), v.text())
-    check('without the desktop', 'wm: running' not in v.text(), v.text())
-finally:
-    v.close()
-
-img = disk_copy('debug')
-open(WORK + '/debug', 'w').close()
-put(img, WORK + '/debug', '/system/etc/debug')
-v = VM(disk=img, desktop=True)
-try:
-    check('a debug build starts the shell without Shift', v.wait('/$ ', 30), v.text())
-    check('and says why', 'init: a debug build, so starting the shell' in v.text() and 'wm: running' not in v.text(), v.text())
+    check('the shell starts', v.wait('/# ', 30), v.text())
+    check('nothing went wrong on the way', 'init: ' not in v.text() and 'Kernel panic' not in v.raw(), v.text())
+    out = v.run('echo $((6 * 7)) $$')
+    check('which runs commands, as the first program init started', '42 ' in out, out)
+    out = v.run('read version < /proc/version; echo $version')
+    check('on Linux', 'Linux version 7.3.5' in out, out)
+    out = v.run('[ -c /dev/null ] && [ -d /sys/class ] && [ -d /dev/pts ] && echo mounted')
+    check('with /proc, /sys and /dev mounted', 'mounted' in out, out)
+    out = v.run('echo hi > /tmp/hi; read word < /tmp/hi; echo got $word')
+    check('and somewhere to write', 'got hi' in out, out)
+    out = v.run('(while :; do :; done) & jobs; kill %1')
+    check('with job control, as the console is its terminal', 'Running' in out, out)
+    v.type('kill -USR2 1\n')
+    check('SIGUSR2 to init turns it off', v.wait('init: turning off', 10) and v.exited(15), v.text())
 finally:
     v.close()
 

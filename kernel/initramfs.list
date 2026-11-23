@@ -1,0 +1,3 @@
+# What the initramfs has besides build/image: the console, which the kernel opens
+# for init before /dev is mounted.
+nod /dev/console 0600 0 0 c 5 1

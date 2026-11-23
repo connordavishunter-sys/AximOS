@@ -1,39 +1,29 @@
 # AximOS
 
-A hobby operating system for x86-64, written from scratch in C: its own kernel,
-libc and window system, a desktop with a dozen apps, and a POSIX-ish userland
-with the dash shell.
+An operating system for x86-64 PCs: the Linux kernel, with AximOS's own userland on
+top, from init and the command-line tools to its window system, desktop and apps. Built
+from source, Linux From Scratch style, against its own copy of glibc.
 
 ![The AximOS desktop: a see-through terminal and the quick settings panel](docs/screenshot.png)
 
+AximOS used to have a kernel of its own as well, which is kept at the `kernel-final` tag.
+
+## Status
+
+AximOS is moving onto Linux, a phase at a time:
+
+1. **Booting to a shell** (done): Linux, glibc, AximOS's init and dash, in QEMU
+2. **The command line**: AximOS's own tools ported to glibc, and the system tools written,
+   with eudev for devices
+3. **The desktop**: wm on DRM behind its log-in screen, through seatd, and the apps
+4. **Real hardware**: an install image, the full kernel, firmware, and the Lenovo laptop
+5. **Network and sound**: an AximOS DHCP daemon, iwd for Wi-Fi, and an ALSA mixer
+6. **Packages**: AximOS's own package manager
+
+The desktop and apps below are what's being brought over. They already run on a Linux
+desktop through `make linux`.
+
 ## Features
-
-### Kernel
-
-- 64-bit, booted by [Limine](https://limine-bootloader.org) with UEFI, on up to 64 CPUs
-- Preemptive multitasking with processes and threads, `fork`, `exec`, signals and process groups
-- Virtual memory: demand-paged stacks, `mmap`, shared memory, and read-only ELF segments
-  shared between processes
-- Dynamically linked programs: `libc.so` is also the dynamic linker
-- Filesystems: FAT32 (read and write) on disks and their GPT or MBR partitions, ISO 9660
-  on the install disc or a USB stick it's written to, tmpfs on `/tmp` (kept in memory, empty each boot), `/proc` and `/dev`
-- Drives as they are in `/dev/disk`, for partitioning and formatting: opening one to
-  write takes its filesystems away, and closing it mounts what's there
-- Drives over AHCI (SATA) and legacy IDE, and USB sticks and drives over xHCI (USB 3
-  controllers)
-- USB keyboards and mice, through their boot protocol, which is how many laptops' own
-  keyboards are connected. USB devices are found at boot only, on the computer's own
-  ports, not through hubs
-- Networking on an Intel e1000: ARP, IPv4, ICMP, UDP, TCP, DHCP and DNS, through BSD sockets
-- Intel HDA sound, with a mixer for several programs at once
-- Pseudo-terminals, a framebuffer console, PS/2 keyboard and mouse, and the VMware/QEMU
-  absolute pointer
-- ACPI through [uACPI](https://github.com/uACPI/uACPI), which runs the firmware's own code:
-  shutting down and rebooting, the power button, which shuts down cleanly, the lid, and
-  the battery in `/proc/battery`, read through the laptop's embedded controller
-- Clocks measured by the PIT, or the HPET or what the CPU says where the PIT is switched off
-- The kernel's log on screen while it boots and in `/proc/log`, and a crash shown on screen
-  with where the kernel was, by function name, for machines without a serial port
 
 ### Desktop
 
@@ -94,35 +84,21 @@ with the dash shell.
 | Settings   | Theme, accent, display, taskbar, keyboard and mouse, sound, date and time, and default apps |
 | Snake      | Three speeds, each with its own best score                            |
 
-### Command line
-
-`dash`, plus `ls cat cp mv rm mkdir rmdir touch rename stat find grep sort head
-tail wc more du df free ps top kill date tz sleep env echo clear`, `disk` (lists drives,
-partitions them with GPT and formats them as FAT32), network tools
-(`net ping host nc fetch curl`, where `fetch` and `curl` speak HTTPS through mbedTLS), `lua` (Lua 5.4), `volume`,
-`convert` for audio files, `notify`, `text` (an editor in the terminal) and `axfetch`.
-Run any of them with `--help`.
-
-At the prompt, the arrow keys, Home and End, Tab completion, Ctrl+W and Ctrl+arrows (or
-Alt+B, Alt+F and Alt+D) edit the line, and Ctrl+R searches the history, which is kept
-in `~/.history`. Lua's prompt edits lines the same way.
-
 ## Building
 
 AximOS builds on Linux. You need:
 
-- GCC and binutils for x86-64
+- GCC, binutils and make, with what Linux and glibc need to build: `bc`, `flex`, `bison`,
+  `libelf`, `openssl`, `gawk` and Python 3
 - [Limine](https://limine-bootloader.org), installed in `/usr/share/limine`
-- `xorriso`, `mtools`, `curl` and the tz database (`/usr/share/zoneinfo`)
+- `xorriso`, `rsync`, `zstd` and `curl`
 - QEMU (`qemu-system-x86_64`) and OVMF, its UEFI firmware (`/usr/share/edk2/x64/OVMF.4m.fd`), to run it
-- Python 3 with Pillow and NumPy for the tests
-- `gperf`, `flex`, `bison` and `pkg-config` to build NetSurf
 - `sdl2` and `libdrm`, only for `make linux`
 
 On Arch or CachyOS:
 
 ```bash
-sudo pacman -S --needed base-devel limine xorriso mtools curl tzdata qemu-full edk2-ovmf python-pillow python-numpy gperf
+sudo pacman -S --needed base-devel bc flex bison libelf openssl gawk python limine xorriso rsync zstd curl qemu-full edk2-ovmf sdl2 libdrm
 ```
 
 Then:
@@ -131,37 +107,23 @@ Then:
 make
 ```
 
-This builds `build/disk.img` (a 512 MB FAT32 disk with the system) and `build/aximos.iso`
-(the kernel, the bootloader and the same system, which boots by itself to install it). The first build downloads the source of dash, Lua, mbedTLS,
-zlib, curl, NetSurf, libwebp, the DejaVu fonts, stb_truetype and the audio codecs into `ports/dist`, checks their SHA-256 sums, and builds
-them against AximOS's own libc.
+This builds `build/aximos.iso`. The first build downloads the source of Linux, glibc and
+dash into `ports/dist` and checks their SHA-256 sums, then builds glibc into `build/root`,
+which holds the system's files, and Linux and the system against it. That takes a few
+minutes; after that only what changed is built again.
 
-## Running
+| Target        | What it does                                                    |
+|---------------|-----------------------------------------------------------------|
+| `make`        | Build `build/aximos.iso`                                        |
+| `make run`    | Build it, then boot it in QEMU, with the shell in the terminal  |
+| `make test`   | Build it, then run the tests                                    |
+| `make linux`  | Build wm and the calculator, Snake, the editor and Paint to run on this computer, in `build/linux` |
+| `make clean`  | Delete everything built                                         |
 
-```bash
-make run
-```
+### wm on Linux
 
-| Target             | What it does                                       |
-|--------------------|----------------------------------------------------|
-| `make run`         | Run what's built, on an AHCI drive                 |
-| `make run-ide`     | Run on the older (and slower) IDE controller       |
-| `make run-installer` | Boot the ISO with a blank 2 GB disk to install on, kept in `build/install.img` |
-| `make run-usb`     | The same, with the ISO on a USB stick instead of a CD |
-| `make build-run`   | Rebuild what changed, then run                     |
-| `make debug`       | Also build `build/aximos-debug.iso`, which boots to the shell instead of the desktop |
-| `make linux`       | Build wm and the calculator, Snake, the editor and Paint for Linux, in `build/linux` |
-| `make test`        | Run the tests                                      |
-| `make clean`       | Delete everything built                            |
-
-QEMU uses KVM when the host has it. Sound goes to PipeWire; pass another backend with
-`make run AUDIO=pa`, for example. The serial port goes to the terminal you ran it from,
-where the kernel and wm log what they're doing.
-
-### On Linux
-
-`make linux` builds wm and some of the apps for Linux. From a desktop, wm runs in a
-window, with the apps in its start menu:
+`make linux` builds wm and some of the apps for the computer it's run on. From a desktop,
+wm runs in a window, with the apps in its start menu:
 
 ```bash
 build/linux/wm
@@ -172,28 +134,6 @@ reading the keyboard, mouse and touchpad from `/dev/input`, which needs the `inp
 group. `--window` and `--drm` pick one or the other. Super+Shift+Q quits, and puts the
 console back. The apps also run by themselves, in windows of their own, from
 `build/linux/apps`.
-
-### Installing
-
-The ISO boots by itself into the installer, which erases the drive you choose, gives it
-one FAT32 partition the firmware boots from, and copies the system onto it. From then on
-the installed system is used, even with the ISO still in. The PC has to boot with UEFI.
-
-To install from a USB stick, write the ISO to it, which erases the stick:
-
-```bash
-sudo dd if=build/aximos.iso of=/dev/sdX bs=4M conv=fsync
-```
-
-where `/dev/sdX` is the stick (`lsblk` lists them). The stick has to be plugged in
-before the PC starts.
-
-### First boot
-
-The first boot asks for your time zone (the clock starts out showing 12 hour time) and
-to make an account. After that it starts at the log-in screen.
-Hold **Shift** while it boots to get the text console instead, which asks for the same
-username and password.
 
 ### Keyboard shortcuts
 
@@ -218,44 +158,35 @@ username and password.
 make test
 ```
 
-Each `tests/*_test.py` boots its own QEMU from a snapshot of the built disk, drives it
-over the serial port and QEMU's monitor (typing, clicking, taking screenshots), and checks
-what happens. They cover the kernel (files, memory, threads, timers, the network, `/proc`),
-the libraries, the shell and utilities, and every app. Several run at once, the slowest
-first; `make test JOBS=2` runs fewer, and `make test TESTS="tests/files_test.py"` runs
-just the ones named.
+Each `tests/*_test.py` boots its own QEMU, types into the shell on the serial port, and
+checks what happens. Several run at once, the slowest first; `make test JOBS=2` runs
+fewer, and `make test TESTS="tests/boot_test.py"` runs just the ones named. The tests in
+`tests/pending` are for the desktop and apps, from before the move to Linux, and come
+back as those do.
 
 ## Layout
 
 ```
-src/, include/   the kernel
-abi/             what the kernel and programs share: syscall numbers and structures
-user/libc/       the C library, also the dynamic linker
+kernel/          how Linux is configured, and what the initramfs has besides the system
+ports/           downloads and builds Linux, glibc and dash, into build/root
+abi/             structures wm, libgui and the apps share, such as key and mouse events
+user/init/       the first program Linux runs
 user/libgui/     the GUI toolkit
 user/libaudio/   reading and writing sound files, through user/codecs/
 user/wm/         the window manager
 user/<name>/     every other folder is a program
-rootfs/          copied onto the disk as it is: settings, icons, fonts, wallpapers
-ports/           downloads and builds dash, Lua, mbedTLS, zlib, curl, NetSurf, libwebp, stb_truetype and the codecs
+linux/           what wm and libgui need to run on another Linux desktop
+rootfs/          copied into the system as it is: settings, icons, fonts, wallpapers
 tests/           the tests, and vm.py, which drives QEMU for them
 ```
 
-On the disk, programs are in `/system/bin`, apps in `/system/bin/gui` (in folders that
-become the start menu's), libraries in `/system/lib`, settings in `/system/etc` as plain
-text, and your files in `/home`.
-
-## Status
-
-AximOS is developed and tested in QEMU. It hasn't been tried on real hardware yet.
+The system's own files are in `/system`: programs in `/system/bin`, libraries in
+`/system/lib`, settings in `/system/etc`. `/bin`, `/lib`, `/usr` and `/etc`, which Linux
+programs expect, link into it.
 
 ## Credits
 
-AximOS uses [Limine](https://github.com/limine-bootloader/limine), [uACPI](https://github.com/uACPI/uACPI),
-[dash](http://gondor.apana.org.au/~herbert/dash/), [Lua](https://www.lua.org),
-[Mbed TLS](https://github.com/Mbed-TLS/mbedtls), [zlib](https://zlib.net), [curl](https://curl.se),
-[NetSurf](https://www.netsurf-browser.org), [libwebp](https://chromium.googlesource.com/webm/libwebp),
-[stb_truetype](https://github.com/nothings/stb), the
-[DejaVu](https://dejavu-fonts.github.io) fonts, and for sound
-[libogg, libvorbis, Opus, FLAC](https://xiph.org), [minimp3](https://github.com/lieff/minimp3),
-[shine](https://github.com/toots/shine), [FAAD2 and FAAC](https://github.com/knik0).
+AximOS uses [Linux](https://kernel.org), [glibc](https://www.gnu.org/software/libc/),
+[Limine](https://github.com/limine-bootloader/limine), [dash](http://gondor.apana.org.au/~herbert/dash/),
+[stb_truetype](https://github.com/nothings/stb) and the [DejaVu](https://dejavu-fonts.github.io) fonts.
 Each is under its own license.
