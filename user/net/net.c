@@ -1,72 +1,47 @@
 #include <aximos.h>
-#include <arpa/inet.h>
-#include <netdb.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 
-static void print_address(const char *label, uint32_t address) {
-    struct in_addr in = {htonl(address)};
-
-    printf("%-10s %s\n", label, address ? inet_ntoa(in) : "none");
-}
-
-static bool parse_address(const char *text, uint32_t *out) {
-    struct in_addr in;
-
-    if (!inet_aton(text, &in))
-        return false;
-    *out = ntohl(in.s_addr);
-    return true;
-}
-
-static int show(void) {
-    struct net_info info;
-
-    if (net_info(&info) < 0) {
-        perror("net");
-        return 1;
-    }
-    if (info.airplane)
-        printf("airplane mode, so nothing's sent or taken\n");
-    if (!info.has_device)
-        printf("no network card, only this machine can be reached\n");
-    else
-        printf("%-10s %02x:%02x:%02x:%02x:%02x:%02x\n", "card", info.mac[0], info.mac[1], info.mac[2],
-               info.mac[3], info.mac[4], info.mac[5]);
-
-    print_address("address", info.address);
-    print_address("netmask", info.netmask);
-    print_address("gateway", info.gateway);
-    print_address("dns", info.dns);
-    printf("%-10s %s\n", "set by", info.automatic ? "DHCP" : "hand");
-    printf("%-10s %lu packets, ", "received", info.rx_packets);
-    print_size(info.rx_bytes, 0);
-    printf("\n%-10s %lu packets, ", "sent", info.tx_packets);
-    print_size(info.tx_bytes, 0);
-    printf("\n");
-    return 0;
-}
+// Shows the network, as netd has it, or has netd change a card's.
 
 int main(int argc, char **argv) {
-    help_option(argc, argv, "usage: net [dhcp | set address netmask [gateway [dns]]]\n"
-                            "Shows the network's configuration, or changes it.\n"
-                            "  dhcp  ask the network for one\n"
-                            "  set   use the one given\n");
+    help_option(argc, argv, "usage: net\n"
+                            "       net dhcp CARD\n"
+                            "       net set CARD ADDRESS/PREFIX [GATEWAY [DNS]]\n"
+                            "Shows each network card, its addresses and the DNS servers, or changes a\n"
+                            "card's: to get its address by DHCP, or to one set by hand, kept across restarts.\n");
 
-    if (argc == 1)
-        return show();
-    if (argc == 2 && strcmp(argv[1], "dhcp") == 0)
-        return net_set(0, 0, 0, 0) < 0;
+    char line[512] = "", reply[4096];
 
-    uint32_t address, netmask, gateway = 0, dns = 0;
-
-    if (argc < 4 || argc > 6 || strcmp(argv[1], "set") != 0 || !parse_address(argv[2], &address)
-        || !parse_address(argv[3], &netmask) || (argc > 4 && !parse_address(argv[4], &gateway))
-        || (argc > 5 && !parse_address(argv[5], &dns))) {
-        dprintf(STDERR_FILENO, "usage: net [dhcp | set address netmask [gateway [dns]]]\n");
+    for (int i = 1; i < argc; i++)
+        snprintf(line + strlen(line), sizeof(line) - strlen(line), "%s%s", i > 1 ? " " : "", argv[i]);
+    if ((argc != 1 && !(argc == 3 && !strcmp(argv[1], "dhcp")) && !(argc >= 4 && argc <= 6 && !strcmp(argv[1], "set")))) {
+        fprintf(stderr, "net: try net --help\n");
         return 1;
     }
-    return net_set(address, netmask, gateway, dns) < 0;
+
+    int failed = net_ask(argc == 1 ? "status" : line, reply, sizeof(reply));
+
+    if (failed) {
+        fprintf(stderr, "net: %s", reply + (strncmp(reply, "error ", 6) ? 0 : 6));
+        return 1;
+    }
+    if (argc > 1)
+        return 0;
+
+    // "card enp0s2 wired up dhcp" and so on, shown as a card's heading with its addresses under it
+    for (char *at = strtok(reply, "\n"); at; at = strtok(NULL, "\n")) {
+        char a[32], b[64], c[16], d[16];
+
+        if (sscanf(at, "card %31s %15s %15s %15s", a, b, c, d) == 4)
+            printf("%s, %s, %s%s\n", a, b, !strcmp(c, "up") ? "connected" : "not connected",
+                   !strcmp(c, "up") ? (!strcmp(d, "hand") ? ", set by hand" : ", by DHCP") : "");
+        else if (sscanf(at, "address %31s %63s", a, b) == 2)
+            printf("  address  %s\n", b);
+        else if (sscanf(at, "gateway %31s %63s", a, b) == 2)
+            printf("  gateway  %s\n", b);
+        else if (sscanf(at, "dns %63s", b) == 1)
+            printf("dns        %s\n", b);
+    }
+    return 0;
 }

@@ -1,0 +1,4 @@
+# The network: each card's address, by DHCP or set by hand, and DNS.
+command netd
+after udev
+restart

@@ -35,6 +35,9 @@ Player and NetSurf, below, are still to come back, as are some of the tests.
   partition for Limine, the kernel and the microcode. The kernel mounts it itself, as
   the disks it boots from have their drivers built in, and init has e2fsck check it
   before it's made writable
+- netd, AximOS's own network service: it brings up each card as it appears, gets addresses
+  by DHCP and DHCPv6, or uses those set by hand, takes IPv6 from the router, and sets DNS,
+  preferring wired cards to Wi-Fi
 - AximOS's own init, which mounts what Linux shares, starts the services in
   `/system/etc/services`, one file each, restarting those that ask, and keeps a text login
   on the screen's consoles from the second, Ctrl+Alt+F2, and on the serial port
@@ -60,8 +63,8 @@ system tools `mount umount dmesg uname hostname sync lsmod insmod rmmod modprobe
 with `id whoami passwd useradd sudo`, `disk` (lists drives and their free space, partitions
 them with GPT, adds partitions in free space beside what's there, and formats them as ext4 or
 FAT32), `efiboot` (the firmware's boot entries and their order), `install` (installs AximOS from the
-live system), `swapon`, `suspend`, `inputsim` (pretend laptop input, for the tests), and
-`host nc ping`. Run any of them with `--help`. ext4 is
+live system), `swapon`, `suspend`, `inputsim` (pretend laptop input, for the tests), `net`
+(the network, as netd has it, and addresses set by hand), and `host nc ping`. Run any of them with `--help`. ext4 is
 made and checked by [e2fsprogs](https://e2fsprogs.sourceforge.net)' `mkfs.ext4` and `e2fsck`.
 
 ### Desktop

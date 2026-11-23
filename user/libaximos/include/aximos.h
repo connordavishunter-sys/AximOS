@@ -1,5 +1,6 @@
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
 
 // What AximOS's programs share beyond glibc, in /system/lib/libaximos.so.
@@ -77,8 +78,8 @@ bool ask(const char *prompt, char *out, int size, bool secret);
 // Asks for a new password twice, until both match and it isn't empty.
 bool ask_new_password(char *out, int size);
 
-// The network, as the first card with an IPv4 address has it. Addresses are in host
-// byte order.
+// The network, as netd has it: the first card with an IPv4 address, wired before
+// Wi-Fi. Addresses are in host byte order.
 struct net_info {
     bool has_device;
     bool automatic; // set by DHCP rather than by hand
@@ -88,4 +89,8 @@ struct net_info {
 };
 
 int net_info(struct net_info *out);
+
+// Sends netd a line, such as "status" or "dhcp eth0", putting what it answers in
+// reply, up to its "end" or its one line. Returns 0 if it answered without an error.
+int net_ask(const char *line, char *reply, size_t size);
 int net_airplane(bool on);

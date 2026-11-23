@@ -1,8 +1,13 @@
 #include <aximos.h>
 #include <arpa/inet.h>
-#include <ifaddrs.h>
-#include <net/if.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
+
+#define NETD_SOCKET "/run/netd.sock"
 
 static uint64_t statistic(const char *card, const char *name) {
     char path[300];
@@ -18,27 +23,64 @@ static uint64_t statistic(const char *card, const char *name) {
     return n;
 }
 
+int net_ask(const char *line, char *reply, size_t size) {
+    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    struct sockaddr_un at = {.sun_family = AF_UNIX, .sun_path = NETD_SOCKET};
+    size_t have = 0;
+    ssize_t n = 0;
+
+    reply[0] = '\0';
+    if (fd < 0 || connect(fd, (struct sockaddr *)&at, sizeof(at)) < 0 || dprintf(fd, "%s\n", line) < 0) {
+        if (fd >= 0)
+            close(fd);
+        snprintf(reply, size, "error netd isn't running\n");
+        return -1;
+    }
+    while (have + 1 < size && (n = read(fd, reply + have, size - 1 - have)) > 0)
+        have += n;
+    reply[have] = '\0';
+    close(fd);
+    return strncmp(reply, "error", 5) ? 0 : -1;
+}
+
 int net_info(struct net_info *out) {
-    struct ifaddrs *list;
+    char reply[4096], card[32] = "", method[8] = "";
 
     *out = (struct net_info){0};
-    if (getifaddrs(&list) < 0)
-        return -1;
-    for (struct ifaddrs *i = list; i; i = i->ifa_next) {
-        if (!i->ifa_addr || i->ifa_addr->sa_family != AF_INET || i->ifa_flags & IFF_LOOPBACK || !(i->ifa_flags & IFF_UP))
-            continue;
-        out->has_device = out->automatic = true;
-        out->address = ntohl(((struct sockaddr_in *)i->ifa_addr)->sin_addr.s_addr);
-        out->netmask = i->ifa_netmask ? ntohl(((struct sockaddr_in *)i->ifa_netmask)->sin_addr.s_addr) : 0;
-        out->rx_bytes = statistic(i->ifa_name, "rx_bytes");
-        out->tx_bytes = statistic(i->ifa_name, "tx_bytes");
-        break;
+    if (net_ask("status", reply, sizeof(reply)) < 0)
+        return 0; // no network, rather than a failure
+    for (char *line = strtok(reply, "\n"); line; line = strtok(NULL, "\n")) {
+        char a[32], b[64], c[16], d[16], e[16];
+        struct in_addr in;
+
+        if (sscanf(line, "card %31s %15s %15s %15s", a, c, d, e) == 4) {
+            out->has_device = true;
+            if (!card[0] && !strcmp(d, "up"))
+                snprintf(method, sizeof(method), "%s", e);
+        } else if (sscanf(line, "address %31s %63s", a, b) == 2 && !card[0] && strchr(b, '.')) {
+            int prefix = atoi(strchr(b, '/') ? strchr(b, '/') + 1 : "32");
+
+            *strchr(b, '/') = '\0';
+            if (inet_aton(b, &in)) {
+                snprintf(card, sizeof(card), "%s", a);
+                out->address = ntohl(in.s_addr);
+                out->netmask = prefix ? 0xFFFFFFFFu << (32 - prefix) : 0;
+                out->automatic = strcmp(method, "hand") != 0;
+            }
+        } else if (sscanf(line, "gateway %31s %63s", a, b) == 2 && !strcmp(a, card) && inet_aton(b, &in)) {
+            out->gateway = ntohl(in.s_addr);
+        } else if (sscanf(line, "dns %63s", b) == 1 && !out->dns && inet_aton(b, &in)) {
+            out->dns = ntohl(in.s_addr);
+        }
     }
-    freeifaddrs(list);
+    if (card[0]) {
+        out->rx_bytes = statistic(card, "rx_bytes");
+        out->tx_bytes = statistic(card, "tx_bytes");
+    }
     return 0;
 }
 
-// Until the network's AximOS's own, in phase 5, there's nothing to switch off.
+// Until Wi-Fi's netd's, in phase 5, there's nothing to switch off.
 int net_airplane(bool on) {
     (void)on;
     return 0;
