@@ -85,7 +85,7 @@ $(STAMPS)/openssl $(STAMPS)/libnl: $(STAMPS)/glibc
 $(STAMPS)/wpa_supplicant: $(STAMPS)/openssl $(STAMPS)/libnl ports/wpa_supplicant.config
 $(STAMPS)/hostapd: $(STAMPS)/openssl $(STAMPS)/libnl ports/hostapd.config
 $(STAMPS)/dejavu: $(STAMPS)/skeleton
-$(STAMPS)/firmware: $(STAMPS)/skeleton kernel/firmware.list
+$(STAMPS)/firmware: $(STAMPS)/skeleton kernel/firmware.list kernel/regdb.sums
 PORTS := dash libxcrypt util-linux e2fsprogs eudev seatd dejavu firmware openssl libnl wpa_supplicant hostapd
 
 $(ROOT)/system/bin/init: user/init/init.c $(STAMPS)/glibc

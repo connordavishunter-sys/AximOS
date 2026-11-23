@@ -13,6 +13,7 @@ glibc=glibc-2.44
 arch_linux=d921c20ed125e79b4d0d7f100aeba9cdbf17043e # Arch's linux package, at 7.3.5.arch1-1
 firmware=20261019
 microcode=20261110
+regdb=2026-09-03 # wireless-regdb's
 
 fetch() { # url file sha256 [name to keep it as]
 	name=${4:-$2}
@@ -149,6 +150,13 @@ firmware) # what kernel/firmware.list names, and the Intel CPUs' microcode, load
 			mkdir -p "$(dirname "$target/system/lib/firmware/$link")"
 			ln -sfn "$(realpath -m --relative-to="$(dirname "/$link")" "/$path")" "$target/system/lib/firmware/$link"
 		fi
+	done
+	# Wi-Fi's regulatory database, which the kernel checks is signed, so it can follow the
+	# country routers say they're in, rather than keeping to what's allowed everywhere
+	for f in regulatory.db regulatory.db.p7s; do
+		fetch https://git.kernel.org/pub/scm/linux/kernel/git/wens/wireless-regdb.git/plain "$f?h=master-$regdb" \
+			"$(grep " $f\$" "$root/kernel/regdb.sums" | cut -d' ' -f1)" "$regdb-$f"
+		install -m 644 "$root/ports/dist/$regdb-$f" "$target/system/lib/firmware/$f"
 	done
 	# Only the 82Y3's i9-13900H's (family 6, model 0xba, stepping 2), in the early cpio the kernel looks for it in
 	fetch https://raw.githubusercontent.com/intel/Intel-Linux-Processor-Microcode-Data-Files/microcode-$microcode/intel-ucode \
