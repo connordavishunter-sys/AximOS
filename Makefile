@@ -162,11 +162,13 @@ $(LINUX)/apps/%: $$(call linux_objs,$$(wildcard user/$$(notdir $$*)/*.c))
 	@mkdir -p $(@D)
 	$(CC) $^ -lm $(shell pkg-config --libs $(LINUX_LIBS) 2>/dev/null) -o $@
 
-# KVM runs it at the CPU's own speed, where the host has it. The shell is on the
-# serial port, in the terminal it's run from.
+# KVM runs it at the CPU's own speed, where the host has it. A shell's on the serial
+# port, in the terminal it's run from. The pointer's a USB tablet, which goes where the
+# host's is, rather than a mouse, which only moves, so stops at the screen's edge
+# while the host's goes on.
 run: $(ISO)
 	qemu-system-x86_64 -accel kvm -accel tcg -cpu max -smp 4 -m 1G -M q35 -bios $(OVMF) -serial mon:stdio \
-		-netdev user,id=net0 -device e1000,netdev=net0 -cdrom $(ISO)
+		-netdev user,id=net0 -device e1000,netdev=net0 -device qemu-xhci -device usb-tablet -cdrom $(ISO)
 
 # Each tests/*_test.py boots its own VMs, so several run at once. JOBS sets how many,
 # and TESTS picks which, as in make test TESTS="tests/boot_test.py".
