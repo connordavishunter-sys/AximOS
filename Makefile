@@ -84,9 +84,13 @@ $(STAMPS)/seatd: $(STAMPS)/glibc
 $(STAMPS)/openssl $(STAMPS)/libnl: $(STAMPS)/glibc
 $(STAMPS)/wpa_supplicant: $(STAMPS)/openssl $(STAMPS)/libnl ports/wpa_supplicant.config
 $(STAMPS)/hostapd: $(STAMPS)/openssl $(STAMPS)/libnl ports/hostapd.config
+$(STAMPS)/zlib-ng $(STAMPS)/bash: $(STAMPS)/glibc
+$(STAMPS)/bash: ports/bash.sums
+$(STAMPS)/curl: $(STAMPS)/openssl $(STAMPS)/zlib-ng
+$(STAMPS)/git: $(STAMPS)/curl
 $(STAMPS)/dejavu: $(STAMPS)/skeleton
 $(STAMPS)/firmware: $(STAMPS)/skeleton kernel/firmware.list kernel/regdb.sums
-PORTS := dash libxcrypt util-linux e2fsprogs eudev seatd dejavu firmware openssl libnl wpa_supplicant hostapd
+PORTS := dash libxcrypt util-linux e2fsprogs eudev seatd dejavu firmware openssl libnl wpa_supplicant hostapd zlib-ng curl bash git
 
 $(ROOT)/system/bin/init: user/init/init.c $(STAMPS)/glibc
 	$(TARGET_CC) $(TARGET_CFLAGS) $< -o $@

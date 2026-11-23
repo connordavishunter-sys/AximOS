@@ -42,8 +42,9 @@ static const char *status_value(const char *status, const char *start) {
 }
 
 // Has netd scan, then waits for what it finds, in reply: until there's something, or
-// the network wanted if one is, after 2 seconds at least, and up to 6.
-#define SCAN_WAIT 6
+// the network wanted if one is, after 2 seconds at least, and up to 8, scanning again
+// halfway, as a scan can miss what's only just started.
+#define SCAN_WAIT 8
 static int scan(const char *wanted) {
     if (ask_netd("scan"))
         return 1;
@@ -53,6 +54,8 @@ static int scan(const char *wanted) {
             return 1;
         if (second >= 2 && (wanted ? strstr(reply, wanted) != NULL : strstr(reply, "network ") != NULL))
             break;
+        if (second == SCAN_WAIT / 2)
+            ask_netd("scan");
     }
     return 0;
 }

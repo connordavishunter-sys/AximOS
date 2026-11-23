@@ -67,7 +67,8 @@ them with GPT, adds partitions in free space beside what's there, and formats th
 FAT32), `efiboot` (the firmware's boot entries and their order), `install` (installs AximOS from the
 live system), `swapon`, `suspend`, `inputsim` (pretend laptop input, for the tests), `net`
 (the network, as netd has it, and addresses set by hand), `wifi` (the networks nearby, and
-joining, forgetting and airplane mode), and `host nc ping`. Run any of them with `--help`. ext4 is
+joining, forgetting and airplane mode), and `host nc ping`. Ported alongside them: bash,
+curl, git (with AximOS's `more` and `text` as its pager and editor) and OpenSSL's `openssl`. Run any of them with `--help`. ext4 is
 made and checked by [e2fsprogs](https://e2fsprogs.sourceforge.net)' `mkfs.ext4` and `e2fsck`.
 
 ### Desktop
@@ -298,7 +299,8 @@ AximOS uses [Linux](https://kernel.org), [glibc](https://www.gnu.org/software/li
 [libxcrypt](https://github.com/besser82/libxcrypt), [seatd](https://git.sr.ht/~kennylevinsen/seatd), [util-linux](https://github.com/util-linux/util-linux)'s
 libblkid and libuuid, [e2fsprogs](https://e2fsprogs.sourceforge.net), [eudev](https://github.com/eudev-project/eudev),
 [OpenSSL](https://openssl-library.org), [libnl](https://github.com/thom311/libnl),
-[wpa_supplicant and hostapd](https://w1.fi/), [stb_truetype](https://github.com/nothings/stb), the [DejaVu](https://dejavu-fonts.github.io) fonts,
+[wpa_supplicant and hostapd](https://w1.fi/), [bash](https://www.gnu.org/software/bash/),
+[curl](https://curl.se), [git](https://git-scm.com), [zlib-ng](https://github.com/zlib-ng/zlib-ng), [stb_truetype](https://github.com/nothings/stb), the [DejaVu](https://dejavu-fonts.github.io) fonts,
 [linux-firmware](https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git),
 [Intel's microcode](https://github.com/intel/Intel-Linux-Processor-Microcode-Data-Files) and
 [Arch Linux](https://gitlab.archlinux.org/archlinux/packaging/packages/linux)'s kernel config.

@@ -32,7 +32,7 @@ try:
           and 'found wlx020000000100' not in v.text(), v.text()[-1500:])
     access_point(v, 'AximOS Test', WPA)
 
-    out = v.run('wifi', 8)
+    out = v.run('wifi', 10)
     check('wifi lists the network nearby', 'AximOS Test' in out and 'WPA3' in out, out)
 
     out = v.run("echo 'wrong horse' | wifi join 'AximOS Test'", 26)
@@ -64,7 +64,7 @@ try:
     check('a network can be forgotten', 'saved' not in out and '* AximOS' not in out, out)
 
     access_point(v, 'Hidden Test', WPA, hidden=True)
-    out = v.run('wifi', 8)
+    out = v.run('wifi', 10)
     check("a hidden network isn't listed", 'Hidden Test' not in out, out)
     out = v.run("echo 'correct horse' | wifi join 'Hidden Test' --hidden", 20)
     check('but joins by its name', 'joined Hidden Test' in out, out)

@@ -212,6 +212,50 @@ hostapd) # after openssl and libnl: an access point, which the Wi-Fi test joins,
 	make -j"$jobs" CC="$target_cc" PKG_CONFIG=pkg-config hostapd >/dev/null
 	install -m 755 hostapd "$target/system/bin/"
 	;;
+zlib-ng) # after glibc: zlib's compression, which git and curl need, as zlib-ng's compatible build
+	fetch https://github.com/zlib-ng/zlib-ng/archive/refs/tags 2.3.3.tar.gz \
+		f9c65aa9c852eb8255b636fd9f07ce1c406f061ec19a2e7d508b318ca0c907d1 zlib-ng-2.3.3.tar.gz
+	unpack zlib-ng-2.3.3.tar.gz zlib-ng-2.3.3
+	cd zlib-ng-2.3.3
+	[ -e Makefile ] || CC=$target_cc CFLAGS=-O2 ./configure --prefix=/usr --libdir=/usr/lib --zlib-compat >/dev/null
+	make -j"$jobs" >/dev/null
+	make install DESTDIR="$target" >/dev/null
+	rm -f "$target/usr/lib/libz.a"
+	;;
+curl) # after openssl and zlib-ng: HTTPS downloads, for git, and Claude Code's installer
+	fetch https://curl.se/download curl-8.23.0.tar.xz 8dadd7d2536a314f982ad05a651b713f426bf7d02cc2c76cffb9796f2218e6c5
+	unpack curl-8.23.0.tar.xz curl-8.23.0
+	cd curl-8.23.0
+	autotools --with-openssl --with-zlib --with-ca-bundle=/etc/ssl/cert.pem --enable-ipv6 --enable-threaded-resolver \
+		--disable-ldap --disable-ldaps --disable-manual --without-libpsl --without-brotli --without-zstd \
+		--without-libidn2 --without-nghttp2 --without-libssh2
+	;;
+bash) # after glibc: the shell most scripts expect, with its patches to 5.3.20, and its own line editing
+	fetch https://ftp.gnu.org/gnu/bash bash-5.3.tar.gz "$(grep ' bash-5.3.tar.gz$' "$root/ports/bash.sums" | cut -d' ' -f1)"
+	for patch in $(seq -f %03g 1 20); do
+		fetch https://ftp.gnu.org/gnu/bash/bash-5.3-patches bash53-$patch \
+			"$(grep " bash53-$patch\$" "$root/ports/bash.sums" | cut -d' ' -f1)"
+	done
+	if [ ! -d bash-5.3 ]; then
+		unpack bash-5.3.tar.gz bash-5.3
+		for patch in $(seq -f %03g 1 20); do
+			patch -s -d bash-5.3 -p0 < "$root/ports/dist/bash53-$patch"
+		done
+	fi
+	cd bash-5.3
+	bash_cv_termcap_lib=gnutermcap autotools --without-bash-malloc --disable-rpath # its own termcap, as there are no curses
+	;;
+git) # after curl: version control, with HTTPS through curl, and AximOS's more and text as its pager and editor
+	fetch https://mirrors.edge.kernel.org/pub/software/scm/git git-2.56.1.tar.xz \
+		f0b0bf89264b9bd2e1c640363e7529643989da76281600473c50745cd34a607f
+	unpack git-2.56.1.tar.xz git-2.56.1
+	cd git-2.56.1
+	make -j"$jobs" prefix=/usr gitexecdir=/usr/lib/git-core CC="$target_cc" CFLAGS="-O2 -w" CURL_LDFLAGS=-lcurl \
+		NO_PERL=1 NO_PYTHON=1 NO_TCLTK=1 NO_GETTEXT=1 NO_EXPAT=1 NO_OPENSSL=1 INSTALL_SYMLINKS=1 \
+		DEFAULT_PAGER=more DEFAULT_EDITOR=text DESTDIR="$target" strip install >/dev/null
+	rm -f "$target"/system/lib/git-core/git-daemon "$target"/system/lib/git-core/git-http-backend \
+		"$target"/system/lib/git-core/git-imap-send # serving repositories, and mailing patches, which it isn't for
+	;;
 *)
 	echo "build.sh: no part called $1" >&2
 	exit 1
