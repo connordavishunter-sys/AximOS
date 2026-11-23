@@ -11,9 +11,10 @@ target_cc="gcc --sysroot=$target"
 linux=linux-7.3.5
 glibc=glibc-2.44
 
-fetch() { # url file sha256
-	[ -e "$root/ports/dist/$2" ] || curl -fsSL -o "$root/ports/dist/$2" "$1/$2"
-	echo "$3  $root/ports/dist/$2" | sha256sum -c --status
+fetch() { # url file sha256 [name to keep it as]
+	name=${4:-$2}
+	[ -e "$root/ports/dist/$name" ] || curl -fsSL -o "$root/ports/dist/$name" "$1/$2"
+	echo "$3  $root/ports/dist/$name" | sha256sum -c --status
 }
 
 unpack() { # file directory
@@ -115,6 +116,28 @@ eudev) # after e2fsprogs: device files, their permissions, and what's plugged in
 	unpack eudev-3.3.0.tar.gz eudev-3.3.0
 	cd eudev-3.3.0
 	autotools --disable-kmod --disable-manpages --disable-selinux --enable-blkid
+	;;
+seatd) # after glibc: hands the screen and input to whichever session's console is showing
+	fetch https://git.sr.ht/~kennylevinsen/seatd/archive 0.9.3.tar.gz \
+		302564d54d8e28191fadfd734f2675ecb0c9e0615a58011b89ef15dfa4dbaa96 seatd-0.9.3.tar.gz
+	unpack seatd-0.9.3.tar.gz seatd-0.9.3
+	cd seatd-0.9.3
+	flags="-std=c11 -O2 -w -D_XOPEN_SOURCE=700 -DSEATD_VERSION=\"0.9.3\" -DSEATD_DEFAULTPATH=\"/run/seatd.sock\" -DSEATD_INSTALLPATH=\"/system/bin/seatd\" -I. -Iinclude"
+	$target_cc $flags -o "$target/system/bin/seatd" common/log.c common/linked_list.c common/terminal.c \
+		common/connection.c common/evdev.c common/hidraw.c common/drm.c common/wscons.c seatd/*.c
+	$target_cc $flags -DLIBSEAT=1 -DSEATD_ENABLED=1 -fPIC -shared -Wl,-soname,libseat.so.1 \
+		-Wl,--version-script,libseat/libseat.syms -o "$target/system/lib/libseat.so.1" libseat/libseat.c \
+		libseat/backend/noop.c libseat/backend/seatd.c common/connection.c common/linked_list.c common/log.c
+	ln -sf libseat.so.1 "$target/system/lib/libseat.so"
+	cp include/libseat.h "$target/system/include/"
+	;;
+dejavu) # the desktop's text, and NetSurf's
+	fetch https://github.com/dejavu-fonts/dejavu-fonts/releases/download/version_2_37 dejavu-fonts-ttf-2.37.tar.bz2 \
+		fa9ca4d13871dd122f61258a80d01751d603b4d3ee14095d65453b4e846e17d7
+	mkdir -p "$target/system/share/fonts"
+	tar xjf "$root/ports/dist/dejavu-fonts-ttf-2.37.tar.bz2" -C "$target/system/share/fonts" --strip-components=2 \
+		$(for f in Sans Sans-Bold Sans-Oblique Sans-BoldOblique Serif Serif-Bold SansMono SansMono-Bold; do
+			echo dejavu-fonts-ttf-2.37/ttf/DejaVu$f.ttf; done)
 	;;
 stb) # only stb_truetype, which libgui includes
 	fetch https://raw.githubusercontent.com/nothings/stb/9600522de53973336fa033a289858a4354cbb04c stb_truetype.h \

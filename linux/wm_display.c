@@ -4,18 +4,27 @@
 #include <string.h>
 #include <unistd.h>
 
-// On Linux, wm runs in a window when there's a desktop to make one on, and on the
-// screen itself through DRM when there isn't, unless --window or --drm says.
+// wm runs on the screen itself through DRM. On another Linux, it runs in a window
+// when there's a desktop to make one on, unless --window or --drm says.
 
-extern const struct display wm_sdl, wm_drm;
+extern const struct display wm_drm;
+#ifdef GUI_HOSTED
+extern const struct display wm_sdl;
+#else
+static const struct display wm_sdl;
+#endif
 
 const struct display *display_choose(int *argc, char ***argv) {
+#ifdef GUI_HOSTED
     bool window = getenv("WAYLAND_DISPLAY") || getenv("DISPLAY");
+#else
+    bool window = false;
+#endif
     const char *runtime = getenv("XDG_RUNTIME_DIR");
     char path[108];
 
     while (*argc > 1 && (!strcmp((*argv)[1], "--window") || !strcmp((*argv)[1], "--drm"))) {
-        window = !strcmp((*argv)[1], "--window");
+        window = !strcmp((*argv)[1], "--window") && wm_sdl.open;
         (*argv)[1] = (*argv)[0];
         (*argv)++, (*argc)--;
     }

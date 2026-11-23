@@ -290,8 +290,13 @@ int gui_app_names(char (*names)[32], int max);
 // Whether a file is a program: an ELF file, which opening runs.
 bool gui_is_program(const char *path);
 
+// What's each person's own, such as their settings, the files they opened lately and
+// their trash, is in ~/.config/aximos, which is made the first time it's needed.
+// Each path is good until a few more are asked for.
+const char *gui_own_path(const char *name);
+
 // Files opened lately, newest first, a path to a line in GUI_RECENT.
-#define GUI_RECENT GUI_ROOT "/system/etc/recent"
+#define GUI_RECENT gui_own_path("recent")
 #define GUI_RECENT_MAX 20
 void gui_recent_add(const char *path);
 int gui_recent_list(char (*paths)[GUI_PATH_MAX], int max);
@@ -299,8 +304,8 @@ void gui_recent_clear(void);
 
 // The trash is GUI_TRASH, where each thing has a random name, with what it was
 // called and where it was in GUI_TRASH_DB, a line each: the name, a tab, the path.
-#define GUI_TRASH GUI_ROOT "/trash"
-#define GUI_TRASH_DB GUI_ROOT "/system/etc/trash.db"
+#define GUI_TRASH gui_own_path("trash")
+#define GUI_TRASH_DB gui_own_path("trash.db")
 
 // Moves a file, or a folder and all in it, to the trash.
 bool gui_trash(const char *path);

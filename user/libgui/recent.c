@@ -20,9 +20,11 @@ int gui_recent_list(char (*paths)[GUI_PATH_MAX], int max) {
 void gui_recent_add(const char *path) {
     char paths[GUI_RECENT_MAX][GUI_PATH_MAX];
     int count = gui_recent_list(paths, GUI_RECENT_MAX);
+    char temporary[GUI_PATH_MAX + 8];
     FILE *f;
 
-    if (path[0] != '/' || strchr(path, '\n') || !(f = fopen(GUI_RECENT ".new", "w")))
+    snprintf(temporary, sizeof(temporary), "%s.new", GUI_RECENT);
+    if (path[0] != '/' || strchr(path, '\n') || !(f = fopen(temporary, "w")))
         return;
     fprintf(f, "%s\n", path);
     for (int i = 0, kept = 1; i < count && kept < GUI_RECENT_MAX; i++) {
@@ -32,7 +34,7 @@ void gui_recent_add(const char *path) {
         }
     }
     if (fclose(f) == 0)
-        rename(GUI_RECENT ".new", GUI_RECENT);
+        rename(temporary, GUI_RECENT);
 }
 
 void gui_recent_clear(void) {

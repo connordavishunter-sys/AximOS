@@ -14,8 +14,8 @@
 #include <unistd.h>
 
 // The first program Linux runs. It mounts what the kernel shares through files,
-// starts the services in SERVICES, and keeps a login on the screen's first console
-// and on the serial port, if there's one. SIGUSR2 turns the computer off and SIGTERM
+// starts the services in SERVICES, one of which is the desktop, on the screen's first
+// console, and keeps a text login on the others and on the serial port, if there's one. SIGUSR2 turns the computer off and SIGTERM
 // restarts it, as busybox's init does, and Ctrl+Alt+Del sends SIGINT.
 //
 // Each service is a file of lines: "command" and what to run, "after" and services
@@ -46,7 +46,7 @@ static volatile sig_atomic_t stop; // how the computer should stop, once asked
 
 static void mount_all(void) {
     static const struct { const char *type, *at; } mounts[] = {
-        {"proc", "/proc"}, {"sysfs", "/sys"}, {"devtmpfs", "/dev"}, {"devpts", "/dev/pts"},
+        {"proc", "/proc"}, {"sysfs", "/sys"}, {"devtmpfs", "/dev"}, {"devpts", "/dev/pts"}, {"tmpfs", "/dev/shm"},
         {"tmpfs", "/run"}, {"tmpfs", "/tmp"},
     };
 
@@ -110,8 +110,8 @@ static void add_service(const char *name, const char *path) {
     count += s->command[0] != '\0';
 }
 
-// A login on each console there is: the screen's first, and the serial port, which
-// is there only if the kernel found one on it.
+// A login on each console there is: the screen's, from the second, as the desktop
+// has the first, and the serial port, which is there only if the kernel found one.
 static void add_console(const char *tty) {
     char path[64], type[16] = "1";
     struct service *s = &services[count];
@@ -141,8 +141,8 @@ static void read_services(void) {
     }
     if (dir)
         closedir(dir);
-    add_console("tty1");
-    add_console("ttyS0");
+    for (const char *const *tty = (const char *const[]){"tty2", "tty3", "tty4", "tty5", "tty6", "ttyS0", NULL}; *tty; tty++)
+        add_console(*tty);
 }
 
 // A login runs in a session of its own, with its console as its terminal. Services

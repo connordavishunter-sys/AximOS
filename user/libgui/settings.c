@@ -1,5 +1,6 @@
 #include "font.h"
 #include <dirent.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <gui.h>
 #include <stdio.h>
@@ -7,6 +8,7 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 // /system/etc/gui.conf has a setting on each line, its name then its value:
@@ -35,9 +37,24 @@
 //
 // Anything missing or not understood is left as it is by default.
 
-#define SETTINGS GUI_ROOT "/system/etc/gui.conf"
-#define WALLPAPER GUI_ROOT "/system/etc/wallpaper"
+#define SETTINGS gui_own_path("gui.conf")
+#define WALLPAPER gui_own_path("wallpaper")
+#define OWN_PATHS 8 // which can be in use at once
 #define DEFAULT_WALLPAPER GUI_WALLPAPERS "/default.jpg"
+
+const char *gui_own_path(const char *name) {
+    static char paths[OWN_PATHS][GUI_PATH_MAX];
+    static int next;
+    const char *home = getenv("HOME");
+    char *path = paths[next++ % OWN_PATHS];
+
+    snprintf(path, GUI_PATH_MAX, "%s/.config", home && home[0] ? home : "/tmp");
+    mkdir(path, 0700);
+    strcat(path, "/aximos");
+    mkdir(path, 0700);
+    snprintf(path + strlen(path), GUI_PATH_MAX - strlen(path), "/%s", name);
+    return path;
+}
 
 const char *const gui_accent_names[GUI_ACCENTS] = {"Blue", "Red", "Green", "Purple", "Pink", "Orange", "Yellow",
                                                    "Light blue"};
@@ -318,12 +335,25 @@ void gui_time_zone_get(char name[GUI_PATH_MAX]) {
         fclose(f);
 }
 
+// The zone's the whole system's, so where it can't be written, tz sets it, which
+// it does for admins.
 bool gui_time_zone_set(const char *name) {
     char path[GUI_PATH_MAX], buf[4096];
-    int in, out;
+    int in, out, status;
     ssize_t n = 0;
+    pid_t pid;
     FILE *f;
 
+    if (access(LOCALTIME, W_OK) < 0 && errno == EACCES) {
+        if ((pid = fork()) == 0) {
+            int null = open("/dev/null", O_WRONLY);
+
+            dup2(null, STDOUT_FILENO);
+            execl(GUI_BIN "/tz", "tz", name, (char *)NULL);
+            _exit(127);
+        }
+        return pid > 0 && waitpid(pid, &status, 0) == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    }
     snprintf(path, sizeof(path), "%s/%s", ZONES, name);
     if ((in = open(path, O_RDONLY)) < 0)
         return false;

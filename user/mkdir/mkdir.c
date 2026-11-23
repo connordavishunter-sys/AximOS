@@ -14,12 +14,12 @@ static int make_parents(char *path) {
         if (*p != '/')
             continue;
         *p = '\0';
-        int failed = mkdir(path, 0) < 0 && errno != EEXIST;
+        int failed = mkdir(path, 0777) < 0 && errno != EEXIST;
         *p = '/';
         if (failed)
             return -1;
     }
-    return mkdir(path, 0) < 0 && errno != EEXIST ? -1 : 0;
+    return mkdir(path, 0777) < 0 && errno != EEXIST ? -1 : 0;
 }
 
 int main(int argc, char **argv) {
@@ -34,7 +34,7 @@ int main(int argc, char **argv) {
         return 1;
     }
     for (int i = first; i < argc; i++) {
-        if ((parents ? make_parents(argv[i]) : mkdir(argv[i], 0)) < 0) {
+        if ((parents ? make_parents(argv[i]) : mkdir(argv[i], 0777)) < 0) {
             dprintf(STDERR_FILENO, "mkdir: %s: %s\n", argv[i], strerror(errno));
             status = 1;
         }

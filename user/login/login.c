@@ -1,11 +1,12 @@
 #include <aximos.h>
-#include "account.h"
 #include <dirent.h>
 #include <gui.h>
+#include <pwd.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #define MAX_WALLPAPERS 12
@@ -15,6 +16,9 @@
 
 // The first time, it asks how the desktop should look, where in the world it is,
 // and then for an account. After that, it logs in, or unlocks for whoever's logged in.
+// Started by the greeter's wm, it asks the session, through GUI_SESSION_FD, to log
+// in or make the account, as only root can. Locking, it runs as whoever's logged
+// in, and checkpass checks their password.
 enum page { WELCOME, TIME, CREATE, LOG_IN, LOCKED };
 static const char *const page_names[] = {"welcome", "time zone", "create", "log in", "locked"};
 static const int sizes[][2] = {{480, 410}, {420, 420}, {360, 290}, {360, 230}, {360, 200}};
@@ -22,8 +26,8 @@ static const char *const themes[] = {"Dark", "Light"}, *const clocks[] = {"24 ho
 
 static enum page page;
 static struct gui_window *window;
-static char name[ACCOUNT_NAME], password[128], again[128], message[96];
-static struct account account;
+static char name[64], password[128], again[128], message[96], zone_chosen[GUI_PATH_MAX];
+static FILE *session; // to the session, and its answers
 static struct gui_settings settings;
 static struct {
     char path[GUI_PATH_MAX], name[32];
@@ -167,13 +171,45 @@ static void time_zone(struct gui_ui *ui) {
     report(ui, 1, "next");
     if (!next)
         return;
-    if (!shown_count || !gui_time_zone_set(shown[chosen])) {
-        snprintf(message, sizeof(message), shown_count ? "Couldn't set the time zone." : "No time zone has that in its name.");
+    if (!shown_count) {
+        snprintf(message, sizeof(message), "No time zone has that in its name.");
         return;
     }
-    printf("login: zone %s\n", shown[chosen]);
-    gui_settings_changed(); // for the taskbar's clock
+    snprintf(zone_chosen, sizeof(zone_chosen), "%s", shown[chosen]); // which the session sets with the account
+    printf("login: zone %s\n", zone_chosen);
     go_to(ui, CREATE);
+}
+
+// Asks the session to log in, or make the account, with the name and password,
+// giving what it said was wrong if it won't.
+static bool ask_session(const char *request, char *answer, size_t size) {
+    snprintf(answer, size, "The session didn't answer.");
+    if (!session || fprintf(session, "%s\n%s\n%s\n", request, name, password) < 0
+        || (!strcmp(request, "create") && fprintf(session, "%s\n", zone_chosen) < 0) || fflush(session) != 0
+        || !fgets(answer, size, session))
+        return false;
+    answer[strcspn(answer, "\n")] = '\0';
+    return !strcmp(answer, "ok");
+}
+
+// Whether the password is whoever's logged in, as checkpass says, which can read
+// the passwords, as this can't.
+static bool check_own(const char *secret) {
+    int pipe_fds[2], status;
+    pid_t pid;
+
+    if (pipe(pipe_fds) < 0)
+        return false;
+    if ((pid = fork()) == 0) {
+        dup2(pipe_fds[0], STDIN_FILENO);
+        close(pipe_fds[1]);
+        execl(GUI_BIN "/checkpass", "checkpass", (char *)NULL);
+        _exit(127);
+    }
+    close(pipe_fds[0]);
+    dprintf(pipe_fds[1], "%s\n", secret);
+    close(pipe_fds[1]);
+    return pid > 0 && waitpid(pid, &status, 0) == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
 
 // Returns whether the account was made.
@@ -205,8 +241,10 @@ static bool create(struct gui_ui *ui) {
                         : strcmp(password, again)  ? "The passwords aren't the same."
                                                    : NULL;
 
-    if (!problem && !account_save(&account, name, password))
-        problem = "Couldn't save the account.";
+    static char answer[160];
+
+    if (!problem && !ask_session("create", answer, sizeof(answer)))
+        problem = answer;
     if (problem) {
         snprintf(message, sizeof(message), "%s", problem);
         printf("login: %s\n", problem);
@@ -214,7 +252,7 @@ static bool create(struct gui_ui *ui) {
         gui_set_focus(ui, account_name_ok(name) ? "##password" : "##name", name);
         return false;
     }
-    printf("login: created %s\n", account.name);
+    printf("login: created %s\n", name);
     return true;
 }
 
@@ -224,7 +262,7 @@ static bool log_in(struct gui_ui *ui) {
 
     gui_heading(ui, page == LOCKED ? "Locked" : "Log in");
     if (page == LOCKED) {
-        gui_label(ui, "%s is logged in.", account.name);
+        gui_label(ui, "%s is logged in.", name);
     } else {
         gui_label(ui, "Username");
         gui_textbox(ui, "##name", name, sizeof(name));
@@ -238,8 +276,8 @@ static bool log_in(struct gui_ui *ui) {
     if (!submit)
         return false;
 
-    // The name's checked after the password, so a wrong one takes as long.
-    bool right = account_check(&account, password) && (page == LOCKED || !strcmp(name, account.name));
+    char answer[160];
+    bool right = page == LOCKED ? check_own(password) : ask_session("log in", answer, sizeof(answer));
 
     password[0] = '\0';
     if (!right) {
@@ -248,12 +286,15 @@ static bool log_in(struct gui_ui *ui) {
         gui_set_focus(ui, "##password", NULL);
         return false;
     }
-    printf("login: logged in %s\n", account.name);
+    printf("login: logged in %s\n", name);
     return true;
 }
 
 static bool frame(struct gui_ui *ui) {
     bool done = false;
+
+    if (page < LOG_IN && account_any()) // made meanwhile, as at a text console
+        go_to(ui, LOG_IN);
 
     gui_ui_begin(ui);
     if (page == WELCOME)
@@ -274,16 +315,24 @@ int main(int argc, char **argv) {
     help_option(argc, argv, "usage: login [--lock]\n"
                             "The log-in screen, which wm starts. The first time, it sets up the desktop, the time\n"
                             "zone and an account.\n");
-    if (!getenv("GUI_FD") || !gui_connect()) {
+    const char *session_fd = getenv("GUI_SESSION_FD");
+    bool locking = argc > 1 && !strcmp(argv[1], "--lock");
+    struct passwd *me = getpwuid(getuid());
+
+    if (!getenv("GUI_FD") || !gui_connect() || (!locking && !session_fd)) {
         dprintf(STDERR_FILENO, "login: only wm starts this\n");
         return 1;
     }
+    if (session_fd)
+        session = fdopen(atoi(session_fd), "r+");
+    if (locking && me)
+        snprintf(name, sizeof(name), "%s", me->pw_name);
 
     struct gui_ui ui;
     struct gui_message e;
     bool done = false;
 
-    page = !account_load(&account) ? WELCOME : argc > 1 && !strcmp(argv[1], "--lock") ? LOCKED : LOG_IN;
+    page = locking ? LOCKED : account_any() ? LOG_IN : WELCOME;
     if (page == WELCOME) {
         gui_settings_load(&settings);
         load_wallpapers();

@@ -499,7 +499,7 @@ static void open_selected(void) {
         open_in(gui_app_for(path));
 }
 
-static void ask(int what) {
+static void ask_about(int what) {
     asking = what;
     ask_focus = true;
     snprintf(answer, sizeof(answer), "%s", what == RENAMING ? chosen()->name : "");
@@ -950,10 +950,10 @@ static void context_menu(struct gui_ui *ui, struct gui_rect list) {
         if (gui_menu_item(ui, "Restore"))
             dispose(RESTORE);
         if (gui_menu_item(ui, "Delete for good"))
-            ask(DELETING);
+            ask_about(DELETING);
         gui_menu_separator(ui);
         if (gui_menu_item(ui, "Properties"))
-            ask(PROPERTIES);
+            ask_about(PROPERTIES);
     } else if (e) {
         path_of(path, e->name);
         if (gui_menu_item(ui, "Open"))
@@ -963,7 +963,7 @@ static void context_menu(struct gui_ui *ui, struct gui_rect list) {
         if (!e->folder && gui_menu_item(ui, "Open in Editor"))
             open_in("editor");
         if (!e->folder && gui_menu_item(ui, "Open with..."))
-            ask(OPENING_WITH);
+            ask_about(OPENING_WITH);
         if (!e->folder && gui_is_program(path) && gui_menu_item(ui, "Run"))
             run_selected();
         gui_menu_separator(ui);
@@ -974,15 +974,15 @@ static void context_menu(struct gui_ui *ui, struct gui_rect list) {
         if (gui_menu_item(ui, "Copy path"))
             copy_path();
         if (can_rename() && gui_menu_item(ui, "Rename"))
-            ask(RENAMING);
+            ask_about(RENAMING);
         if (gui_menu_item(ui, "Delete"))
             dispose(TRASH);
         gui_menu_separator(ui);
         if (gui_menu_item(ui, "Properties"))
-            ask(PROPERTIES);
+            ask_about(PROPERTIES);
     } else if (in_trash()) {
         if (gui_menu_item(ui, "Empty trash"))
-            ask(EMPTYING);
+            ask_about(EMPTYING);
         if (gui_menu_item(ui, "Refresh"))
             refresh();
     } else if (in_recent()) {
@@ -995,9 +995,9 @@ static void context_menu(struct gui_ui *ui, struct gui_rect list) {
             refresh();
     } else {
         if (gui_menu_item(ui, "New folder"))
-            ask(NEW_FOLDER);
+            ask_about(NEW_FOLDER);
         if (gui_menu_item(ui, "New file"))
-            ask(NEW_FILE);
+            ask_about(NEW_FILE);
         if (gui_menu_item(ui, "Paste"))
             paste();
         gui_menu_separator(ui);
@@ -1023,9 +1023,9 @@ static void list_keys(struct gui_ui *ui) {
     else if (gui_key(ui, KEY_F5))
         refresh();
     else if (chosen() && gui_key(ui, KEY_F2) && !in_trash() && can_rename())
-        ask(RENAMING);
+        ask_about(RENAMING);
     else if (chosen() && gui_key(ui, KEY_DELETE) && (shift || in_trash()))
-        ask(DELETING);
+        ask_about(DELETING);
     else if (chosen() && gui_key(ui, KEY_DELETE))
         dispose(TRASH);
     else if (chosen() && (gui_shortcut(ui, 'c') || gui_shortcut(ui, 'x')) && !in_trash())
@@ -1081,7 +1081,7 @@ static void frame(struct gui_ui *ui) {
         asking_strip(ui);
     if (in_trash()) {
         if (gui_button(ui, "Empty trash") && count)
-            ask(EMPTYING);
+            ask_about(EMPTYING);
         report(ui, 7, "empty");
         gui_same_line(ui);
     }
@@ -1121,7 +1121,7 @@ static bool select_file(const char *path, int what) {
     if (!read_folder(in[0] ? in : "/", slash + 1) || !count || strcmp(chosen()->name, slash + 1))
         return false;
     if (what != NOTHING)
-        ask(what);
+        ask_about(what);
     return true;
 }
 
@@ -1151,7 +1151,7 @@ int main(int argc, char **argv) {
     for (int i = 0; i < 4; i++)
         snprintf(place_paths[i], PATH_MAX, "%s%s%s", home ? home : "", i ? "/" : "", i ? place_names[i] : "");
     snprintf(place_paths[4], PATH_MAX, "/");
-    snprintf(place_paths[5], PATH_MAX, GUI_TRASH);
+    snprintf(place_paths[5], PATH_MAX, "%s", GUI_TRASH);
     snprintf(place_paths[6], PATH_MAX, RECENT);
     app_count = gui_app_names(app_names, MAX_APPS);
     for (int i = 0; i < app_count; i++)

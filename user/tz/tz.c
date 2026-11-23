@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <pwd.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -115,7 +116,7 @@ static int set_zone(const char *name) {
 int main(int argc, char **argv) {
     help_option(argc, argv, "usage: tz [zone | -l [prefix]]\n"
                             "Shows the time zone, sets it to a zone such as Europe/London, or lists the\n"
-                            "zones, or those starting with prefix.\n");
+                            "zones, or those starting with prefix. Only admins can set it.\n");
 
     if (argc > 1 && strcmp(argv[1], "-l") == 0) {
         size_t len = argc > 2 ? strlen(argv[2]) : 0;
@@ -127,6 +128,13 @@ int main(int argc, char **argv) {
                 puts(zones[i]);
         }
         return 0;
+    }
+    // It's setuid root, as the zone's the whole system's, for root and admins to set.
+    struct passwd *p = getpwuid(getuid());
+
+    if (argc > 1 && getuid() != 0 && (!p || !account_is_admin(p->pw_name))) {
+        dprintf(STDERR_FILENO, "tz: only accounts in the %s group can set the zone\n", ADMIN_GROUP);
+        return 1;
     }
     if (argc > 1)
         return set_zone(argv[1]);

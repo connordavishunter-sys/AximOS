@@ -15,13 +15,13 @@ AximOS is moving onto Linux, a phase at a time:
 1. **Booting to a shell** (done): Linux, glibc, AximOS's init and dash, in QEMU
 2. **The command line** (done): AximOS's own tools ported to glibc, the system tools
    written, accounts, and eudev for devices
-3. **The desktop**: wm on DRM behind its log-in screen, through seatd, and the apps
+3. **The desktop** (done): wm on DRM behind its log-in screen, through seatd, and the
+   apps but Player and NetSurf, which come with sound and networking
 4. **Real hardware**: an install image, the full kernel, firmware, and the Lenovo laptop
 5. **Network and sound**: an AximOS DHCP daemon, iwd for Wi-Fi, and an ALSA mixer
 6. **Packages**: AximOS's own package manager
 
-The desktop and apps below are what's being brought over. They already run on a Linux
-desktop through `make linux`.
+Player and NetSurf, below, are still to come back, as are some of the tests.
 
 ## Features
 
@@ -29,12 +29,18 @@ desktop through `make linux`.
 
 - Linux 7.3, with glibc 2.44 built for AximOS, booted by [Limine](https://limine-bootloader.org)
 - AximOS's own init, which mounts what Linux shares, starts the services in
-  `/system/etc/services`, one file each, restarting those that ask, and keeps a login on the
-  screen and the serial port
+  `/system/etc/services`, one file each, restarting those that ask, and keeps a text login
+  on the screen's consoles from the second, Ctrl+Alt+F2, and on the serial port
+- The desktop on the first console: wm on the screen through DRM, with the keyboard, mouse,
+  touchpad and tablets from evdev, handed over by seatd. The log-in screen runs as its own
+  account, and the session, which runs as root, checks passwords and starts wm as whoever
+  logs in. Each account's settings, recent files, trash and desktop are its own, in
+  `~/.config/aximos`
 - eudev for device files and their permissions, which loads drivers for new devices through
   AximOS's own `modprobe`
 - Accounts in `/etc/passwd` and `/etc/shadow`, hashed with yescrypt. The first boot makes
-  the first account, which is in the `admin` group and can run commands as root with `sudo`
+  the first account, on the log-in screen, or at a text console, which is in the `admin`
+  group and can run commands as root with `sudo`, and set the time zone
 
 ### Command line
 
@@ -116,12 +122,12 @@ AximOS builds on Linux. You need:
 - [Limine](https://limine-bootloader.org), installed in `/usr/share/limine`
 - `xorriso`, `rsync`, `zstd` and `curl`
 - QEMU (`qemu-system-x86_64`) and OVMF, its UEFI firmware (`/usr/share/edk2/x64/OVMF.4m.fd`), to run it
-- `sdl2` and `libdrm`, only for `make linux`
+- `sdl2` and `libseat`, only for `make linux`
 
 On Arch or CachyOS:
 
 ```bash
-sudo pacman -S --needed base-devel bc flex bison libelf openssl gawk python limine xorriso rsync zstd curl qemu-full edk2-ovmf sdl2 libdrm
+sudo pacman -S --needed base-devel bc flex bison libelf openssl gawk python limine xorriso rsync zstd curl qemu-full edk2-ovmf sdl2 seatd
 ```
 
 Then:
@@ -131,7 +137,8 @@ make
 ```
 
 This builds `build/aximos.iso`. The first build downloads the source of Linux, glibc,
-dash, libxcrypt, util-linux, e2fsprogs and eudev into `ports/dist` and checks their SHA-256
+dash, libxcrypt, util-linux, e2fsprogs, eudev, seatd, the DejaVu fonts and stb_truetype into
+`ports/dist` and checks their SHA-256
 sums, then builds glibc into `build/root`, which holds the system's files, and Linux and
 the system against it. That takes a few minutes; after that only what changed is built
 again.
@@ -154,9 +161,8 @@ build/linux/wm
 ```
 
 From a text console (Ctrl+Alt+F3, say), it takes over the screen itself through DRM,
-reading the keyboard, mouse and touchpad from `/dev/input`, which needs the `input`
-group. `--window` and `--drm` pick one or the other. Super+Shift+Q quits, and puts the
-console back. The apps also run by themselves, in windows of their own, from
+as on AximOS, with the screen and input from logind, through libseat. `--window` and
+`--drm` pick one or the other. Super+Shift+Q quits, and puts the console back. The apps also run by themselves, in windows of their own, from
 `build/linux/apps`.
 
 ### Keyboard shortcuts
@@ -171,7 +177,9 @@ console back. The apps also run by themselves, in windows of their own, from
 | Super+Q             | Close the window                      |
 | Super+arrows        | Maximize, or tile to a side, then Up or Down for a quarter |
 | Super+1 to 4        | Change workspace                      |
-| Super+Shift+Q       | Leave the desktop                     |
+| Super+L             | Lock it                               |
+| Super+Shift+Q       | Log out                               |
+| Ctrl+Alt+F2 to F6   | A text console, and Ctrl+Alt+F1 back  |
 | Print Screen        | Save the screen, and copy it          |
 | Alt+Print Screen    | The same, of the focused window       |
 | Shift+Print Screen  | Choose an area or window to save (also Super+Shift+S) |
@@ -183,26 +191,27 @@ make test
 ```
 
 Each `tests/*_test.py` boots its own QEMU, makes the first account and logs in on the
-serial port, types into the shell, and checks what happens. `utils_test.py` runs the
+serial port, types into the shell, and checks what happens. Those for the desktop log in
+on it too, and type and click there, with a USB tablet for the pointer. `utils_test.py` runs the
 same commands with the host's GNU tools and compares. Several run at once, the slowest first; `make test JOBS=2` runs
 fewer, and `make test TESTS="tests/boot_test.py"` runs just the ones named. The tests in
-`tests/pending` are for the desktop and apps, from before the move to Linux, and come
-back as those do.
+`tests/pending` are from before the move to Linux, and come back as they're ported.
 
 ## Layout
 
 ```
 kernel/          how Linux is configured, and what the initramfs has besides the system
 ports/           downloads and builds Linux, glibc, dash, libxcrypt, util-linux's libraries,
-                 e2fsprogs and eudev, into build/root
+                 e2fsprogs, eudev, seatd and the fonts, into build/root
 abi/             structures wm, libgui and the apps share, such as key and mouse events
 user/init/       the first program Linux runs
+user/session/    runs the log-in screen, then the desktop as whoever logs in
 user/libaximos/  what AximOS's programs share beyond glibc: the line editor, accounts, /proc
 user/libgui/     the GUI toolkit
 user/libaudio/   reading and writing sound files, through user/codecs/
 user/wm/         the window manager
 user/<name>/     every other folder is a program
-linux/           what wm and libgui need to run on another Linux desktop
+linux/           wm on DRM and evdev, and what wm and libgui need on another Linux desktop
 rootfs/          copied into the system as it is: settings, icons, fonts, wallpapers
 tests/           the tests, and vm.py, which drives QEMU for them
 ```
@@ -215,7 +224,7 @@ programs expect, link into it.
 
 AximOS uses [Linux](https://kernel.org), [glibc](https://www.gnu.org/software/libc/),
 [Limine](https://github.com/limine-bootloader/limine), [dash](http://gondor.apana.org.au/~herbert/dash/),
-[libxcrypt](https://github.com/besser82/libxcrypt), [util-linux](https://github.com/util-linux/util-linux)'s
+[libxcrypt](https://github.com/besser82/libxcrypt), [seatd](https://git.sr.ht/~kennylevinsen/seatd), [util-linux](https://github.com/util-linux/util-linux)'s
 libblkid and libuuid, [e2fsprogs](https://e2fsprogs.sourceforge.net), [eudev](https://github.com/eudev-project/eudev),
 [stb_truetype](https://github.com/nothings/stb) and the [DejaVu](https://dejavu-fonts.github.io) fonts.
 Each is under its own license.

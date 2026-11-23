@@ -37,10 +37,10 @@ class Pointer:
 
 v = VM()
 try:
-    check('prompt at boot', v.wait('/$ ', 30), v.text())
-    v.run('echo none > /system/etc/wallpaper; rm -f /system/etc/gui.conf') # the plain colour and default theme, to look for
+    v.desktop()
+    v.run('echo none > ~/.config/aximos/wallpaper; rm -f ~/.config/aximos/gui.conf') # the plain colour and default theme, to look for
     at = v.mark()
-    v.type('wm widgets\n')
+    v.start('widgets')
     check('widgets starts', v.wait('widgets: at textbox', 10, at), v.text(at))
     mouse = Pointer(v)
 
@@ -89,7 +89,7 @@ try:
     x, y, w_, h_ = where('textbox')
     check('hiding the progress bar moves what was under it up', y == places['textbox'][1] - places['slider'][3] - 8, (y, places['textbox']))
     mouse.click(LEFT + x + 20, TOP + y + h_ // 2)
-    v.type('Grace'); v.key('backspace'); v.key('home'); v.type('X'); v.key('end'); v.type('!')
+    v.keys('Grace'); v.key('backspace'); v.key('home'); v.keys('X'); v.key('end'); v.keys('!')
     check('text box', v.wait('widgets: name XGrac!', 5, at), v.text(at))
 
     # Ctrl+A selects all of it, Ctrl+X cuts it and Ctrl+V puts it back. Shift with
@@ -99,7 +99,7 @@ try:
     check('cut', v.wait('widgets: name \n', 5, at), v.text(at))
     v.key('ctrl-v')
     check('and paste', v.wait('widgets: name XGrac!\n', 5, at), v.text(at))
-    v.key('left'); v.key('shift-home'); v.type('Z')
+    v.key('left'); v.key('shift-home'); v.keys('Z')
     check('typing over a selection', v.wait('widgets: name Z!\n', 5, at), v.text(at))
 
     # The cursor blinks: of screenshots a quarter of a second apart, some have it
@@ -194,7 +194,7 @@ try:
     x, y, w_, h_ = where('notes')
     at = v.mark()
     mouse.click(LEFT + x + 50, TOP + y + 20)
-    v.type('ab'); v.key('ret'); v.type('cd'); v.key('up'); v.type('X')
+    v.keys('ab'); v.key('ret'); v.keys('cd'); v.key('up'); v.keys('X')
     check('text of several lines', v.wait('widgets: notes abX|cd', 5, at), v.text(at))
 
     # A double click selects a word, and dragging selects from where it started.
@@ -202,7 +202,7 @@ try:
     column = lambda n: LEFT + x + 5 + n * 8
     at = v.mark()
     mouse.double_click(column(1) + 4, line(0))
-    v.type('Q')
+    v.keys('Q')
     check('double-clicking selects a word', v.wait('widgets: notes Q|cd', 5, at), v.text(at))
     mouse.to(column(0) + 1, line(1), 1); mouse.to(column(2) + 1, line(1)); v.mouse(buttons=0)
     v.key('backspace')

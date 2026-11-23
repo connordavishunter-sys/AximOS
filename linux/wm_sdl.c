@@ -133,4 +133,5 @@ static void set_repeat(int delay, int rate) {
     (void)delay, (void)rate; // the desktop's own repeat
 }
 
-const struct display wm_sdl = {open_display, set_mode, changed, show, poll_fds, read_input, set_repeat, EVENT_WAIT_MS};
+const struct display wm_sdl = {open_display, set_mode, changed, show, poll_fds, read_input, set_repeat, EVENT_WAIT_MS,
+                               NULL};

@@ -11,6 +11,7 @@
 #include <sys/ioctl.h>
 #include <time.h>
 #include <unistd.h>
+#include <utmp.h>
 
 #define COLS 80 // to start with
 #define ROWS 25

@@ -5,8 +5,8 @@
 #include <poll.h>
 #include <stdint.h>
 
-// Where wm shows the screen and takes its input from: AximOS's framebuffer, mouse and
-// keyboard, or on Linux a window, or the screen itself through DRM.
+// Where wm shows the screen and takes its input from: the screen itself, through DRM,
+// or on another Linux desktop, a window.
 
 #define DISPLAY_FDS 32
 
@@ -32,6 +32,7 @@ struct display {
     bool (*read)(const struct pollfd *fds, struct screen *screen, const struct input *input);
     void (*set_repeat)(int delay, int rate); // as KEYBOARD_SET_REPEAT_DELAY and _RATE
     int max_wait; // the longest poll may wait, in milliseconds, for input that can't be polled, or -1
+    void (*switch_session)(int number); // to show another console, or NULL where there are none
 };
 
 // The display wm runs on, taking any options for it from the front of argv.

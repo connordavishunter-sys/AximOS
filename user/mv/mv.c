@@ -49,10 +49,12 @@ static bool resolve_target(const char *source, const char *target, char *out) {
 static bool copy_then_remove(const char *source, const char *target) {
     static char buffer[BUFFER_SIZE];
     int in = open(source, O_RDONLY);
-    if (in < 0)
+    struct stat st;
+
+    if (in < 0 || fstat(in, &st) < 0)
         return false;
 
-    int out = open(target, O_WRONLY | O_CREAT | O_TRUNC);
+    int out = open(target, O_WRONLY | O_CREAT | O_TRUNC, st.st_mode & 0777);
     if (out < 0) {
         close(in);
         return false;

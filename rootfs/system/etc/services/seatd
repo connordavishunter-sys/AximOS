@@ -1,0 +1,4 @@
+# Hands the screen and input to whichever session's console is showing, for anyone
+# with an account.
+command seatd -g users
+restart

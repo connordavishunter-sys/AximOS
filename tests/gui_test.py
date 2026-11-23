@@ -1,5 +1,5 @@
 """Checks the window system: wm draws windows, sends them the mouse and keyboard,
-moves, raises and closes them, and gives the console back when it quits."""
+moves, raises and closes them, and logs out to the log-in screen when it quits."""
 import time
 from vm import VM, check, finish
 
@@ -15,15 +15,12 @@ def count(px, x0, y0, x1, y1, color):
 
 v = VM()
 try:
-    check('prompt at boot', v.wait('/$ ', 30), v.text())
-    v.run('echo none > /system/etc/wallpaper; echo text sharp > /system/etc/gui.conf') # the plain colour, default theme and bitmap font, to look for
-    o = v.run('ls /dev'); check('/dev/keyboard exists', 'keyboard' in o, o)
-    o = v.run('guidemo; echo st=$?'); check('guidemo without wm', "wm isn't running" in o and 'st=1' in o, o)
+    v.desktop('text sharp', 'none') # the plain colour, default theme and bitmap font, to look for
+    o = v.run('GUI_SOCKET=/tmp/none guidemo; echo st=$?'); check('guidemo without wm', "wm isn't running" in o and 'st=1' in o, o)
 
     at = v.mark()
-    v.type("wm guidemo 'cat /dev/keyboard'\n")
+    v.start('guidemo')
     check('wm starts guidemo', v.wait('guidemo: window 1', 10, at), v.text(at))
-    check('/dev/keyboard is only for one', v.wait('busy', 5, at), v.text(at))
     check('new window has focus', v.wait('guidemo: focus 1', 5, at), v.text(at))
 
     # The first window's contents start at 80, 84, under a title bar from y = 60,
@@ -39,7 +36,7 @@ try:
     at = v.mark()
     v.mouse(200 - w // 2, 200 - h // 2, 1); v.mouse(buttons=0)
     check('click reaches the window', v.wait('guidemo: click 1 at 120,116', 5, at), v.text(at))
-    v.type('k')
+    v.keys('k')
     check('keys reach the window', v.wait('guidemo: key k', 5, at), v.text(at))
     w, h, px = v.screenshot()
     check('window redraws', count(px, 100, 162, 300, 180, INK) > count(px, 100, 162, 300, 180, PAPER) // 20,
@@ -75,11 +72,9 @@ try:
 
     at = v.mark()
     v.key('meta_l-shift-q')
-    check('Super+Shift+Q quits', v.wait('wm: quit', 5, at), v.text(at))
-    time.sleep(0.5)
-    o = v.run('echo back'); check('the shell has the keyboard again', '\nback\n' in o, o)
-    w, h, px = v.screenshot()
-    check('the console has the screen again', px(5, 5) != DESKTOP, hex(px(5, 5)))
+    check('Super+Shift+Q quits, logging out', v.wait('wm: quit', 5, at) and v.wait('session: tester logged out', 5, at),
+          v.text(at))
+    check('to the log-in screen', v.wait('login: log in', 10, at), v.text(at))
 finally:
     v.close()
 
@@ -101,10 +96,9 @@ class Pointer:
 # Resizing, maximizing, tiling, minimizing and the taskbar.
 v = VM()
 try:
-    check('prompt at boot', v.wait('/$ ', 30), v.text())
-    v.run('echo none > /system/etc/wallpaper; echo text sharp > /system/etc/gui.conf') # the plain colour, default theme and bitmap font, to look for
+    v.desktop('text sharp', 'none') # the plain colour, default theme and bitmap font, to look for
     at = v.mark()
-    v.type('wm guidemo\n')
+    v.start('guidemo')
     check('wm starts guidemo', v.wait('guidemo: window 1', 10, at), v.text(at))
     time.sleep(0.5)
     mouse = Pointer(v)
@@ -169,16 +163,16 @@ try:
     check('shown again', px(1000, 400) == PAPER, hex(px(1000, 400)))
 
     # The menu lists /system/bin/gui above the launcher, 24 pixels an item: its
-    # folders, Accessories, Demos, Games, Multimedia and System, then the apps
-    # outside them, files, netsurf and term. Then a line, Run..., Reboot and Shut down. It
-    # floats 8 above the taskbar.
+    # folders, Accessories, Demos, Games and System, then the apps outside them, files
+    # and term. Then a line, Run..., Lock, Log out, Reboot and Shut down. It floats 8
+    # above the taskbar.
     menu_top = bar - 11 * 24 - 9 - 8 - 8
     mouse.click(36, bar + 14)
     time.sleep(0.5)
     w, h, px = v.screenshot()
     check('the launcher opens the menu', px(150, menu_top + 10) == FOCUSED, hex(px(150, menu_top + 10)))
     at = v.mark()
-    mouse.click(100, menu_top + 4 + 7 * 24 + 12)
+    mouse.click(100, menu_top + 4 + 5 * 24 + 12)
     check('clicking term in the menu opens a terminal', v.wait('guidemo: focus 0', 10, at), v.text(at))
     time.sleep(1)
     w, h, px = v.screenshot()

@@ -2,12 +2,11 @@
 import time
 from vm import VM, check, finish
 
-v = VM(vmmouse=True)
+v = VM()
 try:
-    check('prompt at boot', v.wait('/$ ', 30), v.text())
-    v.run('echo none > /system/etc/wallpaper; rm -f /system/etc/gui.conf')
+    v.desktop(setup=['echo none > ~/.config/aximos/wallpaper; rm -f ~/.config/aximos/gui.conf'])
     at = v.mark()
-    v.type('wm snake\n')
+    v.start('snake')
     check('Snake starts', v.wait('snake: ready', 10, at), v.text(at))
     time.sleep(0.5)
 

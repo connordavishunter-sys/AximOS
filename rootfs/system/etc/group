@@ -9,6 +9,7 @@ cdrom:x:24:
 tape:x:26:
 audio:x:29:
 video:x:44:
+clock:x:46:
 sgx:x:50:
 kvm:x:61:
 render:x:62:

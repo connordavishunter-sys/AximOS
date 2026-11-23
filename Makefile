@@ -22,12 +22,29 @@ TARGET_CFLAGS := -std=gnu23 -O2 -Wall -Wextra -Wno-format-truncation -D_GNU_SOUR
 # libaximos.so, which has what they share beyond glibc.
 TOOLS := cat clear cp date df du echo env find free grep head kill ls mkdir more mv ps reboot rename rm rmdir \
 	shutdown sleep sort stat tail text top touch tz wc counter hello host nc ping mount umount dmesg uname \
-	hostname ln chmod chown id whoami sync lsmod insmod rmmod modprobe ttylogin sudo passwd useradd disk axfetch
+	hostname ln chmod chown id whoami sync lsmod insmod rmmod modprobe ttylogin sudo passwd useradd disk axfetch checkpass session
 LIBS_disk := -lblkid
-SETUID := sudo passwd# which start as root, whoever runs them
+SETUID := sudo passwd tz reboot shutdown checkpass# which start as root, whoever runs them
 LIBAXIMOS := $(ROOT)/system/lib/libaximos.so
 
-.PHONY: all debug tools linux run test clean help FORCE
+# The desktop: libgui.so, wm, and the apps in /system/bin/gui, in the folders the
+# start menu shows, or at the top for those in none. The programs that use libgui
+# without a window of their own go in /system/bin.
+LIBGUI := $(ROOT)/system/lib/libgui.so
+GUI_CFLAGS := $(TARGET_CFLAGS) -Iuser/libgui/include -Iuser/libaximos/include -isystem ports/dist
+APP_FOLDERS := Accessories Games System Demos
+APPS_Accessories := calculator editor paint viewer
+APPS_Games := snake
+APPS_System := settings tasks
+APPS_Demos := guidemo widgets
+APPS := term files $(foreach f,$(APP_FOLDERS),$(APPS_$(f)))
+app_dir = $(strip $(foreach f,$(APP_FOLDERS),$(if $(filter $(1),$(APPS_$(f))),$(f)/)))
+APP_PATHS := $(foreach a,$(APPS),$(ROOT)/system/bin/gui/$(call app_dir,$(a))$(a))
+GUI_TOOLS := run notify login
+WM := $(ROOT)/system/bin/wm
+WM_SOURCES := user/wm/wm.c linux/wm_drm.c linux/wm_display.c linux/evdev.c
+
+.PHONY: all debug tools desktop linux run test clean help FORCE
 .SECONDEXPANSION:
 
 all: $(ISO)
@@ -45,7 +62,9 @@ $(STAMPS)/glibc: $(STAMPS)/linux
 $(STAMPS)/dash: $(STAMPS)/glibc $(LIBAXIMOS) ports/dash.patch
 $(STAMPS)/libxcrypt $(STAMPS)/util-linux: $(STAMPS)/glibc
 $(STAMPS)/e2fsprogs $(STAMPS)/eudev: $(STAMPS)/util-linux
-PORTS := dash libxcrypt util-linux e2fsprogs eudev
+$(STAMPS)/seatd: $(STAMPS)/glibc
+$(STAMPS)/dejavu: $(STAMPS)/skeleton
+PORTS := dash libxcrypt util-linux e2fsprogs eudev seatd dejavu
 
 $(ROOT)/system/bin/init: user/init/init.c $(STAMPS)/glibc
 	$(TARGET_CC) $(TARGET_CFLAGS) $< -o $@
@@ -61,6 +80,22 @@ $(TOOLS:%=$(ROOT)/system/bin/%): $(ROOT)/system/bin/%: $$(wildcard user/$$*/*.c)
 
 tools: $(TOOLS:%=$(ROOT)/system/bin/%)
 
+$(LIBGUI): $(wildcard user/libgui/*.c user/libgui/*.h user/libgui/include/*.h) $(LIBAXIMOS) $(STAMPS)/stb
+	cp user/libgui/include/*.h $(ROOT)/system/include/
+	$(TARGET_CC) $(GUI_CFLAGS) -fPIC -shared -Wl,-soname,libgui.so $(filter %.c,$^) -lm -o $@
+
+$(APP_PATHS): $(ROOT)/system/bin/gui/%: $$(wildcard user/$$(notdir $$*)/*.c) $(LIBGUI)
+	@mkdir -p $(@D)
+	$(TARGET_CC) $(GUI_CFLAGS) $(filter %.c,$^) -lgui -laximos -lm -o $@
+
+$(GUI_TOOLS:%=$(ROOT)/system/bin/%): $(ROOT)/system/bin/%: $$(wildcard user/$$*/*.c) $(LIBGUI)
+	$(TARGET_CC) $(GUI_CFLAGS) $(filter %.c,$^) -lgui -laximos -lm -o $@
+
+$(WM): $(WM_SOURCES) $(wildcard user/wm/*.h linux/*.h) $(LIBGUI) $(STAMPS)/seatd
+	$(TARGET_CC) $(GUI_CFLAGS) $(WM_SOURCES) -lgui -laximos -lseat -lm -o $@
+
+desktop: $(WM) $(APP_PATHS) $(GUI_TOOLS:%=$(ROOT)/system/bin/%)
+
 # The kernel's own make decides what needs building again.
 $(KERNEL_BUILD)/.config: kernel/debug.config $(STAMPS)/linux
 	mkdir -p $(KERNEL_BUILD)
@@ -72,8 +107,9 @@ $(KERNEL): $(KERNEL_BUILD)/.config FORCE
 	$(MAKE) -s -C $(LINUX_SRC) O=$(abspath $(KERNEL_BUILD)) -j$$(nproc) bzImage
 
 # Until the system has a disk of its own, all of it is the initramfs.
-$(INITRAMFS): $(ROOT)/system/bin/init tools $(PORTS:%=$(STAMPS)/%) $(KERNEL) kernel/initramfs.list FORCE
+$(INITRAMFS): $(ROOT)/system/bin/init tools desktop $(PORTS:%=$(STAMPS)/%) $(KERNEL) kernel/initramfs.list FORCE
 	cp -r rootfs/. $(ROOT)/
+	rsync -a --exclude posix --exclude right /usr/share/zoneinfo/ $(ROOT)/system/share/zoneinfo/
 	rsync -a --delete --exclude /system/include --exclude '*.a' --exclude '*.o' $(ROOT)/ $(IMAGE)/
 	cd $(KERNEL_BUILD) && $(abspath $(LINUX_SRC))/usr/gen_initramfs.sh -o $(abspath $(BUILD))/initramfs.cpio \
 		-u squash -g squash $(abspath $(IMAGE)) $(abspath kernel/initramfs.list)
@@ -95,21 +131,17 @@ $(ISO): $(KERNEL) $(INITRAMFS) limine.conf
 # rootfs, with the apps in the start menu's folders.
 LINUX := $(BUILD)/linux
 LINUX_APPS := calculator snake editor paint
-LINUX_GUI := $(wildcard user/libgui/*.c) user/libaximos/util.c linux/gui_sdl.c linux/gui_switch.c linux/compat.c
-LINUX_WM := $(filter-out user/wm/display_aximos.c,$(wildcard user/wm/*.c)) $(wildcard linux/wm_*.c) linux/evdev.c
-LINUX_LIBS := sdl2 libdrm
+LINUX_GUI := $(wildcard user/libgui/*.c) user/libaximos/util.c user/libaximos/net.c linux/gui_sdl.c linux/gui_switch.c
+LINUX_WM := user/wm/wm.c $(wildcard linux/wm_*.c) linux/evdev.c
+LINUX_LIBS := sdl2 libseat
 LINUX_CFLAGS := -std=gnu23 -O2 -g -Wall -Wextra -Wno-format-truncation -D_GNU_SOURCE -DGUI_ROOT='"$(abspath $(LINUX))/root"' \
 	-DGUI_APPS='"$(abspath $(LINUX))/apps"' -DGUI_BIN='"/usr/bin"' -DLIBWEBP='"libwebp.so.7"' -include linux/compat.h \
 	-Iuser/libgui/include -Iuser/libaximos/include -idirafter abi -isystem ports/dist $(shell pkg-config --cflags $(LINUX_LIBS) 2>/dev/null)
 linux_objs = $(addprefix $(LINUX)/,$(subst .c,.o,$(1) $(LINUX_GUI)))
-app_dir = $(foreach f,Accessories Games,$(if $(filter $(1),$(APPS_$(f))),$(f)/))
-APPS_Accessories := calculator editor paint
-APPS_Games := snake
+linux: $(LINUX)/wm $(foreach p,$(LINUX_APPS),$(LINUX)/apps/$(call app_dir,$(p))$(p)) $(LINUX)/root
 
-linux: $(LINUX)/wm $(foreach p,$(LINUX_APPS),$(LINUX)/apps/$(strip $(call app_dir,$(p)))$(p)) $(LINUX)/root
-
-$(LINUX)/root: $(shell find rootfs)
-	mkdir -p $@ && cp -r rootfs/. $@/ && touch $@
+$(LINUX)/root: $(shell find rootfs) $(STAMPS)/dejavu
+	mkdir -p $@ && cp -r rootfs/. $@/ && cp $(ROOT)/system/share/fonts/DejaVu*.ttf $@/system/share/fonts/ && touch $@
 
 $(STAMPS)/stb: ports/build.sh
 	sh ports/build.sh stb

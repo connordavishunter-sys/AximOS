@@ -7,10 +7,9 @@ from vm import VM, check, finish
 
 X, Y = 1, 25 # maximized, the window's contents start here
 
-v = VM(vmmouse=True)
+v = VM()
 try:
-    check('prompt at boot', v.wait('/$ ', 30), v.text())
-    v.run('echo none > /system/etc/wallpaper; rm -f /system/etc/gui.conf /system/etc/trash.db')
+    v.desktop(setup=['echo none > ~/.config/aximos/wallpaper; rm -f ~/.config/aximos/gui.conf ~/.config/aximos/home/tester/.config/aximos/trash.db'])
     v.run('mkdir /tmp/t; echo a > /tmp/t/a.txt; echo b > /tmp/t/b.txt; echo c > /tmp/t/c.txt; '
           'cp /system/bin/hello /tmp/t/prog')
 
@@ -29,7 +28,7 @@ try:
     where = lambda name: [tuple(map(int, m)) for m in re.findall(rf'files: at {name} (\d+) (\d+) (\d+) (\d+)', v.text())][-1]
 
     at = v.mark()
-    v.type("wm 'files /tmp/t'\n")
+    v.start('files /tmp/t')
     check('Files lists them', v.wait('files: in /tmp/t: a.txt b.txt c.txt prog\n', 10, at), v.text(at))
     time.sleep(1)
     v.key('meta_l-up'); time.sleep(1)
@@ -48,7 +47,7 @@ try:
     # The trash is the last of the places, and shows the names they had.
     at = v.mark()
     click(X + 30, Y + ly + 2 + 5 * 22 + 11)
-    check('the trash shows their names', v.wait('files: in /trash: a.txt c.txt\n', 5, at), v.text(at))
+    check('the trash shows their names', v.wait('files: in /home/tester/.config/aximos/trash: a.txt c.txt\n', 5, at), v.text(at))
     at = v.mark()
     menu(*row(0), 0)
     check('Restore puts one back', v.wait('files: restored /tmp/t/a.txt', 5, at), v.text(at))
@@ -59,7 +58,7 @@ try:
     check('Empty trash asks first', v.wait('files: asking to empty the trash', 5, at), v.text(at))
     time.sleep(0.3)
     v.key('ret')
-    check('then empties it', v.wait('files: emptied the trash', 5, at) and v.wait('files: in /trash:\n', 5, at),
+    check('then empties it', v.wait('files: emptied the trash', 5, at) and v.wait('files: in /home/tester/.config/aximos/trash:\n', 5, at),
           v.text(at))
 
     # Shift+Delete deletes for good, once agreed to. Back to the folder first,
@@ -67,7 +66,7 @@ try:
     at = v.mark()
     ax, ay, aw, ah = where('address')
     click(X + ax + 40, Y + ay + 10)
-    v.key('ctrl-a'); v.type('/tmp/t\n')
+    v.key('ctrl-a'); v.keys('/tmp/t\n')
     check('back in the folder', v.wait('files: in /tmp/t: a.txt b.txt prog\n', 5, at), v.text(at))
     at = v.mark()
     click(*row(1))
@@ -99,10 +98,10 @@ try:
 
     at = v.mark()
     v.key('meta_l-r'); v.wait('run: ready', 5, at)
-    v.type('files --properties /tmp/t/a.txt\n')
+    v.keys('files --properties /tmp/t/a.txt\n')
     check('files --properties shows a file', v.wait('files: properties of /tmp/t/a.txt', 10, at), v.text(at))
     v.key('meta_l-shift-q'); time.sleep(1)
-    o = v.run('ls /tmp/t /trash; cat /system/etc/trash.db')
+    o = v.run('ls /tmp/t /home/tester/.config/aximos/trash; cat ~/.config/aximos/home/tester/.config/aximos/trash.db')
     check('what was restored is there, and the trash is empty', 'a.txt' in o and 'c.txt' not in o and 'b.txt' not in o, o)
 finally:
     v.close()

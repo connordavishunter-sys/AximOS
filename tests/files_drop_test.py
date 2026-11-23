@@ -5,10 +5,9 @@ from vm import VM, check, finish
 
 X, Y = 1, 25 # maximized, the window's contents start here
 
-v = VM(vmmouse=True)
+v = VM()
 try:
-    check('prompt at boot', v.wait('/$ ', 30), v.text())
-    v.run('echo none > /system/etc/wallpaper; rm -f /system/etc/gui.conf')
+    v.desktop(setup=['echo none > ~/.config/aximos/wallpaper; rm -f ~/.config/aximos/gui.conf'])
     v.run('mkdir /tmp/fd /tmp/fd/box /tmp/other; echo a > /tmp/fd/a.txt; echo b > /tmp/fd/b.txt; '
           'cp /system/share/icons/apps/paint.png /tmp/fd/pic.png')
 
@@ -24,7 +23,7 @@ try:
     where = lambda name: [tuple(map(int, m)) for m in re.findall(rf'files: at {name} (\d+) (\d+) (\d+) (\d+)', v.text())][-1]
 
     at = v.mark()
-    v.type("wm 'files /tmp/fd'\n")
+    v.start('files /tmp/fd')
     check('Files starts', v.wait('files: in /tmp/fd: box/ a.txt b.txt pic.png', 10, at), v.text(at))
     time.sleep(1)
     at = v.mark()
@@ -53,7 +52,7 @@ try:
     check('a new tab', v.wait('files: tab 2 of 2', 5, at), v.text(at))
     ax, ay, aw, ah = where('address')
     v.pointer(X + ax + 100, Y + ay + 10, 1); v.pointer(X + ax + 100, Y + ay + 10, 0)
-    v.key('ctrl-a'); v.type('/tmp/other\n')
+    v.key('ctrl-a'); v.keys('/tmp/other\n')
     check('goes elsewhere', v.wait('files: in /tmp/other:', 5, at), v.text(at))
     v.key('ctrl-shift-tab')
     check('back to the first', v.wait('files: in /tmp/fd:', 5, at), v.text(at))

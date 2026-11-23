@@ -92,7 +92,12 @@ static void random_name(char out[NAME_LENGTH + 1]) {
 
 // Every line but the one for name, if it's given, written again.
 static bool forget(const char *name) {
-    FILE *in = fopen(GUI_TRASH_DB, "r"), *out = fopen(GUI_TRASH_DB ".new", "w");
+    char db[GUI_PATH_MAX], temporary[GUI_PATH_MAX + 8];
+
+    snprintf(db, sizeof(db), "%s", GUI_TRASH_DB);
+    snprintf(temporary, sizeof(temporary), "%s.new", db);
+
+    FILE *in = fopen(db, "r"), *out = fopen(temporary, "w");
     char line[MAX_LINE];
     size_t length = strlen(name);
 
@@ -102,7 +107,7 @@ static bool forget(const char *name) {
     }
     if (in)
         fclose(in);
-    return out && fclose(out) == 0 && rename(GUI_TRASH_DB ".new", GUI_TRASH_DB) == 0;
+    return out && fclose(out) == 0 && rename(temporary, db) == 0;
 }
 
 bool gui_trash(const char *path) {
@@ -120,7 +125,7 @@ bool gui_trash(const char *path) {
     mkdir(GUI_TRASH, 0755);
     do {
         random_name(name);
-        snprintf(to, sizeof(to), GUI_TRASH "/%s", name);
+        snprintf(to, sizeof(to), "%s/%s", GUI_TRASH, name);
     } while (access(to, F_OK) == 0);
     if (!move(full, to))
         return false;
@@ -166,7 +171,7 @@ bool gui_trash_restore(const char *name, char path[GUI_PATH_MAX]) {
 
     if (!gui_trash_origin(name, origin))
         return false;
-    snprintf(from, sizeof(from), GUI_TRASH "/%s", name);
+    snprintf(from, sizeof(from), "%s/%s", GUI_TRASH, name);
     snprintf(path, GUI_PATH_MAX, "%s", origin);
     for (int i = 1; access(path, F_OK) == 0; i++)
         snprintf(path, GUI_PATH_MAX, i == 1 ? "%s (restored)" : "%s (restored %d)", origin, i);
@@ -177,7 +182,7 @@ bool gui_trash_restore(const char *name, char path[GUI_PATH_MAX]) {
 bool gui_trash_delete(const char *name) {
     char path[GUI_PATH_MAX];
 
-    snprintf(path, sizeof(path), GUI_TRASH "/%s", name);
+    snprintf(path, sizeof(path), "%s/%s", GUI_TRASH, name);
     return gui_delete_tree(path) && forget(name);
 }
 
@@ -190,7 +195,7 @@ bool gui_trash_empty(void) {
         char path[GUI_PATH_MAX];
 
         if (strcmp(d->d_name, ".") && strcmp(d->d_name, "..")) {
-            snprintf(path, sizeof(path), GUI_TRASH "/%s", d->d_name);
+            snprintf(path, sizeof(path), "%s/%s", GUI_TRASH, d->d_name);
             ok &= gui_delete_tree(path);
         }
     }

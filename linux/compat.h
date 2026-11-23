@@ -1,11 +1,5 @@
 #pragma once
 
-#include <net_types.h>
-
-// What AximOS's libc has and glibc hasn't, for programs built for Linux.
+// For programs built to run on another Linux, rather than on AximOS.
 
 #define GUI_HOSTED // on another system, whose computer isn't AximOS's to turn off
-
-// The first network card with an IPv4 address, as far as Linux tells everyone.
-int net_info(struct net_info *out);
-int net_airplane(bool on);

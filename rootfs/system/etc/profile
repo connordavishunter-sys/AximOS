@@ -1,4 +1,4 @@
 # Read by login shells, as ttylogin starts.
-export PATH=/system/bin TERM=${TERM:-linux}
+export PATH=/system/bin:/system/bin/gui:/system/bin/gui/Accessories:/system/bin/gui/Games:/system/bin/gui/System:/system/bin/gui/Demos TERM=${TERM:-linux}
 if [ "$(id -u)" = 0 ]; then PS1='$PWD# '; else PS1='$PWD$ '; fi
 [ -r /system/etc/motd ] && cat /system/etc/motd

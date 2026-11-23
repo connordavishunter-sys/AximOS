@@ -256,7 +256,7 @@ static enum snap snap; // where the window being dragged would go, if let go now
 // with a connection of its own, says someone's logged in. While it's locked only
 // that screen's window is shown, and it gets all the input.
 #define LOGIN_PATH GUI_ROOT "/system/bin/login"
-static bool login_mode, locked, logged_in;
+static bool login_mode, locked, logged_in; // login_mode is the greeter's, until someone logs in
 static struct client *session; // the log-in screen's connection
 static int64_t login_due = -1, login_started; // when to start it again, if it stops
 static char **commands; // to start once someone first logs in
@@ -2101,7 +2101,7 @@ static void draw_snap(struct gui_canvas *c, int ox, int oy) {
 #define MAX_DESKTOP 64
 #define DOUBLE_CLICK_MS 400
 #define DRAG_DISTANCE 6
-#define LAYOUT GUI_ROOT "/system/etc/desktop"
+#define LAYOUT gui_own_path("desktop")
 struct desktop_item {
     char name[256];
     bool folder;
@@ -3760,6 +3760,16 @@ static void accept_client(int listener) {
         add_client(fd);
 }
 
+// Whoever's logged in can lock their desktop, but not the greeter's, and not on
+// another Linux, which has its own.
+static bool can_lock(void) {
+#ifdef GUI_HOSTED
+    return false;
+#else
+    return !login_mode;
+#endif
+}
+
 // Starts the log-in screen, or the lock screen, with the one end of a pair of
 // sockets, so wm knows its connection from any other.
 static void start_login(void) {
@@ -3823,15 +3833,20 @@ static void log_out(void) {
     workspace = 0;
     printf("wm: logged out\n");
     play_sound(SOUND_LOG_OUT);
-    lock();
+    quitting = true; // and the session shows the log-in screen again
 }
 
 static void unlock(void) {
+    if (login_mode && session) { // the greeter's done, and the session starts the desktop as them
+        printf("wm: logged in\n");
+        quitting = true;
+        return;
+    }
     fade_screen(false);
     locked = false;
     add_damage((struct rect){0, 0, screen.width, screen.height});
     focus_top();
-    if (login_mode)
+    if (logged_in)
         printf("wm: unlocked\n");
     if (!logged_in) {
         logged_in = true;
@@ -4184,7 +4199,7 @@ static void fill_start_menu(void) {
         add_item(p, ACT_NONE, "No apps in " APPS_DIR, NULL, NULL);
     add_item(p, ACT_LINE, "", NULL, NULL);
     add_item(p, ACT_RUN, "Run...", NULL, app_icon(RUN_COMMAND));
-    if (login_mode) { // locking and logging out are for a desktop someone logged in to
+    if (can_lock()) { // locking and logging out are for a desktop someone logged in to
         add_item(p, ACT_LOCK, "Lock", NULL, gui_icon("lock"));
         add_item(p, ACT_LOG_OUT, "Log out", NULL, gui_icon("logout"));
     }
@@ -4324,14 +4339,17 @@ static int leaving = -1; // the item waiting for windows to close
 static int64_t leave_due;
 
 static void leave(int item) {
-    if (item == ITEM_LOG_OUT)
+    if (item == ITEM_LOG_OUT) {
         log_out();
+        return;
+    }
 #ifdef GUI_HOSTED
-    else
-        quitting = true; // on Linux, the computer isn't wm's to turn off
+    quitting = true; // on another Linux, the computer isn't wm's to turn off
 #else
-    else
-        reboot(item == ITEM_REBOOT ? RB_AUTOBOOT : RB_POWER_OFF);
+    if (fork() == 0) { // init stops everything, wm too
+        execl(item == ITEM_REBOOT ? GUI_BIN "/reboot" : GUI_BIN "/shutdown", "leave", (char *)NULL);
+        _exit(127);
+    }
 #endif
 }
 
@@ -5061,6 +5079,14 @@ static void handle_key(const struct key_event *e) {
     bool super = e->modifiers & KEY_MOD_SUPER;
 
     modifiers = e->modifiers;
+
+    // Ctrl+Alt+F1 to F10 show that console, even while locked, as the text ones log in for themselves.
+    if ((e->modifiers & (KEY_MOD_CTRL | KEY_MOD_ALT)) == (KEY_MOD_CTRL | KEY_MOD_ALT) && e->code >= KEY_F1
+        && e->code <= KEY_F10 && display->switch_session) {
+        if (e->pressed)
+            display->switch_session(e->code - KEY_F1 + 1);
+        return;
+    }
     if (locked) {
         if (focused && focused->client == session)
             send_to(focused, (struct gui_message){.type = GUI_KEY, .key = *e});
@@ -5117,7 +5143,7 @@ static void handle_key(const struct key_event *e) {
             launch(TASKS_COMMAND);
         return;
     }
-    if (super && e->code == KEY_L && login_mode) {
+    if (super && e->code == KEY_L && can_lock()) {
         if (e->pressed)
             lock();
         return;

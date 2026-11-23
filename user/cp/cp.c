@@ -33,11 +33,12 @@ static int fail(const char *path) {
 static int copy_file(const char *source, const char *target) {
     static char buffer[BUFFER_SIZE];
     int in = open(source, O_RDONLY);
+    struct stat st;
 
-    if (in < 0)
+    if (in < 0 || fstat(in, &st) < 0)
         return fail(source);
 
-    int out = open(target, O_WRONLY | O_CREAT | O_TRUNC);
+    int out = open(target, O_WRONLY | O_CREAT | O_TRUNC, st.st_mode & 0777); // with the same permissions
 
     if (out < 0) {
         close(in);
@@ -65,7 +66,7 @@ static int copy_path(const char *source, const char *target);
 static int copy_directory(const char *source, const char *target) {
     struct stat st;
 
-    if (stat(target, &st) < 0 && mkdir(target, 0) < 0)
+    if (stat(target, &st) < 0 && mkdir(target, 0777) < 0)
         return fail(target);
 
     DIR *dir = opendir(source);
