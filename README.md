@@ -31,6 +31,10 @@ Player and NetSurf, below, are still to come back, as are some of the tests.
   The kernel is built from Arch's config, with its drivers as modules that AximOS's own
   `modprobe` loads, and has the Lenovo 82Y3's firmware from linux-firmware, and its CPU's
   microcode, loaded before the kernel starts. NVIDIA's GPUs are never driven
+- From the ISO, the system runs in memory. Installed, it's on ext4, beside an EFI system
+  partition for Limine, the kernel and the microcode. The kernel mounts it itself, as
+  the disks it boots from have their drivers built in, and init has e2fsck check it
+  before it's made writable
 - AximOS's own init, which mounts what Linux shares, starts the services in
   `/system/etc/services`, one file each, restarting those that ask, and keeps a text login
   on the screen's consoles from the second, Ctrl+Alt+F2, and on the serial port
@@ -123,14 +127,14 @@ AximOS builds on Linux. You need:
 - GCC, binutils and make, with what Linux and glibc need to build: `bc`, `flex`, `bison`,
   `libelf`, `openssl`, `gawk` and Python 3
 - [Limine](https://limine-bootloader.org), installed in `/usr/share/limine`
-- `xorriso`, `rsync`, `zstd` and `curl`
+- `xorriso`, `rsync`, `zstd`, `cpio`, `curl`, and mtools and e2fsprogs for the disk image
 - QEMU (`qemu-system-x86_64`) and OVMF, its UEFI firmware (`/usr/share/edk2/x64/OVMF.4m.fd`), to run it
 - `sdl2` and `libseat`, only for `make linux`
 
 On Arch or CachyOS:
 
 ```bash
-sudo pacman -S --needed base-devel bc flex bison libelf openssl gawk python limine xorriso rsync zstd curl qemu-full edk2-ovmf sdl2 seatd
+sudo pacman -S --needed base-devel bc flex bison libelf openssl gawk python limine xorriso rsync zstd cpio mtools e2fsprogs curl qemu-full edk2-ovmf sdl2 seatd
 ```
 
 Then:
@@ -151,8 +155,10 @@ laptop need in a few minutes. After that only what changed is built again.
 |---------------|-----------------------------------------------------------------|
 | `make`        | Build `build/aximos.iso`                                        |
 | `make debug`  | The same, with a kernel of only QEMU's and the laptop's drivers |
-| `make run`    | Build it, then boot it in QEMU, with the shell in the terminal  |
-| `make test`   | Build it, then run the tests                                    |
+| `make disk`   | Build `build/aximos.img`, the system as it's installed on a disk |
+| `make run`    | Build the ISO, then boot it in QEMU, with the shell in the terminal |
+| `make run-disk` | The same, from the disk image, as an NVMe drive, which keeps what changes |
+| `make test`   | Build both, then run the tests                                  |
 | `make linux`  | Build wm and the calculator, Snake, the editor and Paint to run on this computer, in `build/linux` |
 | `make clean`  | Delete everything built                                         |
 

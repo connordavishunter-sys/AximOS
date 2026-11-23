@@ -25,13 +25,16 @@ def key_for(c):
 
 
 class VM:
-    def __init__(self, timeout=300, extra=(), net='', smp=4, memory='2G'):
+    def __init__(self, timeout=300, extra=(), net='', smp=4, memory='2G', nvme=None):
+        """Boots the ISO, or with nvme, the disk image there as an NVMe drive."""
+        boot = ['-drive', f'file={nvme},format=raw,if=none,id=boot', '-device', 'nvme,serial=aximos,drive=boot'] \
+            if nvme else ['-cdrom', BUILD + '/aximos.iso']
         self.dir = tempfile.mkdtemp(dir=WORK)
         self.log = self.dir + '/serial.log'
         serial, monitor, qmp = self.dir + '/serial.sock', self.dir + '/monitor.sock', self.dir + '/qmp.sock'
         self.proc = subprocess.Popen(
             ['timeout', str(timeout), 'qemu-system-x86_64', '-accel', 'kvm', '-cpu', 'host', '-smp', str(smp), '-m', memory,
-             '-M', 'q35', '-display', 'none', '-bios', OVMF, '-cdrom', BUILD + '/aximos.iso',
+             '-M', 'q35', '-display', 'none', '-bios', OVMF, *boot,
              '-netdev', 'user,id=net0' + net, '-device', 'e1000,netdev=net0', '-device', 'qemu-xhci',
              '-device', 'usb-tablet',
              '-chardev', f'socket,id=serial,path={serial},server=on,wait=off,logfile={self.log}', '-serial', 'chardev:serial',

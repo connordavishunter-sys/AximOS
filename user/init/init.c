@@ -9,14 +9,16 @@
 #include <sys/mount.h>
 #include <sys/reboot.h>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
-// The first program Linux runs. It mounts what the kernel shares through files,
-// starts the services in SERVICES, one of which is the desktop, on the screen's first
-// console, and keeps a text login on the others and on the serial port, if there's one. SIGUSR2 turns the computer off and SIGTERM
-// restarts it, as busybox's init does, and Ctrl+Alt+Del sends SIGINT.
+// The first program Linux runs. It mounts what the kernel shares through files, checks
+// the disk it runs from, if it's from one, and starts the services in SERVICES, one of
+// which is the desktop, on the screen's first console, and keeps a text login on the
+// others and on the serial port, if there's one. SIGUSR2 turns the computer off and
+// SIGTERM restarts it, as busybox's init does, and Ctrl+Alt+Del sends SIGINT.
 //
 // Each service is a file of lines: "command" and what to run, "after" and services
 // that start first, and "once" for one that runs to the end before those after it
@@ -55,6 +57,48 @@ static void mount_all(void) {
         if (mount(mounts[i].type, mounts[i].at, mounts[i].type, MS_NOSUID, NULL) < 0)
             fprintf(stderr, "init: can't mount %s\n", mounts[i].at);
     }
+}
+
+// Runs a program to the end, on the kernel's console, giving how it exited.
+static int run_program(char *const argv[]) {
+    pid_t pid = fork();
+    int status;
+
+    if (pid == 0) {
+        execve(argv[0], argv, env);
+        _exit(127);
+    }
+    return pid > 0 && waitpid(pid, &status, 0) == pid && WIFEXITED(status) ? WEXITSTATUS(status) : 127;
+}
+
+// On a disk, the kernel mounts the root read-only, so e2fsck can check it, and fix
+// what it safely can, before it's written to. From the initramfs, it's in memory.
+static void check_root(void) {
+    struct stat st;
+    char path[64], line[128], device[80] = "";
+    FILE *f;
+
+    if (stat("/", &st) < 0 || major(st.st_dev) == 0)
+        return;
+    snprintf(path, sizeof(path), "/sys/dev/block/%u:%u/uevent", major(st.st_dev), minor(st.st_dev));
+    for (f = fopen(path, "r"); f && fgets(line, sizeof(line), f);) {
+        if (!strncmp(line, "DEVNAME=", 8))
+            snprintf(device, sizeof(device), "/dev/%.*s", (int)strcspn(line + 8, "\n"), line + 8);
+    }
+    if (f)
+        fclose(f);
+
+    int checked = device[0] ? run_program((char *const[]){"/system/bin/e2fsck", "-p", device, NULL}) : 0;
+
+    if (checked & 2) { // fixed, but the kernel has the old version of what it read
+        printf("init: e2fsck fixed %s, so restarting\n", device);
+        sync();
+        reboot(RB_AUTOBOOT);
+    }
+    if (checked >= 4)
+        fprintf(stderr, "init: %s has errors e2fsck -p couldn't fix, so it's left read-only\n", device);
+    else if (mount(NULL, "/", NULL, MS_REMOUNT, NULL) < 0)
+        fprintf(stderr, "init: can't make %s writable\n", device);
 }
 
 // The first line of a small file, or "" without it.
@@ -265,6 +309,7 @@ int main(void) {
         sigaction(signals[i], &(struct sigaction){.sa_handler = asked}, NULL); // no SA_RESTART, so wait stops
     reboot(RB_DISABLE_CAD); // Ctrl+Alt+Del comes here as SIGINT
     mount_all();
+    check_root();
     set_up();
     read_services();
     run();

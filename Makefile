@@ -7,6 +7,9 @@ IMAGE := $(BUILD)/image# the same without what's only for building, such as head
 STAMPS := $(BUILD)/stamps
 ISO := $(BUILD)/aximos.iso
 ISO_ROOT := $(BUILD)/iso_root
+DISK := $(BUILD)/aximos.img
+ESP_MIB := 128
+SYSTEM_MIB := 2048
 
 # Linux: make builds Arch's config, with kernel/aximos.config's changes and its drivers
 # as modules, and make debug the kernel's own x86_64 defaults, with kernel/debug.config's
@@ -56,10 +59,12 @@ GUI_TOOLS := run notify login
 WM := $(ROOT)/system/bin/wm
 WM_SOURCES := user/wm/wm.c linux/wm_drm.c linux/wm_display.c linux/evdev.c
 
-.PHONY: all debug tools desktop linux run test clean help FORCE
+.PHONY: all debug disk tools desktop linux run run-disk test clean help FORCE
 .SECONDEXPANSION:
 
 all: $(ISO)
+
+disk: $(DISK)
 
 # The same, but with a kernel of only what QEMU and the laptop need, which builds quickly.
 debug: all
@@ -147,6 +152,27 @@ $(ISO): $(KERNEL) $(INITRAMFS) limine.conf
 	xorriso -as mkisofs -R -r -J --efi-boot boot/limine/limine-uefi-cd.bin -efi-boot-part --efi-boot-image \
 		--protective-msdos-label $(ISO_ROOT) -o $@ 2>/dev/null
 
+# The system as it's installed, on a disk image: an EFI system partition with Limine,
+# the kernel and the microcode, and the system on ext4 after it, which the kernel
+# mounts itself, by its PARTUUID. Its files are root's, through a tarball.
+$(DISK): $(KERNEL) $(INITRAMFS) limine-disk.conf
+	rm -f $@ $(BUILD)/esp.img $(BUILD)/system.img
+	truncate -s $$(( $(ESP_MIB) + $(SYSTEM_MIB) + 2 ))M $@
+	printf 'label: gpt\nstart=1MiB, size=$(ESP_MIB)MiB, type=uefi\nsize=$(SYSTEM_MIB)MiB, type=linux\n' | sfdisk -q $@
+	sed "s/@ROOT@/$$(sfdisk --part-uuid $@ 2)/" limine-disk.conf > $(BUILD)/limine-disk.conf
+	truncate -s $(ESP_MIB)M $(BUILD)/esp.img
+	mformat -i $(BUILD)/esp.img -F -v AXIMOS ::
+	mmd -i $(BUILD)/esp.img ::/EFI ::/EFI/BOOT ::/boot ::/boot/limine
+	mcopy -i $(BUILD)/esp.img $(LIMINE_DIR)/BOOTX64.EFI ::/EFI/BOOT/
+	mcopy -i $(BUILD)/esp.img $(KERNEL) ::/boot/vmlinuz
+	mcopy -i $(BUILD)/esp.img $(BUILD)/microcode.cpio ::/boot/
+	mcopy -i $(BUILD)/esp.img $(BUILD)/limine-disk.conf ::/boot/limine/limine.conf
+	tar --owner=0 --group=0 -C $(IMAGE) -cf $(BUILD)/system.tar .
+	mke2fs -q -t ext4 -L AximOS -d $(BUILD)/system.tar $(BUILD)/system.img $(SYSTEM_MIB)M
+	dd if=$(BUILD)/esp.img of=$@ bs=1M seek=1 conv=notrunc status=none
+	dd if=$(BUILD)/system.img of=$@ bs=1M seek=$$(( 1 + $(ESP_MIB) )) conv=notrunc,sparse status=none
+	rm $(BUILD)/esp.img $(BUILD)/system.img $(BUILD)/system.tar
+
 # wm and apps built for Linux. wm runs in a window on the desktop, or on the screen
 # itself from a text console, and the apps in it, or in windows of their own through
 # SDL2 when they're started anywhere else. They use the fonts, icons and settings in
@@ -192,15 +218,24 @@ run: $(ISO)
 	qemu-system-x86_64 -accel kvm -accel tcg -cpu max -smp 4 -m 2G -M q35 -bios $(OVMF) -serial mon:stdio \
 		-netdev user,id=net0 -device e1000,netdev=net0 -device qemu-xhci -device usb-tablet -cdrom $(ISO)
 
+# The same, from the disk image, as an NVMe drive, which keeps what's changed on it
+# until it's built again.
+run-disk: $(DISK)
+	qemu-system-x86_64 -accel kvm -accel tcg -cpu max -smp 4 -m 2G -M q35 -bios $(OVMF) -serial mon:stdio \
+		-netdev user,id=net0 -device e1000,netdev=net0 -device qemu-xhci -device usb-tablet \
+		-drive file=$(DISK),format=raw,if=none,id=disk -device nvme,serial=aximos,drive=disk
+
 # Each tests/*_test.py boots its own VMs, so several run at once. JOBS sets how many,
 # and TESTS picks which, as in make test TESTS="tests/boot_test.py".
-test: $(ISO)
+test: $(ISO) $(DISK)
 	@python3 tests/run.py $(if $(JOBS),-j $(JOBS)) $(TESTS)
 
 help:
 	@echo "make           build the system into $(ISO)"
 	@echo "make debug     the same, with a kernel of only QEMU's and the laptop's drivers, built in"
+	@echo "make disk      build $(DISK), the system as it's installed on a disk"
 	@echo "make run       build it, then boot it in QEMU, with the shell in this terminal"
+	@echo "make run-disk  the same, from the disk image"
 	@echo "make test      build it, then run the tests in tests/, several at once"
 	@echo "               (JOBS=n sets how many, TESTS=\"tests/x_test.py ...\" picks which)"
 	@echo "make linux     build wm and some apps to run on this computer, in $(LINUX)"
