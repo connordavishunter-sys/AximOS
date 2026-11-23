@@ -169,6 +169,33 @@ stb) # only stb_truetype, which libgui includes
 	fetch https://raw.githubusercontent.com/nothings/stb/9600522de53973336fa033a289858a4354cbb04c stb_truetype.h \
 		428cfe93520f2aed5e413a220b0db5bba5b17e2ebe5a64e4a8efa9eeeb67ec5f
 	;;
+openssl) # after glibc: TLS, for HTTPS, and the cryptography wpa_supplicant's WPA3 needs
+	fetch https://github.com/openssl/openssl/releases/download/openssl-4.1.0 openssl-4.1.0.tar.gz \
+		50c17baf54cb008f6ce42d50deb4b28050a1aad711636cabd4b241c7e90cc2fd
+	unpack openssl-4.1.0.tar.gz openssl-4.1.0
+	cd openssl-4.1.0
+	[ -e Makefile ] || CC=$target_cc ./Configure linux-x86_64 --prefix=/usr --libdir=lib --openssldir=/etc/ssl \
+		shared no-docs no-tests no-static-engine -O2 >/dev/null
+	make -j"$jobs" build_sw >/dev/null
+	make install_sw install_ssldirs DESTDIR="$target" >/dev/null
+	ln -sfn ../ca-certificates.crt "$target/system/etc/ssl/cert.pem" # the system's CAs, as OpenSSL looks for them
+	;;
+libnl) # after glibc: how wpa_supplicant talks to Linux's Wi-Fi, through netlink
+	fetch https://github.com/thom311/libnl/releases/download/libnl3_12_0 libnl-3.12.0.tar.gz \
+		fc51ca7196f1a3f5fdf6ffd3864b50f4f9c02333be28be4eeca057e103c0dd18
+	unpack libnl-3.12.0.tar.gz libnl-3.12.0
+	cd libnl-3.12.0
+	autotools --disable-cli --disable-debug
+	;;
+wpa_supplicant) # after openssl and libnl: joins Wi-Fi networks, for netd
+	fetch https://w1.fi/releases wpa_supplicant-2.12.tar.gz \
+		08e23937e16d0155e55cab2b51f51fbe10d80a1aa91c4e15442645059b737ef6
+	unpack wpa_supplicant-2.12.tar.gz wpa_supplicant-2.12
+	cd wpa_supplicant-2.12/wpa_supplicant
+	cp "$root/ports/wpa_supplicant.config" .config
+	make -j"$jobs" CC="$target_cc" PKG_CONFIG=pkg-config wpa_supplicant wpa_cli >/dev/null
+	install -m 755 wpa_supplicant wpa_cli "$target/system/bin/"
+	;;
 *)
 	echo "build.sh: no part called $1" >&2
 	exit 1

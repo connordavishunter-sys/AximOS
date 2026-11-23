@@ -180,7 +180,7 @@ The last grows btrfs back to fill what's left of the partition. `lsblk` then sho
 AximOS builds on Linux. You need:
 
 - GCC, binutils and make, with what Linux and glibc need to build: `bc`, `flex`, `bison`,
-  `libelf`, `openssl`, `gawk` and Python 3
+  `libelf`, `openssl`, `gawk`, Perl (for OpenSSL's build) and Python 3
 - [Limine](https://limine-bootloader.org), installed in `/usr/share/limine`
 - `xorriso`, `rsync`, `zstd`, `cpio`, `curl`, and mtools and e2fsprogs for the disk image
 - QEMU (`qemu-system-x86_64`) and OVMF, its UEFI firmware (`/usr/share/edk2/x64/OVMF.4m.fd`), to run it
@@ -294,7 +294,8 @@ AximOS uses [Linux](https://kernel.org), [glibc](https://www.gnu.org/software/li
 [Limine](https://github.com/limine-bootloader/limine), [dash](http://gondor.apana.org.au/~herbert/dash/),
 [libxcrypt](https://github.com/besser82/libxcrypt), [seatd](https://git.sr.ht/~kennylevinsen/seatd), [util-linux](https://github.com/util-linux/util-linux)'s
 libblkid and libuuid, [e2fsprogs](https://e2fsprogs.sourceforge.net), [eudev](https://github.com/eudev-project/eudev),
-[stb_truetype](https://github.com/nothings/stb), the [DejaVu](https://dejavu-fonts.github.io) fonts,
+[OpenSSL](https://openssl-library.org), [libnl](https://github.com/thom311/libnl),
+[wpa_supplicant](https://w1.fi/wpa_supplicant/), [stb_truetype](https://github.com/nothings/stb), the [DejaVu](https://dejavu-fonts.github.io) fonts,
 [linux-firmware](https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git),
 [Intel's microcode](https://github.com/intel/Intel-Linux-Processor-Microcode-Data-Files) and
 [Arch Linux](https://gitlab.archlinux.org/archlinux/packaging/packages/linux)'s kernel config.

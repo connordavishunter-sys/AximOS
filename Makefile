@@ -81,9 +81,11 @@ $(STAMPS)/dash: $(STAMPS)/glibc $(LIBAXIMOS) ports/dash.patch
 $(STAMPS)/libxcrypt $(STAMPS)/util-linux: $(STAMPS)/glibc
 $(STAMPS)/e2fsprogs $(STAMPS)/eudev: $(STAMPS)/util-linux
 $(STAMPS)/seatd: $(STAMPS)/glibc
+$(STAMPS)/openssl $(STAMPS)/libnl: $(STAMPS)/glibc
+$(STAMPS)/wpa_supplicant: $(STAMPS)/openssl $(STAMPS)/libnl ports/wpa_supplicant.config
 $(STAMPS)/dejavu: $(STAMPS)/skeleton
 $(STAMPS)/firmware: $(STAMPS)/skeleton kernel/firmware.list
-PORTS := dash libxcrypt util-linux e2fsprogs eudev seatd dejavu firmware
+PORTS := dash libxcrypt util-linux e2fsprogs eudev seatd dejavu firmware openssl libnl wpa_supplicant
 
 $(ROOT)/system/bin/init: user/init/init.c $(STAMPS)/glibc
 	$(TARGET_CC) $(TARGET_CFLAGS) $< -o $@
