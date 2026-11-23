@@ -57,6 +57,10 @@ static void mount_all(void) {
         if (mount(mounts[i].type, mounts[i].at, mounts[i].type, MS_NOSUID, NULL) < 0)
             fprintf(stderr, "init: can't mount %s\n", mounts[i].at);
     }
+    // The firmware's variables, there if it started in UEFI, as efiboot changes
+    if (access("/sys/firmware/efi/efivars", F_OK) == 0
+        && mount("efivarfs", "/sys/firmware/efi/efivars", "efivarfs", MS_NOSUID | MS_NODEV | MS_NOEXEC, NULL) < 0)
+        fprintf(stderr, "init: can't mount the firmware's variables\n");
 }
 
 // Runs a program to the end, on the kernel's console, giving how it exited.

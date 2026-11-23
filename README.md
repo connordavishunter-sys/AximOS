@@ -57,8 +57,9 @@ and Ctrl+arrows edit the line, and Ctrl+R searches the history, which is kept in
 AximOS's own tools: `ls cat cp mv rm mkdir rmdir touch rename ln chmod chown stat find grep
 sort head tail wc more du df free ps top kill date tz sleep env echo clear text axfetch`,
 system tools `mount umount dmesg uname hostname sync lsmod insmod rmmod modprobe`, accounts
-with `id whoami passwd useradd sudo`, `disk` (lists drives, partitions them with GPT, and
-formats them as ext4 or FAT32), and `host nc ping`. Run any of them with `--help`. ext4 is
+with `id whoami passwd useradd sudo`, `disk` (lists drives and their free space, partitions
+them with GPT, adds partitions in free space beside what's there, and formats them as ext4 or
+FAT32), `efiboot` (the firmware's boot entries and their order), and `host nc ping`. Run any of them with `--help`. ext4 is
 made and checked by [e2fsprogs](https://e2fsprogs.sourceforge.net)' `mkfs.ext4` and `e2fsck`.
 
 ### Desktop
@@ -119,6 +120,34 @@ made and checked by [e2fsprogs](https://e2fsprogs.sourceforge.net)' `mkfs.ext4` 
 | Install    | Installs AximOS on a drive, from the ISO, which boots straight into it |
 | Settings   | Theme, accent, display, taskbar, keyboard and mouse, sound, date and time, and default apps |
 | Snake      | Three speeds, each with its own best score                            |
+
+## Installing beside CachyOS
+
+AximOS goes in free space on a drive, and never resizes what's there. Where a system fills
+its drive, as CachyOS's btrfs does on the laptop's `nvme0n1p2`, make room from that system
+first. For 128 GB, back up what matters, then in CachyOS:
+
+```bash
+sudo btrfs filesystem resize -130G /
+```
+
+That shrinks the filesystem a little more than the partition, which is then cut by 128 GiB,
+from its end, and Linux told of it:
+
+```bash
+echo ", -128GiB" | sudo sfdisk -N 2 --no-reread /dev/nvme0n1
+```
+
+```bash
+sudo partx -u /dev/nvme0n1
+```
+
+```bash
+sudo btrfs filesystem resize max /
+```
+
+The last grows btrfs back to fill what's left of the partition. `lsblk` then shows
+`nvme0n1p2` 128 GiB smaller, and AximOS's `disk` shows the space after it as free.
 
 ## Building
 

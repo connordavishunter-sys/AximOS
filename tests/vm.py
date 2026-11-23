@@ -5,6 +5,7 @@ import json, os, re, shlex, shutil, socket, subprocess, tempfile, threading, tim
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BUILD = ROOT + '/build'
 OVMF = '/usr/share/edk2/x64/OVMF.4m.fd'
+OVMF_CODE, OVMF_VARS = '/usr/share/edk2/x64/OVMF_CODE.4m.fd', '/usr/share/edk2/x64/OVMF_VARS.4m.fd'
 WORK = tempfile.mkdtemp(prefix='aximos-test-')
 ESCAPES = re.compile(r'\x1b\[[0-9;?]*[A-Za-z]')
 NAMED = {' ': 'spc', '/': 'slash', '.': 'dot', '-': 'minus', '\\': 'backslash', '=': 'equal', ',': 'comma',
@@ -25,16 +26,19 @@ def key_for(c):
 
 
 class VM:
-    def __init__(self, timeout=300, extra=(), net='', smp=4, memory='2G', nvme=None):
-        """Boots the ISO, or with nvme, the disk image there as an NVMe drive."""
+    def __init__(self, timeout=300, extra=(), net='', smp=4, memory='2G', nvme=None, efivars=None):
+        """Boots the ISO, or with nvme, the disk image there as an NVMe drive. With efivars,
+        the firmware keeps its variables in that file, a copy of OVMF_VARS."""
         boot = ['-drive', f'file={nvme},format=raw,if=none,id=boot', '-device', 'nvme,serial=aximos,drive=boot'] \
             if nvme else ['-cdrom', BUILD + '/aximos.iso']
+        firmware = ['-drive', f'if=pflash,format=raw,readonly=on,file={OVMF_CODE}',
+                    '-drive', f'if=pflash,format=raw,file={efivars}'] if efivars else ['-bios', OVMF]
         self.dir = tempfile.mkdtemp(dir=WORK)
         self.log = self.dir + '/serial.log'
         serial, monitor, qmp = self.dir + '/serial.sock', self.dir + '/monitor.sock', self.dir + '/qmp.sock'
         self.proc = subprocess.Popen(
             ['timeout', str(timeout), 'qemu-system-x86_64', '-accel', 'kvm', '-cpu', 'host', '-smp', str(smp), '-m', memory,
-             '-M', 'q35', '-display', 'none', '-bios', OVMF, *boot,
+             '-M', 'q35', '-display', 'none', *firmware, *boot,
              '-netdev', 'user,id=net0' + net, '-device', 'e1000,netdev=net0', '-device', 'qemu-xhci',
              '-device', 'usb-tablet',
              '-chardev', f'socket,id=serial,path={serial},server=on,wait=off,logfile={self.log}', '-serial', 'chardev:serial',

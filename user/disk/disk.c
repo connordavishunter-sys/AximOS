@@ -3,6 +3,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/blkpg.h>
 #include <linux/fs.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -12,9 +13,11 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-// Lists drives, partitions them with GPT, and makes filesystems on them: FAT32 of
-// its own, as the firmware boots from, and ext4 through mkfs.ext4. A drive is
-// opened only if nothing has it mounted.
+// Lists drives, partitions them with GPT, adds partitions in their free space, and
+// makes filesystems on them: FAT32 of its own, as the firmware boots from, and ext4
+// through mkfs.ext4. A drive is erased only if nothing has it mounted. Adding to
+// one only writes its partition table and space no partition has, so may be done
+// while it's in use.
 
 #define SECTOR 512
 #define MAX_DISKS 16
@@ -40,6 +43,8 @@ struct partition {
 
 static const uint8_t esp_type[16] = {0x28, 0x73, 0x2A, 0xC1, 0x1F, 0xF8, 0xD2, 0x11,
                                      0xBA, 0x4B, 0x00, 0xA0, 0xC9, 0x3E, 0xC9, 0x3B};
+static const uint8_t linux_type[16] = {0xAF, 0x3D, 0xC6, 0x0F, 0x83, 0x84, 0x72, 0x47,
+                                       0x8E, 0x79, 0x3D, 0x69, 0xD8, 0x47, 0x7D, 0xE4};
 static const uint8_t data_type[16] = {0xA2, 0xA0, 0xD0, 0xEB, 0xE5, 0xB9, 0x33, 0x44,
                                       0x87, 0xC0, 0x68, 0xB6, 0xB7, 0x26, 0x99, 0xC7};
 static bool yes;
@@ -217,14 +222,44 @@ static void show_size(uint64_t sectors) {
     print_size(sectors * SECTOR, 9);
 }
 
+static int by_start(const void *a, const void *b) {
+    const struct partition *x = a, *y = b;
+
+    return (x->first > y->first) - (x->first < y->first);
+}
+
+// The stretches of a GPT drive no partition has, from its first usable sector, of a
+// MiB or more, each starting on a whole MiB. They're added to the end of the
+// partitions, which are sorted.
+static int add_gaps(uint64_t sectors, uint64_t usable, struct partition *p, int n, int room) {
+    uint64_t at = (usable + ALIGN - 1) / ALIGN * ALIGN, end = sectors - 1 - GPT_TABLE_SECTORS; // past the last usable sector
+    int used = n;
+
+    qsort(p, n, sizeof(*p), by_start);
+    for (int i = 0; i <= used && n < room; i++) {
+        uint64_t until = i < used ? p[i].first : end;
+
+        if (until >= at + ALIGN)
+            p[n++] = (struct partition){.first = at, .count = until - at};
+        if (i < used && p[i].first + p[i].count > at)
+            at = (p[i].first + p[i].count + ALIGN - 1) / ALIGN * ALIGN;
+    }
+    return n;
+}
+
 static int list(void) {
     struct disk d[MAX_DISKS];
     int count = disks(d);
 
     for (int i = 0; i < count; i++) {
-        struct partition p[MAX_PARTITIONS];
+        struct partition p[MAX_PARTITIONS * 2];
         char label[64];
         int n = partitions(d[i].name, p);
+
+        if (n) {
+            n = add_gaps(d[i].sectors, ALIGN, p, n, MAX_PARTITIONS * 2);
+            qsort(p, n, sizeof(*p), by_start);
+        }
 
         printf("%-10s", d[i].name);
         show_size(d[i].sectors);
@@ -237,10 +272,11 @@ static int list(void) {
                 printf("  (whole)   %s\n", label);
         }
         for (int j = 0; j < n; j++) {
-            label_of(p[j].name, label, sizeof(label));
-            printf("  %-10s", p[j].name);
+            if (p[j].name[0])
+                label_of(p[j].name, label, sizeof(label));
+            printf("  %-10s", p[j].name[0] ? p[j].name : "free");
             show_size(p[j].count);
-            printf("  %s\n", label);
+            printf("%s%s\n", p[j].name[0] ? "  " : "", p[j].name[0] ? label : "");
         }
     }
     return 0;
@@ -258,7 +294,7 @@ static bool confirm(const char *name) {
 
 // Opens a drive or partition by name, for writing, which it must be possible to.
 // Opening it exclusively fails while anything has it mounted.
-static int open_drive(const char *name, struct disk *out) {
+static int open_drive(const char *name, struct disk *out, bool exclusive) {
     char path[64];
     int fd;
 
@@ -270,17 +306,17 @@ static int open_drive(const char *name, struct disk *out) {
         dprintf(STDERR_FILENO, "disk: no drive or partition called %s\n", name);
         return -1;
     }
-    if ((fd = open(path, O_RDWR | O_EXCL | O_CLOEXEC)) < 0 && errno == EBUSY)
+    if ((fd = open(path, O_RDWR | O_CLOEXEC | (exclusive ? O_EXCL : 0))) < 0 && errno == EBUSY)
         dprintf(STDERR_FILENO, "disk: %s is in use, as something on it is mounted\n", name);
     else if (fd < 0)
         fail(path);
     return fd;
 }
 
-static void put_header(uint8_t *h, uint64_t self, uint64_t other, uint64_t entries, uint64_t sectors,
+static void put_header(uint8_t *h, uint64_t self, uint64_t other, uint64_t entries, uint64_t sectors, uint64_t first,
                        const uint8_t guid[16], uint32_t table_crc) {
     uint32_t revision = 0x10000, header_size = 92, count = GPT_ENTRIES, size = GPT_ENTRY_SIZE, crc;
-    uint64_t first = 2 + GPT_TABLE_SECTORS, last = sectors - 2 - GPT_TABLE_SECTORS;
+    uint64_t last = sectors - 2 - GPT_TABLE_SECTORS;
 
     memset(h, 0, SECTOR);
     memcpy(h, "EFI PART", 8);
@@ -299,12 +335,26 @@ static void put_header(uint8_t *h, uint64_t self, uint64_t other, uint64_t entri
     memcpy(h + 16, &crc, 4);
 }
 
+// The header and its entries at the start, and copies at the end. Partitions start
+// from first, which disk has right after the entries, though others have 2048.
+static bool put_gpt(int fd, uint64_t sectors, uint64_t first, const uint8_t *table, const uint8_t guid[16]) {
+    uint8_t header[SECTOR];
+    uint32_t table_crc = crc32(table, GPT_TABLE_SECTORS * SECTOR);
+    bool ok;
+
+    put_header(header, 1, sectors - 1, 2, sectors, first, guid, table_crc);
+    ok = put(fd, 1, header, 1) && put(fd, 2, table, GPT_TABLE_SECTORS);
+    put_header(header, sectors - 1, 1, sectors - 1 - GPT_TABLE_SECTORS, sectors, first, guid, table_crc);
+    ok = ok && put(fd, sectors - 1 - GPT_TABLE_SECTORS, table, GPT_TABLE_SECTORS) && put(fd, sectors - 1, header, 1);
+    return ok && fsync(fd) == 0;
+}
+
 // One partition for each size in MiB, and the rest of the drive for "rest" or
 // when there are none. The first is the EFI system partition, which the firmware
 // boots from.
 static int partition(const char *name, char **sizes, int size_count) {
     static uint8_t table[GPT_TABLE_SECTORS * SECTOR];
-    uint8_t mbr[SECTOR] = {0}, header[SECTOR], guid[16];
+    uint8_t mbr[SECTOR] = {0}, guid[16];
     struct disk d;
     uint64_t next = ALIGN;
     int fd, n = size_count ? size_count : 1;
@@ -312,7 +362,7 @@ static int partition(const char *name, char **sizes, int size_count) {
     if (n > GPT_ENTRIES)
         n = GPT_ENTRIES;
     memset(table, 0, sizeof(table));
-    if ((fd = open_drive(name, &d)) < 0)
+    if ((fd = open_drive(name, &d, true)) < 0)
         return 1;
 
     uint64_t last = d.sectors - 2 - GPT_TABLE_SECTORS;
@@ -362,24 +412,113 @@ static int partition(const char *name, char **sizes, int size_count) {
     mbr[510] = 0x55;
     mbr[511] = 0xAA;
 
-    // The header and its entries at the start, and copies at the end.
-    uint32_t table_crc = crc32(table, sizeof(table));
-    bool ok;
-
     random_guid(guid);
-    put_header(header, 1, d.sectors - 1, 2, d.sectors, guid, table_crc);
     // What was before the first partition goes, as a disc image's would still be found.
-    ok = zero(fd, 2 + GPT_TABLE_SECTORS, ALIGN - 2 - GPT_TABLE_SECTORS) && put(fd, 0, mbr, 1) && put(fd, 1, header, 1)
-        && put(fd, 2, table, GPT_TABLE_SECTORS);
-    put_header(header, d.sectors - 1, 1, d.sectors - 1 - GPT_TABLE_SECTORS, d.sectors, guid, table_crc);
-    ok = ok && put(fd, d.sectors - 1 - GPT_TABLE_SECTORS, table, GPT_TABLE_SECTORS) && put(fd, d.sectors - 1, header, 1);
-    ok = ok && fsync(fd) == 0;
+    bool ok = zero(fd, 2 + GPT_TABLE_SECTORS, ALIGN - 2 - GPT_TABLE_SECTORS) && put(fd, 0, mbr, 1)
+        && put_gpt(fd, d.sectors, 2 + GPT_TABLE_SECTORS, table, guid);
     if (ok && ioctl(fd, BLKRRPART) < 0)
         dprintf(STDERR_FILENO, "disk: Linux will see the new partitions once %s is restarted\n", name);
     close(fd);
     if (!ok)
         return fail(name);
     printf("disk: partitioned %s\n", name);
+    return 0;
+}
+
+// Reads a drive's GPT, if it's laid out as disk would lay it out, as any tool does:
+// 128 entries after the header, and copies at the drive's end.
+static bool get_gpt(int fd, uint64_t sectors, uint8_t *table, uint8_t guid[16], uint64_t *first) {
+    uint8_t header[SECTOR], expect[SECTOR];
+
+    if (!transfer(fd, 1, header, 1, false) || memcmp(header, "EFI PART", 8)
+        || !transfer(fd, 2, table, GPT_TABLE_SECTORS, false))
+        return false;
+    memcpy(guid, header + 56, 16);
+    memcpy(first, header + 40, 8);
+    put_header(expect, 1, sectors - 1, 2, sectors, *first, guid, crc32(table, GPT_TABLE_SECTORS * SECTOR));
+    return !memcmp(header, expect, 92);
+}
+
+// Adds a partition to a GPT drive, in the first free stretch it fits, or for "rest"
+// the largest. An ESP, or one for Linux.
+static int add(const char *name, const char *size, const char *type) {
+    static uint8_t table[GPT_TABLE_SECTORS * SECTOR];
+    struct partition p[GPT_ENTRIES + MAX_PARTITIONS];
+    uint8_t guid[16];
+    struct disk d;
+    uint64_t usable;
+    bool esp = !strcmp(type, "esp"), rest = !strcmp(size, "rest");
+    char *end;
+    uint64_t want = rest ? 0 : strtoull(size, &end, 10) * 2048;
+    int fd, n = 0, slot = -1, best = -1;
+
+    if (!esp && strcmp(type, "linux")) {
+        dprintf(STDERR_FILENO, "disk: it adds esp or linux partitions, not %s\n", type);
+        return 1;
+    }
+    if (!rest && (*end || want == 0)) {
+        dprintf(STDERR_FILENO, "disk: %s isn't a size in MiB\n", size);
+        return 1;
+    }
+    if ((fd = open_drive(name, &d, false)) < 0)
+        return 1;
+    if (!get_gpt(fd, d.sectors, table, guid, &usable)) {
+        dprintf(STDERR_FILENO, "disk: %s has no GPT partition table disk can add to\n", name);
+        close(fd);
+        return 1;
+    }
+    for (int i = 0; i < GPT_ENTRIES; i++) {
+        uint8_t *e = &table[i * GPT_ENTRY_SIZE];
+        uint64_t first, final;
+
+        if (!memcmp(e, (uint8_t[16]){0}, 16)) {
+            slot = slot < 0 ? i : slot;
+            continue;
+        }
+        memcpy(&first, e + 32, 8);
+        memcpy(&final, e + 40, 8);
+        p[n++] = (struct partition){.first = first, .count = final + 1 - first};
+    }
+
+    int used = n;
+
+    n = add_gaps(d.sectors, usable, p, n, GPT_ENTRIES + MAX_PARTITIONS);
+    for (int i = used; i < n; i++) {
+        if (rest ? best < 0 || p[i].count > p[best].count : best < 0 && p[i].count >= want)
+            best = i;
+    }
+    if (slot < 0 || best < 0) {
+        dprintf(STDERR_FILENO, "disk: %s has no free space that big\n", name);
+        close(fd);
+        return 1;
+    }
+
+    uint64_t first = p[best].first, final = first + (rest ? p[best].count : want) - 1;
+    uint8_t *e = &table[slot * GPT_ENTRY_SIZE];
+    const char *title = esp ? "EFI system" : "AximOS";
+
+    memcpy(e, esp ? esp_type : linux_type, 16);
+    random_guid(e + 16);
+    memcpy(e + 32, &first, 8);
+    memcpy(e + 40, &final, 8);
+    for (int c = 0; title[c]; c++)
+        e[56 + 2 * c] = title[c];
+
+    // Linux is told of it by itself, as it won't read the table again while in use.
+    struct blkpg_partition part = {.start = first * SECTOR, .length = (final + 1 - first) * SECTOR, .pno = slot + 1};
+    bool ok = put_gpt(fd, d.sectors, usable, table, guid);
+
+    if (ok && ioctl(fd, BLKPG, &(struct blkpg_ioctl_arg){.op = BLKPG_ADD_PARTITION, .datalen = sizeof(part), .data = &part}) < 0)
+        dprintf(STDERR_FILENO, "disk: Linux will see the new partition once %s is restarted\n", name);
+    close(fd);
+    if (!ok)
+        return fail(name);
+
+    size_t len = strlen(name);
+
+    printf("disk: added %s%s%d, ", name, len && name[len - 1] >= '0' && name[len - 1] <= '9' ? "p" : "", slot + 1);
+    show_size(final + 1 - first);
+    printf("\n");
     return 0;
 }
 
@@ -476,7 +615,7 @@ static int format(const char *target, const char *type, const char *label) {
         dprintf(STDERR_FILENO, "disk: it can make ext4 or fat32, not %s\n", type);
         return 1;
     }
-    if ((fd = open_drive(target, &drive)) < 0)
+    if ((fd = open_drive(target, &drive, true)) < 0)
         return 1;
     snprintf(path, sizeof(path), "/sys/class/block/%s/start", target);
     if (!confirm(target)) {
@@ -499,11 +638,14 @@ static int format(const char *target, const char *type, const char *label) {
 int main(int argc, char **argv) {
     help_option(argc, argv, "usage: disk [list]\n"
                             "       disk partition DRIVE [MIB...|rest] [-y]\n"
+                            "       disk add DRIVE MIB|rest esp|linux\n"
                             "       disk format DRIVE|PARTITION ext4|fat32 [LABEL] [-y]\n"
                             "Lists the drives and what's on them, gives a drive a new GPT partition table,\n"
                             "or makes a filesystem on a drive or partition. partition makes one of each\n"
                             "size given, the first the EFI system partition, and fills the drive without\n"
-                            "any. Both erase what was there, so they ask first, unless -y.\n");
+                            "any. Both erase what was there, so they ask first, unless -y. add puts a\n"
+                            "partition in a GPT drive's free space, in the first stretch it fits, or the\n"
+                            "largest for rest, and leaves the others as they are.\n");
 
     int n = 0;
 
@@ -517,6 +659,8 @@ int main(int argc, char **argv) {
         return list();
     if (!strcmp(argv[1], "partition") && n >= 2)
         return partition(argv[2], argv + 3, n - 2);
+    if (!strcmp(argv[1], "add") && n == 4)
+        return add(argv[2], argv[3], argv[4]);
     if (!strcmp(argv[1], "format") && (n == 3 || n == 4))
         return format(argv[2], argv[3], n == 4 ? argv[4] : "AXIMOS");
     dprintf(STDERR_FILENO, "disk: try disk --help\n");
