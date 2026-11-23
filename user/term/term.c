@@ -735,8 +735,13 @@ static bool new_session(char **command) {
         login_tty(slave);
         if (command && *command)
             execvp(command[0], command);
-        else
-            execl("/system/bin/sh", "sh", (char *)NULL);
+        else { // the account's shell, as a login shell, so it reads /etc/profile
+            const char *shell = getenv("SHELL") && *getenv("SHELL") ? getenv("SHELL") : "/system/bin/sh";
+            char login[64];
+
+            snprintf(login, sizeof(login), "-%s", strrchr(shell, '/') ? strrchr(shell, '/') + 1 : shell);
+            execl(shell, login, (char *)NULL);
+        }
         _exit(127);
     }
     close(slave);

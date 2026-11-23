@@ -34,9 +34,9 @@ TARGET_CFLAGS := -std=gnu23 -O2 -Wall -Wextra -Wno-format-truncation -D_GNU_SOUR
 
 # The command-line programs, each from its folder in user/, linked against
 # libaximos.so, which has what they share beyond glibc.
-TOOLS := cat clear cp date df du echo env find free grep head kill ls mkdir more mv ps reboot rename rm rmdir \
-	shutdown sleep sort stat tail text top touch tz wc counter hello host nc ping mount umount dmesg uname \
-	hostname ln chmod chown id whoami sync lsmod insmod rmmod modprobe ttylogin sudo passwd useradd disk efiboot install swapon suspend inputsim netd net wifi axfetch checkpass session
+TOOLS := clear free kill more ps reboot rename shutdown text top tz counter hello host nc ping mount umount \
+	dmesg hostname lsmod insmod rmmod modprobe ttylogin sudo passwd useradd disk efiboot install swapon suspend \
+	inputsim netd net wifi axfetch checkpass session
 LIBS_disk := -lblkid
 LIBS_mount := -lblkid
 LIBS_install := -lblkid
@@ -88,9 +88,10 @@ $(STAMPS)/zlib-ng $(STAMPS)/bash: $(STAMPS)/glibc
 $(STAMPS)/bash: ports/bash.sums
 $(STAMPS)/curl: $(STAMPS)/openssl $(STAMPS)/zlib-ng
 $(STAMPS)/git: $(STAMPS)/curl
+$(STAMPS)/coreutils $(STAMPS)/sed $(STAMPS)/grep $(STAMPS)/gawk $(STAMPS)/findutils $(STAMPS)/diffutils: $(STAMPS)/glibc
 $(STAMPS)/dejavu: $(STAMPS)/skeleton
 $(STAMPS)/firmware: $(STAMPS)/skeleton kernel/firmware.list kernel/regdb.sums
-PORTS := dash libxcrypt util-linux e2fsprogs eudev seatd dejavu firmware openssl libnl wpa_supplicant hostapd zlib-ng curl bash git
+PORTS := dash libxcrypt util-linux e2fsprogs eudev seatd dejavu firmware openssl libnl wpa_supplicant hostapd zlib-ng curl bash git coreutils sed grep gawk findutils diffutils
 
 $(ROOT)/system/bin/init: user/init/init.c $(STAMPS)/glibc
 	$(TARGET_CC) $(TARGET_CFLAGS) $< -o $@
@@ -144,6 +145,7 @@ $(INITRAMFS): $(ROOT)/system/bin/init tools desktop $(PORTS:%=$(STAMPS)/%) $(KER
 	cp -r rootfs/. $(ROOT)/
 	rsync -a --exclude posix --exclude right /usr/share/zoneinfo/ $(ROOT)/system/share/zoneinfo/
 	rsync -a --delete --exclude /system/include --exclude /system/lib/modules --exclude '*.a' --exclude '*.o' \
+		--exclude /system/share/man --exclude /system/share/info --exclude /system/share/doc \
 		$(ROOT)/ $(IMAGE)/
 	rsync -a --delete --exclude '/*/build' $(MODULES)/lib/modules/ $(IMAGE)/system/lib/modules/
 	mkdir -p $(IMAGE)/system/boot $(IMAGE)/system/share/install

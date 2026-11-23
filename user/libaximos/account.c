@@ -15,7 +15,7 @@
 #define PASSWD "/etc/passwd"
 #define GROUP "/etc/group"
 #define SHADOW_FILE "/etc/shadow"
-#define SHELL "/system/bin/sh"
+#define SHELL "/system/bin/bash" // people's; scripts asking for sh get dash
 #define USERS_GID 100
 #define LINE_MAX 1024
 

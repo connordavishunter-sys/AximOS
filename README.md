@@ -56,20 +56,22 @@ Player and NetSurf, below, are still to come back, as are some of the tests.
 
 ### Command line
 
-`dash`, with AximOS's line editor: the arrow keys, Home and End, Tab completion, Ctrl+W
-and Ctrl+arrows edit the line, and Ctrl+R searches the history, which is kept in `~/.history`.
+Accounts log in with `bash`, while `dash` is `/bin/sh` for scripts. The usual tools are
+GNU's: coreutils (`ls cp mv rm sort sha256sum` and the rest), `sed`, `grep`, `gawk`,
+`find` and `xargs`, `diff`, and `bash`, `curl`, `git` (with AximOS's `more` and `text` as its
+pager and editor) and OpenSSL's `openssl`, so scripts and programs behave as on any Linux.
+Programs installed for one account go in `~/.local/bin`, as Claude Code's installer puts it,
+which runs as is: `curl -fsSL https://claude.ai/install.sh | bash`.
 
-AximOS's own tools: `ls cat cp mv rm mkdir rmdir touch rename ln chmod chown stat find grep
-sort head tail wc more du df free ps top kill date tz sleep env echo clear text axfetch`,
-system tools `mount umount dmesg uname hostname sync lsmod insmod rmmod modprobe`, accounts
-with `id whoami passwd useradd sudo`, `disk` (lists drives and their free space, partitions
-them with GPT, adds partitions in free space beside what's there, and formats them as ext4 or
-FAT32), `efiboot` (the firmware's boot entries and their order), `install` (installs AximOS from the
-live system), `swapon`, `suspend`, `inputsim` (pretend laptop input, for the tests), `net`
-(the network, as netd has it, and addresses set by hand), `wifi` (the networks nearby, and
-joining, forgetting and airplane mode), and `host nc ping`. Ported alongside them: bash,
-curl, git (with AximOS's `more` and `text` as its pager and editor) and OpenSSL's `openssl`. Run any of them with `--help`. ext4 is
-made and checked by [e2fsprogs](https://e2fsprogs.sourceforge.net)' `mkfs.ext4` and `e2fsck`.
+AximOS's own tools: `more free ps top kill tz clear text rename axfetch`, system tools `mount
+umount dmesg hostname lsmod insmod rmmod modprobe`, accounts with `passwd useradd sudo`,
+`disk` (lists drives and their free space, partitions them with GPT, adds partitions in free
+space beside what's there, and formats them as ext4 or FAT32), `efiboot` (the firmware's
+boot entries and their order), `install` (installs AximOS from the live system), `swapon`,
+`suspend`, `inputsim` (pretend laptop input, for the tests), `net` (the network, as netd has
+it, and addresses set by hand), `wifi` (the networks nearby, and joining, forgetting and
+airplane mode), and `host nc ping`. Run any of them with `--help`. ext4 is made and checked
+by [e2fsprogs](https://e2fsprogs.sourceforge.net)' `mkfs.ext4` and `e2fsck`.
 
 ### Desktop
 
@@ -300,7 +302,8 @@ AximOS uses [Linux](https://kernel.org), [glibc](https://www.gnu.org/software/li
 libblkid and libuuid, [e2fsprogs](https://e2fsprogs.sourceforge.net), [eudev](https://github.com/eudev-project/eudev),
 [OpenSSL](https://openssl-library.org), [libnl](https://github.com/thom311/libnl),
 [wpa_supplicant and hostapd](https://w1.fi/), [bash](https://www.gnu.org/software/bash/),
-[curl](https://curl.se), [git](https://git-scm.com), [zlib-ng](https://github.com/zlib-ng/zlib-ng), [stb_truetype](https://github.com/nothings/stb), the [DejaVu](https://dejavu-fonts.github.io) fonts,
+[curl](https://curl.se), [git](https://git-scm.com), [zlib-ng](https://github.com/zlib-ng/zlib-ng), GNU
+[coreutils, sed, grep, gawk, findutils and diffutils](https://www.gnu.org/software/), [stb_truetype](https://github.com/nothings/stb), the [DejaVu](https://dejavu-fonts.github.io) fonts,
 [linux-firmware](https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git),
 [Intel's microcode](https://github.com/intel/Intel-Linux-Processor-Microcode-Data-Files) and
 [Arch Linux](https://gitlab.archlinux.org/archlinux/packaging/packages/linux)'s kernel config.

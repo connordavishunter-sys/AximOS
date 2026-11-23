@@ -65,9 +65,11 @@ int main(int argc, char **argv) {
 
     // A login shell, which its name starting with - says, reads /etc/profile.
     const char *shell = getenv("SHELL");
+    char login[64];
 
+    snprintf(login, sizeof(login), "-%s", strrchr(shell, '/') ? strrchr(shell, '/') + 1 : shell);
     printf("ttylogin: logged in %s\n", name);
-    execl(shell, "-sh", (char *)NULL);
+    execl(shell, login, (char *)NULL);
     perror(shell);
     return 127;
 }

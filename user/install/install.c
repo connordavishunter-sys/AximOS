@@ -407,7 +407,21 @@ static bool put_accounts(void) {
 
         FILE *f = kept[i] ? fopen(to, "w") : NULL;
 
-        if (kept[i] && (!f || fputs(kept[i], f) < 0))
+        // People's accounts from before bash was theirs move from dash to it.
+        for (char *line = kept[i], *end; f && i == 0 && line && *line; line = end ? end + 1 : NULL) {
+            char *colon = line;
+            int field = 0;
+
+            end = strchr(line, '\n');
+            for (; colon && field < 2; field++)
+                colon = strchr(colon + 1, ':');
+            if (colon && atoi(colon + 1) >= FIRST_UID && end && end - line > 15 && !strncmp(end - 15, ":/system/bin/sh", 15)) {
+                fprintf(f, "%.*s:/system/bin/bash\n", (int)(end - 15 - line), line);
+                continue;
+            }
+            fprintf(f, "%.*s", end ? (int)(end - line + 1) : (int)strlen(line), line);
+        }
+        if (kept[i] && (!f || (i != 0 && fputs(kept[i], f) < 0)))
             return failed(to);
         if (f)
             fclose(f);

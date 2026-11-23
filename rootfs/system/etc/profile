@@ -1,4 +1,7 @@
-# Read by login shells, as ttylogin starts.
-export PATH=/system/bin:/system/bin/gui:/system/bin/gui/Accessories:/system/bin/gui/Games:/system/bin/gui/System:/system/bin/gui/Demos TERM=${TERM:-linux}
+# Read by login shells, as ttylogin and Terminal start. Programs installed for one
+# account, in ~/.local/bin, come first, as Claude Code is.
+export PATH=$HOME/.local/bin:/system/bin:/system/bin/gui:/system/bin/gui/Accessories:/system/bin/gui/Games:/system/bin/gui/System:/system/bin/gui/Demos TERM=${TERM:-linux}
 if [ "$(id -u)" = 0 ]; then PS1='$PWD# '; else PS1='$PWD$ '; fi
 [ -r /system/etc/motd ] && cat /system/etc/motd
+# bash reads ~/.bashrc only when it isn't a login shell, but that's where settings go
+[ -n "$BASH_VERSION" ] && [ -r "$HOME/.bashrc" ] && . "$HOME/.bashrc"

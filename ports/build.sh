@@ -256,6 +256,43 @@ git) # after curl: version control, with HTTPS through curl, and AximOS's more a
 	rm -f "$target"/system/lib/git-core/git-daemon "$target"/system/lib/git-core/git-http-backend \
 		"$target"/system/lib/git-core/git-imap-send # serving repositories, and mailing patches, which it isn't for
 	;;
+coreutils) # after glibc: ls, cp, sort, sha256sum and the rest, as every script expects them
+	fetch https://ftp.gnu.org/gnu/coreutils coreutils-9.12.tar.xz a480198559733e9b3da999e90543ac6f888a2caa544d8d664c5a1f17e528e210
+	unpack coreutils-9.12.tar.xz coreutils-9.12
+	cd coreutils-9.12
+	autotools --disable-acl --disable-xattr --disable-libcap --without-selinux --without-gmp --without-openssl \
+		--enable-no-install-program=kill,hostname,uptime # AximOS's own
+	;;
+sed) # after glibc
+	fetch https://ftp.gnu.org/gnu/sed sed-4.10.tar.xz b8e72182b2ec96a3574e2998c47b7aaa64cc20ce000d8e9ac313cc07cecf28c7
+	unpack sed-4.10.tar.xz sed-4.10
+	cd sed-4.10
+	autotools --disable-acl --without-selinux
+	;;
+grep) # after glibc, without Perl's regular expressions
+	fetch https://ftp.gnu.org/gnu/grep grep-3.12.tar.xz 2649b27c0e90e632eadcd757be06c6e9a4f48d941de51e7c0f83ff76408a07b9
+	unpack grep-3.12.tar.xz grep-3.12
+	cd grep-3.12
+	autotools --disable-perl-regexp
+	;;
+gawk) # after glibc: awk
+	fetch https://ftp.gnu.org/gnu/gawk gawk-5.4.1.tar.xz 07f6f7342b7febe4313fc2c2542ad93d64fe20ad8717200109f105a826f5fd37
+	unpack gawk-5.4.1.tar.xz gawk-5.4.1
+	cd gawk-5.4.1
+	autotools --without-readline --without-mpfr --disable-pma
+	;;
+findutils) # after glibc: find and xargs
+	fetch https://ftp.gnu.org/gnu/findutils findutils-4.11.0.tar.xz bfd19cb06cc71f3352d567e90284d8cdac02ac89774bbeadf0b533b0c11432fd
+	unpack findutils-4.11.0.tar.xz findutils-4.11.0
+	cd findutils-4.11.0
+	autotools --without-selinux --localstatedir=/var/lib/locate
+	;;
+diffutils) # after glibc: diff and cmp
+	fetch https://ftp.gnu.org/gnu/diffutils diffutils-3.12.tar.xz 7c8b7f9fc8609141fdea9cece85249d308624391ff61dedaf528fcb337727dfd
+	unpack diffutils-3.12.tar.xz diffutils-3.12
+	cd diffutils-3.12
+	autotools
+	;;
 *)
 	echo "build.sh: no part called $1" >&2
 	exit 1
