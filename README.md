@@ -27,7 +27,10 @@ Player and NetSurf, below, are still to come back, as are some of the tests.
 
 ### System
 
-- Linux 7.3, with glibc 2.44 built for AximOS, booted by [Limine](https://limine-bootloader.org)
+- Linux 7.3, with glibc 2.44 built for AximOS, booted by [Limine](https://limine-bootloader.org).
+  The kernel is built from Arch's config, with its drivers as modules that AximOS's own
+  `modprobe` loads, and has the Lenovo 82Y3's firmware from linux-firmware, and its CPU's
+  microcode, loaded before the kernel starts. NVIDIA's GPUs are never driven
 - AximOS's own init, which mounts what Linux shares, starts the services in
   `/system/etc/services`, one file each, restarting those that ask, and keeps a text login
   on the screen's consoles from the second, Ctrl+Alt+F2, and on the serial port
@@ -136,16 +139,18 @@ Then:
 make
 ```
 
-This builds `build/aximos.iso`. The first build downloads the source of Linux, glibc,
-dash, libxcrypt, util-linux, e2fsprogs, eudev, seatd, the DejaVu fonts and stb_truetype into
-`ports/dist` and checks their SHA-256
-sums, then builds glibc into `build/root`, which holds the system's files, and Linux and
-the system against it. That takes a few minutes; after that only what changed is built
-again.
+This builds `build/aximos.iso`. The first build downloads the source of Linux and Arch's
+config for it, glibc, dash, libxcrypt, util-linux, e2fsprogs, eudev, seatd, the DejaVu
+fonts, stb_truetype, the laptop's firmware and its CPU's microcode into `ports/dist` and
+checks their SHA-256 sums, then builds glibc into `build/root`, which holds the system's
+files, and Linux and the system against it. Arch's config has nearly every driver, so the
+first kernel build takes a while; `make debug` builds one with only what QEMU and the
+laptop need in a few minutes. After that only what changed is built again.
 
 | Target        | What it does                                                    |
 |---------------|-----------------------------------------------------------------|
 | `make`        | Build `build/aximos.iso`                                        |
+| `make debug`  | The same, with a kernel of only QEMU's and the laptop's drivers |
 | `make run`    | Build it, then boot it in QEMU, with the shell in the terminal  |
 | `make test`   | Build it, then run the tests                                    |
 | `make linux`  | Build wm and the calculator, Snake, the editor and Paint to run on this computer, in `build/linux` |
@@ -226,5 +231,8 @@ AximOS uses [Linux](https://kernel.org), [glibc](https://www.gnu.org/software/li
 [Limine](https://github.com/limine-bootloader/limine), [dash](http://gondor.apana.org.au/~herbert/dash/),
 [libxcrypt](https://github.com/besser82/libxcrypt), [seatd](https://git.sr.ht/~kennylevinsen/seatd), [util-linux](https://github.com/util-linux/util-linux)'s
 libblkid and libuuid, [e2fsprogs](https://e2fsprogs.sourceforge.net), [eudev](https://github.com/eudev-project/eudev),
-[stb_truetype](https://github.com/nothings/stb) and the [DejaVu](https://dejavu-fonts.github.io) fonts.
+[stb_truetype](https://github.com/nothings/stb), the [DejaVu](https://dejavu-fonts.github.io) fonts,
+[linux-firmware](https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git),
+[Intel's microcode](https://github.com/intel/Intel-Linux-Processor-Microcode-Data-Files) and
+[Arch Linux](https://gitlab.archlinux.org/archlinux/packaging/packages/linux)'s kernel config.
 Each is under its own license.

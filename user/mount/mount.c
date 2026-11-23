@@ -1,4 +1,5 @@
 #include <aximos.h>
+#include <blkid/blkid.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -30,8 +31,21 @@ static unsigned long parse(char *options, char *data, size_t size) {
     return result;
 }
 
-// Without a type, each filesystem the kernel knows that needs a device is tried.
+// Without a type, it's the one libblkid finds on the device, whose module the kernel
+// then loads, or else each filesystem the kernel knows already that needs a device.
 static int mount_any(const char *device, const char *dir, unsigned long flags, const char *data) {
+    blkid_probe probe = blkid_new_probe_from_filename(device);
+    const char *found;
+
+    if (probe && blkid_do_safeprobe(probe) == 0 && blkid_probe_lookup_value(probe, "TYPE", &found, NULL) == 0) {
+        int result = mount(device, dir, found, flags, data);
+
+        blkid_free_probe(probe);
+        return result;
+    }
+    if (probe)
+        blkid_free_probe(probe);
+
     FILE *f = fopen("/proc/filesystems", "r");
     char line[64];
     int saved = ENODEV;

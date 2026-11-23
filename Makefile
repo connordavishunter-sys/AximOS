@@ -8,10 +8,21 @@ STAMPS := $(BUILD)/stamps
 ISO := $(BUILD)/aximos.iso
 ISO_ROOT := $(BUILD)/iso_root
 
-# Linux, configured by kernel/debug.config on top of its own x86_64 defaults.
+# Linux: make builds Arch's config, with kernel/aximos.config's changes and its drivers
+# as modules, and make debug the kernel's own x86_64 defaults, with kernel/debug.config's
+# drivers built in.
 LINUX_SRC := $(BUILD)/ports/linux-7.3.5
+ifeq ($(filter debug,$(MAKECMDGOALS)),)
 KERNEL_BUILD := $(BUILD)/kernel
+KERNEL_CONFIG := kernel/aximos.config
+kernel_base = cp ports/dist/linux-7.3.5-arch.config $(KERNEL_BUILD)/.config
+else
+KERNEL_BUILD := $(BUILD)/kernel-debug
+KERNEL_CONFIG := kernel/debug.config
+kernel_base = $(MAKE) -s -C $(LINUX_SRC) O=$(abspath $(KERNEL_BUILD)) x86_64_defconfig
+endif
 KERNEL := $(KERNEL_BUILD)/arch/x86/boot/bzImage
+MODULES := $(KERNEL_BUILD)/modules# installed, in lib/modules/<release>
 INITRAMFS := $(BUILD)/initramfs.cpio.zst
 
 # Programs are built by the host's GCC against the system's own glibc.
@@ -24,6 +35,7 @@ TOOLS := cat clear cp date df du echo env find free grep head kill ls mkdir more
 	shutdown sleep sort stat tail text top touch tz wc counter hello host nc ping mount umount dmesg uname \
 	hostname ln chmod chown id whoami sync lsmod insmod rmmod modprobe ttylogin sudo passwd useradd disk axfetch checkpass session
 LIBS_disk := -lblkid
+LIBS_mount := -lblkid
 SETUID := sudo passwd tz reboot shutdown checkpass# which start as root, whoever runs them
 LIBAXIMOS := $(ROOT)/system/lib/libaximos.so
 
@@ -49,7 +61,7 @@ WM_SOURCES := user/wm/wm.c linux/wm_drm.c linux/wm_display.c linux/evdev.c
 
 all: $(ISO)
 
-# For now the same as all: the kernel with only what QEMU and the laptop need.
+# The same, but with a kernel of only what QEMU and the laptop need, which builds quickly.
 debug: all
 
 # Each part of ports/build.sh, built once, after those it needs. Deleting its stamp
@@ -64,7 +76,8 @@ $(STAMPS)/libxcrypt $(STAMPS)/util-linux: $(STAMPS)/glibc
 $(STAMPS)/e2fsprogs $(STAMPS)/eudev: $(STAMPS)/util-linux
 $(STAMPS)/seatd: $(STAMPS)/glibc
 $(STAMPS)/dejavu: $(STAMPS)/skeleton
-PORTS := dash libxcrypt util-linux e2fsprogs eudev seatd dejavu
+$(STAMPS)/firmware: $(STAMPS)/skeleton kernel/firmware.list
+PORTS := dash libxcrypt util-linux e2fsprogs eudev seatd dejavu firmware
 
 $(ROOT)/system/bin/init: user/init/init.c $(STAMPS)/glibc
 	$(TARGET_CC) $(TARGET_CFLAGS) $< -o $@
@@ -96,24 +109,33 @@ $(WM): $(WM_SOURCES) $(wildcard user/wm/*.h linux/*.h) $(LIBGUI) $(STAMPS)/seatd
 
 desktop: $(WM) $(APP_PATHS) $(GUI_TOOLS:%=$(ROOT)/system/bin/%)
 
-# The kernel's own make decides what needs building again.
-$(KERNEL_BUILD)/.config: kernel/debug.config $(STAMPS)/linux
+# Its source is a release, which doesn't change, so it's built again only when its config
+# does. The kernel's own make then decides what needs building, which takes a minute
+# even when nothing does, with all of Arch's modules.
+$(KERNEL_BUILD)/.config: $(KERNEL_CONFIG) $(STAMPS)/linux
 	mkdir -p $(KERNEL_BUILD)
-	$(MAKE) -s -C $(LINUX_SRC) O=$(abspath $(KERNEL_BUILD)) x86_64_defconfig
+	$(kernel_base)
 	$(LINUX_SRC)/scripts/kconfig/merge_config.sh -m -O $(KERNEL_BUILD) $(KERNEL_BUILD)/.config $< >/dev/null
 	$(MAKE) -s -C $(LINUX_SRC) O=$(abspath $(KERNEL_BUILD)) olddefconfig
 
-$(KERNEL): $(KERNEL_BUILD)/.config FORCE
-	$(MAKE) -s -C $(LINUX_SRC) O=$(abspath $(KERNEL_BUILD)) -j$$(nproc) bzImage
+$(KERNEL): $(KERNEL_BUILD)/.config
+	$(MAKE) -s -C $(LINUX_SRC) O=$(abspath $(KERNEL_BUILD)) -j$$(nproc) bzImage modules
+	$(MAKE) -s -C $(LINUX_SRC) O=$(abspath $(KERNEL_BUILD)) -j$$(nproc) INSTALL_MOD_PATH=$(abspath $(MODULES)) \
+		INSTALL_MOD_STRIP=1 modules_install
+	touch $@
 
-# Until the system has a disk of its own, all of it is the initramfs.
+# Until the system has a disk of its own, all of it is the initramfs, with this kernel's
+# modules, after the CPU's microcode, which the kernel looks for in a plain cpio first.
 $(INITRAMFS): $(ROOT)/system/bin/init tools desktop $(PORTS:%=$(STAMPS)/%) $(KERNEL) kernel/initramfs.list FORCE
 	cp -r rootfs/. $(ROOT)/
 	rsync -a --exclude posix --exclude right /usr/share/zoneinfo/ $(ROOT)/system/share/zoneinfo/
-	rsync -a --delete --exclude /system/include --exclude '*.a' --exclude '*.o' $(ROOT)/ $(IMAGE)/
-	cd $(KERNEL_BUILD) && $(abspath $(LINUX_SRC))/usr/gen_initramfs.sh -o $(abspath $(BUILD))/initramfs.cpio \
-		-u squash -g squash $(abspath $(IMAGE)) $(abspath kernel/initramfs.list)
-	zstd -q -f -T0 --rm $(BUILD)/initramfs.cpio -o $@
+	rsync -a --delete --exclude /system/include --exclude /system/lib/modules --exclude '*.a' --exclude '*.o' \
+		$(ROOT)/ $(IMAGE)/
+	rsync -a --delete --exclude '/*/build' $(MODULES)/lib/modules/ $(IMAGE)/system/lib/modules/
+	cd $(IMAGE) && find . -mindepth 1 | LC_ALL=C sort | cpio -o -H newc -R 0:0 --quiet > $(abspath $(BUILD))/initramfs.cpio
+	$(KERNEL_BUILD)/usr/gen_init_cpio kernel/initramfs.list >> $(BUILD)/initramfs.cpio
+	zstd -q -f -T0 --rm $(BUILD)/initramfs.cpio -o $(BUILD)/initramfs.zst
+	cat $(BUILD)/microcode.cpio $(BUILD)/initramfs.zst > $@
 
 $(ISO): $(KERNEL) $(INITRAMFS) limine.conf
 	rm -rf $(ISO_ROOT)
@@ -167,7 +189,7 @@ $(LINUX)/apps/%: $$(call linux_objs,$$(wildcard user/$$(notdir $$*)/*.c))
 # host's is, rather than a mouse, which only moves, so stops at the screen's edge
 # while the host's goes on.
 run: $(ISO)
-	qemu-system-x86_64 -accel kvm -accel tcg -cpu max -smp 4 -m 1G -M q35 -bios $(OVMF) -serial mon:stdio \
+	qemu-system-x86_64 -accel kvm -accel tcg -cpu max -smp 4 -m 2G -M q35 -bios $(OVMF) -serial mon:stdio \
 		-netdev user,id=net0 -device e1000,netdev=net0 -device qemu-xhci -device usb-tablet -cdrom $(ISO)
 
 # Each tests/*_test.py boots its own VMs, so several run at once. JOBS sets how many,
@@ -177,7 +199,7 @@ test: $(ISO)
 
 help:
 	@echo "make           build the system into $(ISO)"
-	@echo "make debug     the same, for now"
+	@echo "make debug     the same, with a kernel of only QEMU's and the laptop's drivers, built in"
 	@echo "make run       build it, then boot it in QEMU, with the shell in this terminal"
 	@echo "make test      build it, then run the tests in tests/, several at once"
 	@echo "               (JOBS=n sets how many, TESTS=\"tests/x_test.py ...\" picks which)"

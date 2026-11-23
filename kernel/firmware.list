@@ -1,0 +1,20 @@
+# The firmware the Lenovo 82Y3 loads, from linux-firmware 20261019: each file's sha256,
+# its path there, and the name its driver asks for, where that's a link to it.
+
+# The Intel iGPU, through i915, when the BIOS is in hybrid mode
+3516de2e134ddcf3b319c75d2e437779fecbd58cbb77234bd6f297c544e92ccb i915/adlp_dmc.bin
+b7a800cbdcdf687e7b1c81f3316d040ab75fa3e5c698ebc356f077af17462ef8 i915/adlp_guc_70.bin
+dbb1316bac13a76427ffa7827e52b5b9affe8a4cadd23dc22e2a54e35c53bdad i915/tgl_huc.bin
+
+# Wi-Fi (AX211) and Bluetooth
+fae8230ebd1426dfb7d5b5594fdd89e346af5144080659d010b8d2a2fd2f7d4a intel/iwlwifi/iwlwifi-so-a0-gf-a0-89.ucode iwlwifi-so-a0-gf-a0-89.ucode
+78abe08cf33bc209b96a887c7e3db8855a1d9650edacf849c4fa0d4596bcfac5 intel/iwlwifi/iwlwifi-so-a0-gf-a0.pnvm iwlwifi-so-a0-gf-a0.pnvm
+f14d059858623283f9e1bca3c9f5c5edc272cf538959d8f194327e3a9af5a75a intel/ibt-0040-0041.sfi
+fe272982577efdc289cfe3e8bedafca607c0b7d6c9df1aab1880e22ef930d077 intel/ibt-0040-0041.ddc
+
+# The speakers' CS35L41 amps
+c11cb3e25825c673a955a3519370ad77fbcd8bcf68808e8e34140a70caefcec4 cirrus/cs35l41/v6.61.1/halo_cspl_RAM_revB2_29.63.1.wmfw cirrus/cs35l41-dsp1-spk-prot-17aa38b4.wmfw
+593b741c46dbaf2a55fddc96a5ff3e48d775067498691c835e5c8377f52b40b8 cirrus/cs35l41-dsp1-spk-prot-17aa38b4-spkid0-l0.bin
+c553cf907fb86989e822de8490eb64d6167191512b79f234a595d789bb9868ea cirrus/cs35l41-dsp1-spk-prot-17aa38b4-spkid0-r0.bin
+d07a0476ead8a020a2ec5a6b77e2500846c8c43dc81ad147aaf9c2d67d4159bf cirrus/cs35l41-dsp1-spk-prot-17aa38b4-spkid1-l0.bin
+c01058b4d51d0dc852946a84129699c225e16ace941f7461f5554fcf85edd00b cirrus/cs35l41-dsp1-spk-prot-17aa38b4-spkid1-r0.bin

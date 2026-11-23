@@ -10,6 +10,9 @@ jobs=$(nproc)
 target_cc="gcc --sysroot=$target"
 linux=linux-7.3.5
 glibc=glibc-2.44
+arch_linux=d921c20ed125e79b4d0d7f100aeba9cdbf17043e # Arch's linux package, at 7.3.5.arch1-1
+firmware=20261019
+microcode=20261110
 
 fetch() { # url file sha256 [name to keep it as]
 	name=${4:-$2}
@@ -49,9 +52,11 @@ skeleton) # AximOS's /system, with the paths Linux programs expect linking into 
 	ln -sfn lib "$target/system/lib64"
 	touch "$target/system/etc/ld.so.conf"
 	;;
-linux) # the source, for the kernel and the headers glibc is built against
+linux) # the source, for the kernel and the headers glibc is built against, and Arch's config for it
 	fetch https://cdn.kernel.org/pub/linux/kernel/v7.x $linux.tar.xz \
 		8f293f83d54f0b7b9be56863ebc5e4ea79d73e530b4ae55c572be97ef39f0990
+	fetch https://gitlab.archlinux.org/archlinux/packaging/packages/linux/-/raw/$arch_linux config.x86_64 \
+		75366b057ddfafeb2c02a902aebdcbeb36ddcd56de74c82b1eadf4fac308555a $linux-arch.config
 	unpack $linux.tar.xz $linux
 	make -C $linux O="$root/build/ports/linux-headers" headers_install INSTALL_HDR_PATH="$target/system" >/dev/null
 	;;
@@ -130,6 +135,27 @@ seatd) # after glibc: hands the screen and input to whichever session's console 
 		libseat/backend/noop.c libseat/backend/seatd.c common/connection.c common/linked_list.c common/log.c
 	ln -sf libseat.so.1 "$target/system/lib/libseat.so"
 	cp include/libseat.h "$target/system/include/"
+	;;
+firmware) # what kernel/firmware.list names, and the Intel CPUs' microcode, loaded before the kernel starts
+	mkdir -p "$root/ports/dist/firmware" "$target/system/lib/firmware"
+	grep -v '^#' "$root/kernel/firmware.list" | while read -r sum path link; do
+		[ -n "$sum" ] || continue
+		file=$root/ports/dist/firmware/$path
+		[ -e "$file" ] || curl -fsSL --create-dirs -o "$file" \
+			"https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain/$path?h=$firmware"
+		echo "$sum  $file" | sha256sum -c --status
+		install -D -m 644 "$file" "$target/system/lib/firmware/$path"
+		if [ -n "$link" ]; then
+			mkdir -p "$(dirname "$target/system/lib/firmware/$link")"
+			ln -sfn "$(realpath -m --relative-to="$(dirname "/$link")" "/$path")" "$target/system/lib/firmware/$link"
+		fi
+	done
+	# Only the 82Y3's i9-13900H's (family 6, model 0xba, stepping 2), in the early cpio the kernel looks for it in
+	fetch https://raw.githubusercontent.com/intel/Intel-Linux-Processor-Microcode-Data-Files/microcode-$microcode/intel-ucode \
+		06-ba-02 184f72215da596c1bd05e5fbb032fb7a7bf897a32fad5274fe01da115c07a047 intel-ucode-$microcode-06-ba-02
+	rm -rf microcode && mkdir -p microcode/kernel/x86/microcode
+	cp "$root/ports/dist/intel-ucode-$microcode-06-ba-02" microcode/kernel/x86/microcode/GenuineIntel.bin
+	(cd microcode && find kernel | cpio -o -H newc -R 0:0 --quiet) > "$root/build/microcode.cpio"
 	;;
 dejavu) # the desktop's text, and NetSurf's
 	fetch https://github.com/dejavu-fonts/dejavu-fonts/releases/download/version_2_37 dejavu-fonts-ttf-2.37.tar.bz2 \

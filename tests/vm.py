@@ -25,7 +25,7 @@ def key_for(c):
 
 
 class VM:
-    def __init__(self, timeout=300, extra=(), net='', smp=4, memory='1G'):
+    def __init__(self, timeout=300, extra=(), net='', smp=4, memory='2G'):
         self.dir = tempfile.mkdtemp(dir=WORK)
         self.log = self.dir + '/serial.log'
         serial, monitor, qmp = self.dir + '/serial.sock', self.dir + '/monitor.sock', self.dir + '/qmp.sock'
