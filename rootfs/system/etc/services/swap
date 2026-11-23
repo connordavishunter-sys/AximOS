@@ -1,0 +1,3 @@
+# The swap file the installer makes, if this system has one.
+command [ ! -e /swapfile ] || swapon /swapfile
+once

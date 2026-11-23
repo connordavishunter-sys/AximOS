@@ -183,9 +183,10 @@ static int boot_order(uint16_t *order) {
     return n < 0 ? 0 : n / 2;
 }
 
-// Where an entry's loader is: a partition, by name if it's here, and the file on it.
-static void describe(const uint8_t *path, size_t size, char *out, size_t room) {
-    char where[64] = "", file[256] = "";
+// Where an entry's loader is: a partition, by name if it's here, or its PARTUUID,
+// and the file on it. True if the partition is here.
+static bool describe(const uint8_t *path, size_t size, char where[64], char file[256]) {
+    bool here = false;
 
     for (size_t at = 0; at + 4 <= size;) {
         uint8_t type = path[at], subtype = path[at + 1];
@@ -197,18 +198,19 @@ static void describe(const uint8_t *path, size_t size, char *out, size_t room) {
             char uuid[37];
 
             show_guid(path + at + 24, uuid);
-            if (!partition_of(uuid, where, sizeof(where)))
-                snprintf(where, sizeof(where), "%s", uuid);
+            if (!(here = partition_of(uuid, where, 64)))
+                snprintf(where, 64, "%s", uuid);
         } else if (type == 4 && subtype == 4) {
-            from_utf16(path + at + 4, len - 4, file, sizeof(file));
+            from_utf16(path + at + 4, len - 4, file, 256);
         }
         at += len;
     }
-    snprintf(out, room, "%s%s%s", where[0] ? where : file[0] ? "" : "firmware's own", where[0] && file[0] ? " " : "",
-             file);
+    return here;
 }
 
-static int list(void) {
+// The entries, or with loaders, only those starting a file on a partition that's
+// here, a line each of their number, partition, file and name, between tabs.
+static int list(bool loaders) {
     uint16_t order[MAX_ENTRIES], current, next;
     int n = boot_order(order);
 
@@ -216,21 +218,23 @@ static int list(void) {
         dprintf(STDERR_FILENO, "efiboot: the firmware's variables aren't here, as it didn't start in UEFI\n");
         return 1;
     }
-    if (get("BootCurrent", (uint8_t *)&current, 2) == 2)
+    if (!loaders && get("BootCurrent", (uint8_t *)&current, 2) == 2)
         printf("Started from %04X\n", current);
-    if (get("BootNext", (uint8_t *)&next, 2) == 2)
+    if (!loaders && get("BootNext", (uint8_t *)&next, 2) == 2)
         printf("Next time    %04X\n", next);
-    printf("Order       ");
-    for (int i = 0; i < n; i++)
-        printf(" %04X", order[i]);
-    printf("\n");
+    if (!loaders) {
+        printf("Order       ");
+        for (int i = 0; i < n; i++)
+            printf(" %04X", order[i]);
+        printf("\n");
+    }
 
     DIR *dir = opendir(VARS);
     struct dirent *e;
 
     while (dir && (e = readdir(dir))) {
         uint8_t entry[MAX_VAR];
-        char name[16], title[128], where[320];
+        char name[16], title[128], where[64] = "", file[256] = "";
         unsigned number;
         int size;
 
@@ -246,8 +250,13 @@ static int list(void) {
 
         size_t left = (size_t)size - 6 > title_size ? size - 6 - title_size : 0;
 
-        describe(entry + 6 + title_size, path_size <= left ? path_size : 0, where, sizeof(where));
-        printf("%04X %c %-30s %s\n", number, entry[0] & 1 ? '*' : ' ', title, where);
+        bool here = describe(entry + 6 + title_size, path_size <= left ? path_size : 0, where, file);
+
+        if (loaders && here && file[0])
+            printf("%04X\t%s\t%s\t%s\n", number, where, file, title);
+        else if (!loaders)
+            printf("%04X %c %-30s %s%s%s\n", number, entry[0] & 1 ? '*' : ' ', title,
+                   where[0] ? where : file[0] ? "" : "firmware's own", where[0] && file[0] ? " " : "", file);
     }
     if (dir)
         closedir(dir);
@@ -393,7 +402,7 @@ static int next(const char *text) {
 }
 
 int main(int argc, char **argv) {
-    help_option(argc, argv, "usage: efiboot [list]\n"
+    help_option(argc, argv, "usage: efiboot [list|loaders]\n"
                             "       efiboot add PARTITION LOADER NAME\n"
                             "       efiboot remove NUMBER\n"
                             "       efiboot order NUMBER...\n"
@@ -401,10 +410,14 @@ int main(int argc, char **argv) {
                             "Shows the firmware's boot entries, * for those it tries, and the order it tries\n"
                             "them in. add makes one that starts LOADER, a path on PARTITION, like\n"
                             "\\EFI\\BOOT\\BOOTX64.EFI, and puts it first. next has the firmware start one,\n"
-                            "the next time only. Numbers are in hex, as list shows them.\n");
+                            "the next time only. Numbers are in hex, as list shows them. loaders gives\n"
+                            "those that start a file on a partition here, with tabs between number,\n"
+                            "partition, file and name.\n");
 
     if (argc == 1 || !strcmp(argv[1], "list"))
-        return list();
+        return list(false);
+    if (!strcmp(argv[1], "loaders"))
+        return list(true);
     if (!strcmp(argv[1], "add") && argc == 5)
         return add(argv[2], argv[3], argv[4]);
     if (!strcmp(argv[1], "remove") && argc == 3)

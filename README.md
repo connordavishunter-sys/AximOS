@@ -59,7 +59,8 @@ sort head tail wc more du df free ps top kill date tz sleep env echo clear text 
 system tools `mount umount dmesg uname hostname sync lsmod insmod rmmod modprobe`, accounts
 with `id whoami passwd useradd sudo`, `disk` (lists drives and their free space, partitions
 them with GPT, adds partitions in free space beside what's there, and formats them as ext4 or
-FAT32), `efiboot` (the firmware's boot entries and their order), and `host nc ping`. Run any of them with `--help`. ext4 is
+FAT32), `efiboot` (the firmware's boot entries and their order), `install` (installs AximOS from the
+live system), `swapon`, and `host nc ping`. Run any of them with `--help`. ext4 is
 made and checked by [e2fsprogs](https://e2fsprogs.sourceforge.net)' `mkfs.ext4` and `e2fsck`.
 
 ### Desktop
@@ -117,11 +118,26 @@ made and checked by [e2fsprogs](https://e2fsprogs.sourceforge.net)' `mkfs.ext4` 
 | Player     | WAV, MP3, FLAC, Vorbis, Opus and AAC, with shuffle and repeat         |
 | Calculator | With a history                                                        |
 | Tasks      | What's running, sortable, with a graph of CPU and memory use          |
-| Install    | Installs AximOS on a drive, from the ISO, which boots straight into it |
+| Installer  | Installs AximOS from the USB stick: in free space, over a whole drive, or again over itself, keeping /home |
 | Settings   | Theme, accent, display, taskbar, keyboard and mouse, sound, date and time, and default apps |
 | Snake      | Three speeds, each with its own best score                            |
 
-## Installing beside CachyOS
+## Installing
+
+Boot the USB stick, then open System → Installer, or run `sudo install` at a terminal (see
+`install --help`). It asks for the drive and how to install on it:
+
+- **In its free space**, beside what's there, in the largest stretch no partition has
+- **Over the whole drive**, erasing it
+- **Again**, over an AximOS on the drive, keeping its accounts and `/home`, or erasing those too
+
+AximOS gets an EFI system partition of its own, with Limine, the kernel and the microcode,
+and the system on ext4, with a swap file of 16 GiB, or a quarter of the partition if that's
+less. Its Limine menu offers the systems the firmware has entries for too, such as CachyOS,
+which it starts as they are, and waits for a choice. The firmware gets an entry for AximOS,
+first in its order, through `efiboot`. Nothing on other partitions is changed.
+
+### Making room beside CachyOS
 
 AximOS goes in free space on a drive, and never resizes what's there. Where a system fills
 its drive, as CachyOS's btrfs does on the laptop's `nvme0n1p2`, make room from that system

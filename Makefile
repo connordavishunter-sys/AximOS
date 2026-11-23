@@ -36,9 +36,10 @@ TARGET_CFLAGS := -std=gnu23 -O2 -Wall -Wextra -Wno-format-truncation -D_GNU_SOUR
 # libaximos.so, which has what they share beyond glibc.
 TOOLS := cat clear cp date df du echo env find free grep head kill ls mkdir more mv ps reboot rename rm rmdir \
 	shutdown sleep sort stat tail text top touch tz wc counter hello host nc ping mount umount dmesg uname \
-	hostname ln chmod chown id whoami sync lsmod insmod rmmod modprobe ttylogin sudo passwd useradd disk efiboot axfetch checkpass session
+	hostname ln chmod chown id whoami sync lsmod insmod rmmod modprobe ttylogin sudo passwd useradd disk efiboot install swapon axfetch checkpass session
 LIBS_disk := -lblkid
 LIBS_mount := -lblkid
+LIBS_install := -lblkid
 SETUID := sudo passwd tz reboot shutdown checkpass# which start as root, whoever runs them
 LIBAXIMOS := $(ROOT)/system/lib/libaximos.so
 
@@ -50,7 +51,7 @@ GUI_CFLAGS := $(TARGET_CFLAGS) -Iuser/libgui/include -Iuser/libaximos/include -i
 APP_FOLDERS := Accessories Games System Demos
 APPS_Accessories := calculator editor paint viewer
 APPS_Games := snake
-APPS_System := settings tasks
+APPS_System := settings tasks installer
 APPS_Demos := guidemo widgets
 APPS := term files $(foreach f,$(APP_FOLDERS),$(APPS_$(f)))
 app_dir = $(strip $(foreach f,$(APP_FOLDERS),$(if $(filter $(1),$(APPS_$(f))),$(f)/)))
@@ -131,12 +132,17 @@ $(KERNEL): $(KERNEL_BUILD)/.config
 
 # Until the system has a disk of its own, all of it is the initramfs, with this kernel's
 # modules, after the CPU's microcode, which the kernel looks for in a plain cpio first.
+# It has what install puts on a drive's ESP too, and the accounts as they were built.
 $(INITRAMFS): $(ROOT)/system/bin/init tools desktop $(PORTS:%=$(STAMPS)/%) $(KERNEL) kernel/initramfs.list FORCE
 	cp -r rootfs/. $(ROOT)/
 	rsync -a --exclude posix --exclude right /usr/share/zoneinfo/ $(ROOT)/system/share/zoneinfo/
 	rsync -a --delete --exclude /system/include --exclude /system/lib/modules --exclude '*.a' --exclude '*.o' \
 		$(ROOT)/ $(IMAGE)/
 	rsync -a --delete --exclude '/*/build' $(MODULES)/lib/modules/ $(IMAGE)/system/lib/modules/
+	mkdir -p $(IMAGE)/system/boot $(IMAGE)/system/share/install
+	cp $(KERNEL) $(IMAGE)/system/boot/vmlinuz
+	cp $(BUILD)/microcode.cpio $(LIMINE_DIR)/BOOTX64.EFI $(IMAGE)/system/boot/
+	cp -p $(IMAGE)/system/etc/passwd $(IMAGE)/system/etc/group $(IMAGE)/system/etc/shadow $(IMAGE)/system/share/install/
 	cd $(IMAGE) && find . -mindepth 1 | LC_ALL=C sort | cpio -o -H newc -R 0:0 --quiet > $(abspath $(BUILD))/initramfs.cpio
 	$(KERNEL_BUILD)/usr/gen_init_cpio kernel/initramfs.list >> $(BUILD)/initramfs.cpio
 	zstd -q -f -T0 --rm $(BUILD)/initramfs.cpio -o $(BUILD)/initramfs.zst
