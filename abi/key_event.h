@@ -38,6 +38,20 @@
 #define KEY_LEFT_SUPER (KEY_EXTENDED | 0x5B)
 #define KEY_RIGHT_SUPER (KEY_EXTENDED | 0x5C)
 
+// Media and laptop keys, as set 1 has them, then what it hasn't, past its codes:
+// brightness, the lid, pressed as it closes and let go as it opens, and swipes of
+// three fingers on a touchpad.
+#define KEY_MUTE (KEY_EXTENDED | 0x20)
+#define KEY_VOLUME_DOWN (KEY_EXTENDED | 0x2E)
+#define KEY_VOLUME_UP (KEY_EXTENDED | 0x30)
+#define KEY_POWER (KEY_EXTENDED | 0x5E)
+#define KEY_BRIGHTNESS_DOWN 0x200
+#define KEY_BRIGHTNESS_UP 0x201
+#define KEY_LID 0x202
+#define KEY_SWIPE_LEFT 0x203
+#define KEY_SWIPE_RIGHT 0x204
+#define KEY_SWIPE_UP 0x205
+
 #define KEY_MOD_SHIFT 0x01
 #define KEY_MOD_CTRL 0x02
 #define KEY_MOD_ALT 0x04

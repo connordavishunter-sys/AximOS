@@ -1,0 +1,2 @@
+# Anyone with an account can set the screen's brightness, as wm does for them.
+SUBSYSTEM=="backlight", ACTION=="add", RUN+="/system/bin/chown root:users /sys%p/brightness", RUN+="/system/bin/chmod g+w /sys%p/brightness"

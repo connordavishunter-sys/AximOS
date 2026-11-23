@@ -11,14 +11,29 @@
 #define MAX_DEVICES 16
 #define E(code) (0x100 | (code)) // KEY_EXTENDED, which this can't include beside Linux's names
 #define PIXELS_PER_MM 10         // how far a finger on a touchpad moves the pointer
+#define TAP_MS 180               // a touch shorter than this, which hardly moves, clicks
+#define TAP_MM 2
+#define SCROLL_MM 3              // two fingers moving this far turn the wheel a notch
+#define SWIPE_MM 20              // and three this far swipe
+// AximOS's codes for what set 1 has none for, as key_event.h has them
+#define BRIGHTNESS_DOWN 0x200
+#define BRIGHTNESS_UP 0x201
+#define LID 0x202
+#define SWIPE_LEFT 0x203
+#define SWIPE_RIGHT 0x204
+#define SWIPE_UP 0x205
 #define BITS(n) ((n) / 8 + 1)
 #define HAS(bits, n) ((bits)[(n) / 8] & 1 << (n) % 8)
 
 static struct device {
     int fd, id;
-    bool keyboard, touchpad, absolute; // a touchpad moves the pointer, and a tablet places it
+    bool keyboard, keys, touchpad, absolute; // keys, as a keyboard's or a laptop's buttons; a touchpad moves
+                                             // the pointer, and a tablet places it
     int resolution;           // a touchpad's, in units a millimetre
     int last[2], rest[2], held; // where the finger was, what's left of a pixel, and whether it's down
+    int fingers, most, travel, scroll, swipe[2]; // on the touchpad now, and the most since it was touched
+    int64_t touched; // when, in milliseconds
+    bool clicked, swiped;
     int min[2], range[2]; // an absolute pointer's axes
     struct mouse_event pending;
     bool moved;
@@ -36,7 +51,9 @@ static uint16_t scancode(int key) {
         {KEY_RIGHTALT, E(0x38)}, {KEY_HOME, E(0x47)}, {KEY_UP, E(0x48)}, {KEY_PAGEUP, E(0x49)},
         {KEY_LEFT, E(0x4B)}, {KEY_RIGHT, E(0x4D)}, {KEY_END, E(0x4F)}, {KEY_DOWN, E(0x50)},
         {KEY_PAGEDOWN, E(0x51)}, {KEY_INSERT, E(0x52)}, {KEY_DELETE, E(0x53)}, {KEY_LEFTMETA, E(0x5B)},
-        {KEY_RIGHTMETA, E(0x5C)}, {KEY_COMPOSE, E(0x5D)},
+        {KEY_RIGHTMETA, E(0x5C)}, {KEY_COMPOSE, E(0x5D)}, {KEY_MUTE, E(0x20)}, {KEY_VOLUMEDOWN, E(0x2E)},
+        {KEY_VOLUMEUP, E(0x30)}, {KEY_POWER, E(0x5E)}, {KEY_BRIGHTNESSDOWN, BRIGHTNESS_DOWN},
+        {KEY_BRIGHTNESSUP, BRIGHTNESS_UP},
     };
 
     if (key <= KEY_F12)
@@ -50,7 +67,7 @@ static uint16_t scancode(int key) {
 
 static void add(const char *path) {
     uint8_t types[BITS(EV_MAX)] = {0}, keys[BITS(KEY_MAX)] = {0}, rel[BITS(REL_MAX)] = {0}, abs[BITS(ABS_MAX)] = {0};
-    uint8_t props[BITS(INPUT_PROP_MAX)] = {0};
+    uint8_t props[BITS(INPUT_PROP_MAX)] = {0}, switches[BITS(SW_MAX)] = {0};
     struct input_absinfo axes[2] = {0};
     int id, fd = open_device(path, &id);
 
@@ -61,22 +78,27 @@ static void add(const char *path) {
     ioctl(fd, EVIOCGBIT(EV_REL, sizeof(rel)), rel);
     ioctl(fd, EVIOCGBIT(EV_ABS, sizeof(abs)), abs);
     ioctl(fd, EVIOCGPROP(sizeof(props)), props);
+    ioctl(fd, EVIOCGBIT(EV_SW, sizeof(switches)), switches);
 
     // A touchpad says where the finger is, but the pointer moves as far as it does.
     // A tablet, or a touchscreen, says where the pointer is.
     bool pointing = HAS(types, EV_ABS) && HAS(abs, ABS_X) && HAS(abs, ABS_Y);
     bool keyboard = HAS(types, EV_KEY) && HAS(keys, KEY_A) && HAS(keys, KEY_Z);
     bool mouse = HAS(types, EV_REL) && HAS(rel, REL_X) && HAS(keys, BTN_LEFT);
+    // A laptop's power button, lid, and brightness and volume keys are devices of their own.
+    bool buttons = HAS(types, EV_KEY) && (HAS(keys, KEY_POWER) || HAS(keys, KEY_BRIGHTNESSUP) || HAS(keys, KEY_VOLUMEUP));
+    bool lid = HAS(types, EV_SW) && HAS(switches, SW_LID);
     bool touchpad = pointing && HAS(keys, BTN_TOUCH) && !HAS(props, INPUT_PROP_DIRECT);
     bool absolute = pointing && !touchpad && (HAS(keys, BTN_LEFT) || HAS(keys, BTN_TOUCH));
 
-    if ((!keyboard && !mouse && !touchpad && !absolute) || count == MAX_DEVICES) {
+    if ((!keyboard && !mouse && !touchpad && !absolute && !buttons && !lid) || count == MAX_DEVICES) {
         close_device(id);
         return;
     }
     ioctl(fd, EVIOCGABS(ABS_X), &axes[0]);
     ioctl(fd, EVIOCGABS(ABS_Y), &axes[1]);
-    devices[count] = (struct device){.fd = fd, .id = id, .keyboard = keyboard, .touchpad = touchpad, .absolute = absolute,
+    devices[count] = (struct device){.fd = fd, .id = id, .keyboard = keyboard, .keys = keyboard || buttons,
+                                     .touchpad = touchpad, .absolute = absolute,
                                      .resolution = axes[0].resolution > 0 ? axes[0].resolution : 40};
     for (int axis = 0; axis < 2; axis++) {
         devices[count].min[axis] = axes[axis].minimum;
@@ -152,6 +174,17 @@ static void touch(struct device *d, int axis, int value) {
     d->last[axis] = value;
     if (d->held < 2) // the first report after the finger lands is where it landed
         return;
+    d->travel += delta < 0 ? -delta : delta;
+    if (d->fingers == 2 && axis == ABS_Y) { // scrolling, as the wheel does towards the user
+        d->scroll += delta;
+        d->pending.wheel += d->scroll / (d->resolution * SCROLL_MM);
+        d->scroll %= d->resolution * SCROLL_MM;
+        d->moved = true;
+    }
+    if (d->fingers >= 3)
+        d->swipe[axis == ABS_Y] += delta;
+    if (d->fingers != 1)
+        return;
     d->rest[axis] += delta * PIXELS_PER_MM;
     move = d->rest[axis] / d->resolution;
     d->rest[axis] -= move * d->resolution;
@@ -165,7 +198,38 @@ static void event(struct device *d, const struct input_event *e, const struct ev
     };
 
     if (e->type == EV_KEY && e->code == BTN_TOUCH && !d->absolute) {
+        int64_t at = e->input_event_sec * 1000LL + e->input_event_usec / 1000;
+
+        if (e->value) {
+            d->touched = at;
+            d->travel = d->scroll = d->swipe[0] = d->swipe[1] = 0;
+            d->clicked = d->swiped = false;
+            d->most = d->fingers > 1 ? d->fingers : 1;
+        } else if (at - d->touched < TAP_MS && d->travel < d->resolution * TAP_MM && !d->clicked && d->most <= 2) {
+            // A tap clicks, and one of two fingers right-clicks.
+            uint32_t button = d->most == 2 ? MOUSE_BUTTON_RIGHT : MOUSE_BUTTON_LEFT;
+
+            d->pending.buttons |= button;
+            input->mouse(&d->pending);
+            d->pending.buttons &= ~button;
+            d->moved = true;
+        }
         d->held = e->value ? 1 : 0;
+        return;
+    }
+    if (e->type == EV_KEY && d->touchpad && e->value && e->code >= BTN_TOOL_FINGER && e->code <= BTN_TOOL_QUADTAP) {
+        static const int count_of[] = {[BTN_TOOL_FINGER - BTN_TOOL_FINGER] = 1, [BTN_TOOL_DOUBLETAP - BTN_TOOL_FINGER] = 2,
+                                       [BTN_TOOL_TRIPLETAP - BTN_TOOL_FINGER] = 3, [BTN_TOOL_QUADTAP - BTN_TOOL_FINGER] = 4};
+
+        if (count_of[e->code - BTN_TOOL_FINGER] && count_of[e->code - BTN_TOOL_FINGER] != d->fingers) {
+            d->fingers = count_of[e->code - BTN_TOOL_FINGER];
+            d->most = d->fingers > d->most ? d->fingers : d->most;
+            d->held = d->held ? 1 : 0; // the finger followed may be another now
+        }
+        return;
+    }
+    if (e->type == EV_SW && e->code == SW_LID) {
+        input->key(LID, e->value);
         return;
     }
     if (e->type == EV_KEY && e->code == BTN_TOUCH) { // a touchscreen's touch is a click
@@ -177,10 +241,11 @@ static void event(struct device *d, const struct input_event *e, const struct ev
         if (e->code == buttons[i].evdev) {
             d->pending.buttons = e->value ? d->pending.buttons | buttons[i].button : d->pending.buttons & ~buttons[i].button;
             d->moved = true;
+            d->clicked = true;
             return;
         }
     }
-    if (e->type == EV_KEY && d->keyboard && scancode(e->code) && (e->value < 2 || repeats))
+    if (e->type == EV_KEY && d->keys && scancode(e->code) && (e->value < 2 || repeats))
         input->key(scancode(e->code), e->value != 0);
     else if (e->type == EV_REL && (e->code == REL_X || e->code == REL_Y)) {
         *(e->code == REL_X ? &d->pending.dx : &d->pending.dy) += e->value;
@@ -197,6 +262,15 @@ static void event(struct device *d, const struct input_event *e, const struct ev
         d->moved = true;
     }
     else if (e->type == EV_SYN && e->code == SYN_REPORT) {
+        int sx = d->swipe[0] / d->resolution, sy = d->swipe[1] / d->resolution;
+
+        if (!d->swiped && (sx <= -SWIPE_MM || sx >= SWIPE_MM || sy <= -SWIPE_MM)) {
+            int key = sy <= -SWIPE_MM ? SWIPE_UP : sx < 0 ? SWIPE_LEFT : SWIPE_RIGHT;
+
+            input->key(key, true);
+            input->key(key, false);
+            d->swiped = true;
+        }
         d->held += d->held == 1;
         if (d->moved)
             input->mouse(&d->pending);

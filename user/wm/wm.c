@@ -264,7 +264,7 @@ static int command_count;
 
 // Menus: the start menu, and those from right-clicking the desktop, an icon on
 // it, or the taskbar, with one item's submenu open at a time beside it.
-enum action { ACT_NONE, ACT_LINE, ACT_APP, ACT_FOLDER, ACT_RUN, ACT_LOCK, ACT_LOG_OUT, ACT_REBOOT, ACT_SHUT_DOWN,
+enum action { ACT_NONE, ACT_LINE, ACT_APP, ACT_FOLDER, ACT_RUN, ACT_LOCK, ACT_LOG_OUT, ACT_SUSPEND, ACT_REBOOT, ACT_SHUT_DOWN,
               ACT_OPEN, ACT_OPEN_WITH, ACT_OPEN_IN, ACT_RUN_FILE, ACT_CUT, ACT_COPY, ACT_COPY_PATH, ACT_RENAME,
               ACT_DELETE, ACT_PROPERTIES, ACT_REFRESH, ACT_SHOW_ICONS, ACT_POSITION, ACT_TOP, ACT_BOTTOM, ACT_AUTOHIDE };
 #define MAX_ITEMS 40
@@ -1202,6 +1202,23 @@ static bool muted, setting_volume;
 static struct net_info net;
 static int calendar_month; // shown, from this one
 
+// The laptop's battery and backlight, from /sys/class, and the popup their keys
+// and the volume's show.
+#define POWER_DIR "/sys/class/power_supply"
+#define BACKLIGHT_DIR "/sys/class/backlight"
+#define BRIGHTNESS_STEP 5
+#define OSD_MS 1200
+#define SUSPEND_WAIT_MS 500 // for the lock screen to be drawn first
+#define BATTERY_WIDTH 52    // in the tray: its icon, and how much is left
+static char backlight[GUI_PATH_MAX]; // its folder, or "" without one
+static int brightness, brightness_max = 1; // as the backlight has them
+static int battery = -1, warned = 100;    // percent left, or -1 without one, and the last warning's
+static bool charging, setting_brightness;
+static int64_t osd_until, suspend_due = -1; // when the popup goes, and when the computer's to suspend
+static bool osd_volume;                    // whether the popup's the volume's, or the brightness's
+static void lock(void);
+static bool can_lock(void);
+
 static bool connected(void) {
     return net.has_device && net.address;
 }
@@ -1210,7 +1227,7 @@ static bool connected(void) {
 static struct rect tray_item(int item) {
     char clock[16];
     int width = gui_text_width(clock_text(clock), 1), right = taskbar().x + taskbar().width - width - 12 - 8;
-    int y = taskbar().y + 4, quick = mixer >= 0 ? 2 * TRAY_ICON - 4 : TRAY_ICON;
+    int y = taskbar().y + 4, quick = (mixer >= 0 ? 2 * TRAY_ICON - 4 : TRAY_ICON) + (battery >= 0 ? BATTERY_WIDTH : 0);
 
     if (item == TRAY_CALENDAR)
         return (struct rect){right + 2, y, width + 16, TASKBAR_HEIGHT - 8};
@@ -1239,9 +1256,14 @@ static int sound_height(void) {
     return mixer < 0 ? 0 : 32 + (now_playing[0] ? 22 : 0);
 }
 
+// The brightness, under the volume, then the battery.
+static int laptop_height(void) {
+    return (backlight[0] ? 32 : 0) + (battery >= 0 ? PANEL_LINE + 4 : 0);
+}
+
 static struct rect panel_rect(int item) {
     static const int widths[] = {QUICK_WIDTH, NOTICE_WIDTH, NOTICE_WIDTH, 7 * DAY_WIDTH + 24};
-    int heights[] = {12 + TILE_HEIGHT + 12 + sound_height() + 9 + 6 * PANEL_LINE + 8,
+    int heights[] = {12 + TILE_HEIGHT + 12 + sound_height() + laptop_height() + 9 + 6 * PANEL_LINE + 8,
                      40 + (history_count ? history_count : 1) * (NOTICE_HEIGHT - 8),
                      40 + (clip_count ? clip_count : 1) * CLIP_ROW, 40 + 7 * DAY_HEIGHT};
     struct rect t = tray_item(item);
@@ -1271,6 +1293,24 @@ static struct rect volume_slider(void) {
     struct rect p = panel_rect(TRAY_QUICK), m = mute_button();
 
     return (struct rect){m.x + m.width + 10, m.y, p.x + p.width - 56 - (m.x + m.width + 10), 20};
+}
+
+// The brightness's sun and slider, laid out as the volume's.
+static struct rect sun_icon(void) {
+    struct rect m = mute_button();
+
+    return (struct rect){m.x, m.y + sound_height(), m.width, m.height};
+}
+
+static struct rect brightness_slider(void) {
+    struct rect v = volume_slider();
+
+    return (struct rect){v.x, sun_icon().y, v.width, v.height};
+}
+
+// The popup the keys show, over the middle of the bottom of the screen.
+static struct rect osd_rect(void) {
+    return (struct rect){(screen.width - 240) / 2, screen.height - TASKBAR_HEIGHT - 2 * GAP - 48, 240, 48};
 }
 
 // The calendar's arrows to the month before and after, either side of its name.
@@ -1312,7 +1352,7 @@ static void close_panel(void) {
         flyout_leaves(panel_rect(panel));
     damage_tray();
     panel = -1;
-    setting_volume = false;
+    setting_volume = setting_brightness = false;
     autohide();
 }
 
@@ -1471,6 +1511,182 @@ static void set_volume_at(int x) {
     set_volume(((x - r.x) * 100 + r.width / 2) / r.width, muted);
 }
 
+// A number or a word from a file in one of /sys/class's folders.
+static int read_number(const char *dir, const char *name) {
+    char path[GUI_PATH_MAX + 32];
+    FILE *f;
+    int n = -1;
+
+    snprintf(path, sizeof(path), "%s/%s", dir, name);
+    if ((f = fopen(path, "r"))) {
+        if (fscanf(f, "%d", &n) != 1)
+            n = -1;
+        fclose(f);
+    }
+    return n;
+}
+
+static void read_word(const char *dir, const char *name, char *out, size_t size) {
+    char path[GUI_PATH_MAX + 32];
+    FILE *f;
+
+    snprintf(path, sizeof(path), "%s/%s", dir, name);
+    out[0] = '\0';
+    if ((f = fopen(path, "r"))) {
+        if (fgets(out, size, f))
+            out[strcspn(out, "\n")] = '\0';
+        fclose(f);
+    }
+}
+
+// The backlight to set: the firmware's or the platform's before a graphics card's own.
+static void find_backlight(void) {
+    DIR *dir = opendir(BACKLIGHT_DIR);
+    struct dirent *e;
+    int best = 0;
+
+    while (dir && (e = readdir(dir))) {
+        char path[GUI_PATH_MAX], type[32];
+
+        if (e->d_name[0] == '.')
+            continue;
+        snprintf(path, sizeof(path), BACKLIGHT_DIR "/%s", e->d_name);
+        read_word(path, "type", type, sizeof(type));
+
+        int rank = !strcmp(type, "firmware") ? 3 : !strcmp(type, "platform") ? 2 : 1;
+
+        if (rank > best) {
+            best = rank;
+            snprintf(backlight, sizeof(backlight), "%s", path);
+        }
+    }
+    if (dir)
+        closedir(dir);
+    brightness_max = backlight[0] ? read_number(backlight, "max_brightness") : 1;
+    brightness = backlight[0] ? read_number(backlight, "brightness") : 0;
+    if (brightness_max <= 0)
+        backlight[0] = '\0', brightness_max = 1;
+}
+
+static int brightness_percent(void) {
+    return (brightness * 100 + brightness_max / 2) / brightness_max;
+}
+
+static void show_osd(bool volume_shown) {
+    osd_volume = volume_shown;
+    osd_until = now_ms() + OSD_MS;
+    add_damage(osd_rect());
+}
+
+// Never quite dark, which would look like the screen had gone off.
+static void set_brightness(int level) {
+    char path[GUI_PATH_MAX + 16];
+    FILE *f;
+
+    level = level < 1 ? 1 : level > brightness_max ? brightness_max : level;
+    if (!backlight[0] || level == brightness)
+        return;
+    snprintf(path, sizeof(path), "%s/brightness", backlight);
+    if (!(f = fopen(path, "w")))
+        return;
+    fprintf(f, "%d\n", level);
+    if (fclose(f) != 0)
+        return;
+    brightness = level;
+    printf("wm: brightness %d\n", brightness_percent());
+    damage_tray();
+}
+
+// A step of the keys, at least one of the backlight's own.
+static void step_brightness(int direction) {
+    int step = brightness_max * BRIGHTNESS_STEP / 100;
+
+    set_brightness(brightness + direction * (step > 0 ? step : 1));
+    show_osd(false);
+}
+
+static void set_brightness_at(int x) {
+    struct rect r = brightness_slider();
+    int percent = ((x - r.x) * 100 + r.width / 2) / r.width;
+
+    set_brightness((percent * brightness_max + 50) / 100);
+}
+
+// Locks first, so it's locked when it wakes, then suspends once that's drawn.
+static void suspend_soon(void) {
+    if (suspend_due >= 0)
+        return;
+    if (can_lock() && !locked)
+        lock();
+    suspend_due = now_ms() + SUSPEND_WAIT_MS;
+    printf("wm: suspending\n");
+}
+
+// The battery, looked at with the network, warning as it runs low, and suspending
+// before it's empty.
+static void check_battery(void) {
+    DIR *dir = opendir(POWER_DIR);
+    struct dirent *e;
+    int was = battery;
+    bool was_charging = charging;
+
+    battery = -1;
+    while (dir && battery < 0 && (e = readdir(dir))) {
+        char path[GUI_PATH_MAX], type[32], status[32];
+
+        snprintf(path, sizeof(path), POWER_DIR "/%s", e->d_name);
+        read_word(path, "type", type, sizeof(type));
+        if (e->d_name[0] == '.' || strcmp(type, "Battery") || read_number(path, "present") == 0)
+            continue;
+        battery = read_number(path, "capacity");
+        read_word(path, "status", status, sizeof(status));
+        charging = strcmp(status, "Discharging") != 0; // or full, or held below full
+    }
+    if (dir)
+        closedir(dir);
+    if (battery != was || charging != was_charging) {
+        damage_taskbar();
+        damage_tray();
+    }
+    if (battery < 0 || charging) {
+        warned = 100;
+    } else if (battery <= 2 && warned > 2) {
+        add_notice("The battery's empty", "Suspending, so nothing's lost", NULL);
+        suspend_soon();
+        warned = 2;
+    } else if (battery <= 5 && warned > 5) {
+        add_notice("The battery's very low", "5% left. Plug the charger in.", NULL);
+        warned = 5;
+    } else if (battery <= 10 && warned > 10) {
+        add_notice("The battery's low", "10% left", NULL);
+        warned = 10;
+    }
+}
+
+// How long until the popup goes or the computer suspends, or -1 if neither's due.
+static int check_laptop(void) {
+    int64_t now = now_ms(), wait = -1;
+
+    if (suspend_due >= 0 && now >= suspend_due) {
+        suspend_due = -1;
+#ifndef GUI_HOSTED
+        if (fork() == 0) {
+            execl(GUI_BIN "/suspend", "suspend", (char *)NULL);
+            _exit(127);
+        }
+#endif
+    }
+    if (osd_until && now >= osd_until) {
+        osd_until = 0;
+        add_damage(osd_rect());
+    }
+    if (suspend_due >= 0)
+        wait = suspend_due - now;
+    if (osd_until && (wait < 0 || osd_until - now < wait))
+        wait = osd_until - now;
+    return (int)wait;
+}
+
 // Looks at the network again, redrawing the tray if it's come or gone.
 static void check_network(void) {
     bool was = connected();
@@ -1530,6 +1746,11 @@ static void report_panel(int item) {
         printf("wm: mute at %d %d %d %d\nwm: slider at %d %d %d %d\n", m.x, m.y, m.width, m.height, v.x, v.y, v.width,
                v.height);
     }
+    if (backlight[0]) {
+        struct rect b = brightness_slider();
+
+        printf("wm: brightness slider at %d %d %d %d\n", b.x, b.y, b.width, b.height);
+    }
 }
 
 static void open_panel(int item) {
@@ -1545,6 +1766,7 @@ static void open_panel(int item) {
             fclose(f);
         printf("wm: quick settings%s%s\n", now_playing[0] ? ", " : "", now_playing);
         check_network();
+        check_battery();
     }
     panel = item;
     panel_opened = now_ms();
@@ -1631,11 +1853,44 @@ static bool tile_on(int tile) {
          : tile == TILE_QUIET ? settings.quiet : !settings.light;
 }
 
-// The tiles, the volume and what's playing, then the network.
+// A slider's line, filled to its knob, which is dim when what it sets is off.
+static void draw_slider(struct gui_canvas *c, struct rect r, int percent, bool dim, int ox, int oy) {
+    int knob = r.x + r.width * percent / 100, line = r.y + r.height / 2;
+    uint32_t colour = dim ? TASKBAR_DIM_TEXT : TITLE_FOCUSED;
+
+    gui_fill_rounded(c, r.x - ox, line - 2 - oy, r.width, 4, GUI_MAX_RADIUS, TASKBAR_LINE);
+    gui_fill_rounded(c, r.x - ox, line - 2 - oy, knob - r.x, 4, GUI_MAX_RADIUS, colour);
+    gui_fill_rounded(c, knob - 5 - ox, line - 8 - oy, 10, 16, GUI_MAX_RADIUS, colour);
+}
+
+// The battery, as a cell filled as far as it's charged, red when it's low, with a
+// bolt while it charges.
+static void draw_battery(struct gui_canvas *c, int x, int y, int ox, int oy) {
+    int fill = 12 * (battery > 100 ? 100 : battery) / 100;
+    uint32_t colour = battery <= 10 && !charging ? CLOSE_COLOR : charging ? 0x46BE6E : TASKBAR_TEXT;
+
+    gui_frame_rounded(c, x - ox, y + 3 - oy, 16, 10, 2, TASKBAR_COLOR, TASKBAR_TEXT);
+    gui_fill(c, x + 16 - ox, y + 6 - oy, 2, 4, TASKBAR_TEXT);
+    gui_fill(c, x + 2 - ox, y + 5 - oy, fill > 0 ? fill : 1, 6, colour);
+}
+
+// The popup the volume and brightness keys show: what they set, and how far.
+static void draw_osd(struct gui_canvas *c, int ox, int oy) {
+    struct rect r = osd_rect();
+    int level = osd_volume ? volume : brightness_percent();
+    const struct gui_image *icon = gui_icon(!osd_volume ? "brightness" : muted || !volume ? "muted" : "speaker");
+
+    draw_glass(c, r, ox, oy);
+    if (icon)
+        gui_draw_image(c, r.x + 16 - ox, r.y + (r.height - ICON_SIZE) / 2 - oy, icon);
+    draw_slider(c, (struct rect){r.x + 44, r.y + 14, r.width - 64, 20}, level, osd_volume && muted, ox, oy);
+}
+
+// The tiles, the volume and what's playing, the brightness and battery, then the network.
 static void draw_quick(struct gui_canvas *c, struct rect p, int ox, int oy) {
     static const char *const labels[] = {"Airplane", "Night light", "Dark mode", "Quiet"};
     static const char *const tile_icons[] = {"airplane", "night", "theme", "quiet"};
-    int network_y = p.y + 12 + TILE_HEIGHT + 12 + sound_height();
+    int network_y = p.y + 12 + TILE_HEIGHT + 12 + sound_height() + laptop_height();
 
     for (int i = 0; i < TILES; i++) {
         struct rect t = quick_tile(i);
@@ -1650,7 +1905,6 @@ static void draw_quick(struct gui_canvas *c, struct rect p, int ox, int oy) {
     }
     if (mixer >= 0) {
         struct rect r = volume_slider(), m = mute_button();
-        int knob = r.x + r.width * volume / 100, line = r.y + r.height / 2;
         const struct gui_image *speaker = gui_icon(muted || !volume ? "muted" : "speaker");
         char percent[8];
 
@@ -1659,9 +1913,7 @@ static void draw_quick(struct gui_canvas *c, struct rect p, int ox, int oy) {
             gui_fill_rounded(c, m.x - ox, m.y - oy, m.width, m.height, SMALL_RADIUS, TASKBAR_BUTTON);
         if (speaker)
             gui_draw_image(c, m.x + (m.width - ICON_SIZE) / 2 - ox, m.y + (m.height - ICON_SIZE) / 2 - oy, speaker);
-        gui_fill_rounded(c, r.x - ox, line - 2 - oy, r.width, 4, GUI_MAX_RADIUS, TASKBAR_LINE);
-        gui_fill_rounded(c, r.x - ox, line - 2 - oy, knob - r.x, 4, GUI_MAX_RADIUS, muted ? TASKBAR_DIM_TEXT : TITLE_FOCUSED);
-        gui_fill_rounded(c, knob - 5 - ox, line - 8 - oy, 10, 16, GUI_MAX_RADIUS, muted ? TASKBAR_DIM_TEXT : TITLE_FOCUSED);
+        draw_slider(c, r, volume, muted, ox, oy);
         gui_text(c, p.x + p.width - 12 - gui_text_width(percent, 1) - ox, r.y + (r.height - GUI_CHAR_HEIGHT) / 2 - oy,
                  percent, muted ? TASKBAR_DIM_TEXT : TASKBAR_TEXT, 1);
         if (now_playing[0]) {
@@ -1670,6 +1922,26 @@ static void draw_quick(struct gui_canvas *c, struct rect p, int ox, int oy) {
             snprintf(shown, sizeof(shown), "%.*s", (int)gui_text_fit(now_playing, strlen(now_playing), p.width - 24), now_playing);
             gui_text(c, p.x + 12 - ox, m.y + 28 - oy, shown, TASKBAR_DIM_TEXT, 1);
         }
+    }
+    if (backlight[0]) {
+        struct rect r = brightness_slider(), i = sun_icon();
+        const struct gui_image *sun = gui_icon("brightness");
+        char percent[8];
+
+        snprintf(percent, sizeof(percent), "%d%%", brightness_percent());
+        if (sun)
+            gui_draw_image(c, i.x + (i.width - ICON_SIZE) / 2 - ox, i.y + (i.height - ICON_SIZE) / 2 - oy, sun);
+        draw_slider(c, r, brightness_percent(), false, ox, oy);
+        gui_text(c, p.x + p.width - 12 - gui_text_width(percent, 1) - ox, r.y + (r.height - GUI_CHAR_HEIGHT) / 2 - oy,
+                 percent, TASKBAR_TEXT, 1);
+    }
+    if (battery >= 0) {
+        int y = sun_icon().y + (backlight[0] ? 32 : 0);
+        char text[48];
+
+        snprintf(text, sizeof(text), "%d%%%s", battery, !charging ? "" : battery >= 100 ? ", full" : ", plugged in");
+        draw_battery(c, p.x + 13, y + 2, ox, oy);
+        gui_text(c, p.x + 44 - ox, y + (20 - GUI_CHAR_HEIGHT) / 2 + 2 - oy, text, TASKBAR_TEXT, 1);
     }
     gui_fill(c, p.x + 12 - ox, network_y - oy, p.width - 24, 1, TASKBAR_LINE);
     draw_network(c, p, network_y + 9, ox, oy);
@@ -1770,8 +2042,15 @@ static void draw_tray(struct gui_canvas *c, int ox, int oy) {
         if (panel == i || contains(t, cursor_x, cursor_y))
             gui_fill_rounded(c, t.x - ox, t.y - oy, t.width, t.height, SMALL_RADIUS, TASKBAR_BUTTON);
     }
+    if (battery >= 0) {
+        char percent[8];
+
+        snprintf(percent, sizeof(percent), "%d%%", battery);
+        draw_battery(c, q.x + 4, icon_y, ox, oy);
+        gui_text(c, q.x + 24 - ox, q.y + (q.height - GUI_CHAR_HEIGHT) / 2 - oy, percent, TASKBAR_TEXT, 1);
+    }
     if (network)
-        gui_draw_image(c, q.x + 4 - ox, icon_y - oy, network);
+        gui_draw_image(c, q.x + 4 + (battery >= 0 ? BATTERY_WIDTH : 0) - ox, icon_y - oy, network);
     if (speaker && mixer >= 0)
         gui_draw_image(c, q.x + q.width - 4 - ICON_SIZE - ox, icon_y - oy, speaker);
     if (bell)
@@ -1869,6 +2148,9 @@ static bool panel_click(void) {
     if (panel == TRAY_QUICK && mixer >= 0 && contains(volume_slider(), cursor_x, cursor_y)) {
         setting_volume = true;
         set_volume_at(cursor_x);
+    } else if (panel == TRAY_QUICK && backlight[0] && contains(brightness_slider(), cursor_x, cursor_y)) {
+        setting_brightness = true;
+        set_brightness_at(cursor_x);
     } else if (panel == TRAY_QUICK && mixer >= 0 && contains(mute_button(), cursor_x, cursor_y)) {
         set_volume(volume, !muted);
         play_sound(SOUND_VOLUME);
@@ -3096,6 +3378,8 @@ static void draw_area(struct rect r, struct gui_canvas c) {
     if (bar_visible() && overlaps(r, bar))
         draw_taskbar(&c, r.x, r.y);
     draw_notices(&c, r.x, r.y);
+    if (osd_until && overlaps(osd_rect(), r))
+        draw_osd(&c, r.x, r.y);
     if (popup_depth)
         draw_flyout(&c, popups[0].r, menu_opened, draw_popup, 0, r.x, r.y);
     if (popup_depth > 1)
@@ -4203,6 +4487,7 @@ static void fill_start_menu(void) {
         add_item(p, ACT_LOCK, "Lock", NULL, gui_icon("lock"));
         add_item(p, ACT_LOG_OUT, "Log out", NULL, gui_icon("logout"));
     }
+    add_item(p, ACT_SUSPEND, "Suspend", NULL, gui_icon("suspend"));
     add_item(p, ACT_REBOOT, "Reboot", NULL, gui_icon("reboot"));
     add_item(p, ACT_SHUT_DOWN, "Shut down", NULL, gui_icon("shutdown"));
     place_popup(p, GAP, 0, MENU_WIDTH);
@@ -4219,6 +4504,27 @@ static void open_start_menu(void) {
     fill_start_menu();
     start_open = true;
     show_popup(0);
+}
+
+// What the power button asks: whether to suspend, restart or shut down, in the
+// middle of the screen.
+static void open_power_menu(void) {
+    struct popup *p = &popups[0];
+
+    set_overview(false);
+    close_panel();
+    close_menu();
+    p->count = 0;
+    if (can_lock())
+        add_item(p, ACT_LOCK, "Lock", NULL, gui_icon("lock"));
+    add_item(p, ACT_SUSPEND, "Suspend", NULL, gui_icon("suspend"));
+    add_item(p, ACT_REBOOT, "Reboot", NULL, gui_icon("reboot"));
+    add_item(p, ACT_SHUT_DOWN, "Shut down", NULL, gui_icon("shutdown"));
+    place_popup(p, (screen.width - MENU_WIDTH) / 2, 0, MENU_WIDTH);
+    p->r.y = (screen.height - p->r.height) / 2;
+    p->choice = first_choosable(p);
+    show_popup(0);
+    printf("wm: power menu\n");
 }
 
 static void close_submenu(void);
@@ -4440,6 +4746,9 @@ static void act(const struct item *item) {
         break;
     case ACT_LOCK:
         lock();
+        break;
+    case ACT_SUSPEND:
+        suspend_soon();
         break;
     case ACT_LOG_OUT:
     case ACT_REBOOT:
@@ -4916,6 +5225,10 @@ static void handle_mouse(const struct mouse_event *e) {
     // changes it over the speaker or the sound menu.
     if (setting_volume && moved)
         set_volume_at(cursor_x);
+    if (setting_brightness && moved)
+        set_brightness_at(cursor_x);
+    if (released & MOUSE_BUTTON_LEFT)
+        setting_brightness = false;
     if ((released & MOUSE_BUTTON_LEFT) && setting_volume) {
         setting_volume = false;
         play_sound(SOUND_VOLUME); // to hear how loud it is now
@@ -5075,6 +5388,38 @@ static void update_cursor(void) {
 }
 
 // Super with something else is for wm, and every other key goes to the focused window.
+// The laptop's keys, which work while it's locked too: closing the lid suspends,
+// and the power button asks what to do, or suspends from the lock screen. Swipes
+// of three fingers go to the workspace either side, or show the overview.
+static bool laptop_key(const struct key_event *e) {
+    if (e->code == KEY_LID || e->code == KEY_POWER) {
+        if (e->pressed && (e->code == KEY_LID || locked))
+            suspend_soon();
+        else if (e->pressed)
+            open_power_menu();
+    } else if (e->code == KEY_BRIGHTNESS_UP || e->code == KEY_BRIGHTNESS_DOWN) {
+        if (e->pressed && backlight[0])
+            step_brightness(e->code == KEY_BRIGHTNESS_UP ? 1 : -1);
+    } else if (e->code == KEY_VOLUME_UP || e->code == KEY_VOLUME_DOWN || e->code == KEY_MUTE) {
+        if (e->pressed && mixer >= 0) {
+            set_volume(volume + (e->code == KEY_VOLUME_UP ? VOLUME_STEP : e->code == KEY_VOLUME_DOWN ? -VOLUME_STEP : 0),
+                       e->code == KEY_MUTE ? !muted : e->code == KEY_VOLUME_UP ? false : muted);
+            show_osd(true);
+        }
+    } else if (e->code == KEY_SWIPE_LEFT || e->code == KEY_SWIPE_RIGHT || e->code == KEY_SWIPE_UP) {
+        if (!e->pressed || locked)
+            return true;
+        printf("wm: swipe %s\n", e->code == KEY_SWIPE_UP ? "up" : e->code == KEY_SWIPE_LEFT ? "left" : "right");
+        if (e->code == KEY_SWIPE_UP)
+            set_overview(!overview);
+        else if (!overview) // fingers going left bring the workspace on the right, as a page turns
+            go_to_workspace((workspace + (e->code == KEY_SWIPE_LEFT ? 1 : WORKSPACES - 1)) % WORKSPACES);
+    } else {
+        return false;
+    }
+    return true;
+}
+
 static void handle_key(const struct key_event *e) {
     bool super = e->modifiers & KEY_MOD_SUPER;
 
@@ -5087,6 +5432,8 @@ static void handle_key(const struct key_event *e) {
             display->switch_session(e->code - KEY_F1 + 1);
         return;
     }
+    if (laptop_key(e))
+        return;
     if (locked) {
         if (focused && focused->client == session)
             send_to(focused, (struct gui_message){.type = GUI_KEY, .key = *e});
@@ -5398,6 +5745,8 @@ int main(int argc, char **argv) {
 
     snprintf(shown_clock, sizeof(shown_clock), "%s", clock_text(clock));
     check_network();
+    find_backlight();
+    check_battery();
     while (!quitting) {
         struct pollfd fds[1 + DISPLAY_FDS + MAX_CLIENTS] = {{.fd = listener, .events = POLLIN}};
         struct pollfd *input = fds + 1, *client_fds = input + display->poll_fds(input);
@@ -5430,6 +5779,10 @@ int main(int argc, char **argv) {
         int leave_wait = check_leaving();
 
         timeout = leave_wait >= 0 && leave_wait < timeout ? leave_wait : timeout;
+
+        int laptop_wait = check_laptop();
+
+        timeout = laptop_wait >= 0 && (timeout < 0 || laptop_wait < timeout) ? laptop_wait : timeout;
         if (login_due >= 0) {
             int64_t wait = login_due - now_ms();
 
@@ -5451,6 +5804,7 @@ int main(int argc, char **argv) {
         }
         if (now_ms() >= net_checked + NET_CHECK_MS) {
             check_network();
+            check_battery();
             load_desktop(false);
             net_checked = now_ms();
         }

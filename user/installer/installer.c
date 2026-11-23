@@ -139,6 +139,24 @@ static void start(struct gui_ui *ui) {
     go_to(ui, INSTALLING);
 }
 
+// What install said last, but for how far it's copied, up to count lines, the
+// last one first.
+static int last_lines(char lines[][96], int count) {
+    int n = 0;
+    char *end = output + strlen(output);
+
+    while (n < count && end > output) {
+        char *start = end - 1;
+
+        while (start > output && start[-1] != '\n')
+            start--;
+        if (end - start > 1 && strncmp(start, "install: copied ", 16) && strncmp(start, "Password for", 12))
+            snprintf(lines[n++], 96, "%.*s", (int)(end - start - (end[-1] == '\n')), start);
+        end = start;
+    }
+    return n;
+}
+
 // What install has said since, answering what it asks, until it's finished.
 static void follow(struct gui_ui *ui) {
     size_t have = strlen(output);
@@ -177,7 +195,7 @@ static void follow(struct gui_ui *ui) {
         else
             fail(ui, strstr(output, "sudo: wrong password") ? "That password isn't right."
                      : strstr(output, "sudo: only") ? "Your account isn't in the admin group, so it can't install."
-                                                    : "It couldn't be installed. The terminal's install command says more.");
+                                                    : "It couldn't be installed. This is what install said last:");
     }
 }
 
@@ -253,6 +271,13 @@ static void confirm(struct gui_ui *ui) {
 }
 
 static void frame(struct gui_ui *ui) {
+    static int drawn = -1;
+
+    if ((int)page != drawn) { // for the tests, as it's what's on the screen
+        printf("installer: drew %s\n", page_names[page]);
+        fflush(stdout);
+        drawn = page;
+    }
     gui_ui_begin(ui);
     switch (page) {
     case CHOOSE:
@@ -264,23 +289,34 @@ static void frame(struct gui_ui *ui) {
     case CONFIRM:
         confirm(ui);
         break;
-    case INSTALLING:
+    case INSTALLING: {
+        char last[1][96];
+
         gui_heading(ui, "Installing");
         gui_label(ui, percent ? "Copying the system" : "Making its partitions");
         gui_progress(ui, percent / 100.0f);
+        if (last_lines(last, 1))
+            gui_label(ui, "%s", last[0]);
         break;
+    }
     case DONE:
         gui_heading(ui, "AximOS is installed");
         gui_label(ui, "Take out the USB stick, then restart.");
         if (gui_button(ui, "Restart"))
             execlp("reboot", "reboot", NULL);
         break;
-    case FAILED:
+    case FAILED: {
+        char last[4][96];
+        int n = last_lines(last, 4);
+
         gui_heading(ui, "It wasn't installed");
         gui_label(ui, "%s", message);
+        for (int i = n - 1; i >= 0; i--) // what install said last, oldest first
+            gui_label(ui, "%s", last[i]);
         if (gui_button(ui, "Back"))
             go_to(ui, CHOOSE);
         break;
+    }
     }
     gui_ui_end(ui);
 }
@@ -293,7 +329,7 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    struct gui_window *window = gui_create_window("Install AximOS", 480, 330);
+    struct gui_window *window = gui_create_window("Install AximOS", 600, 340);
     struct gui_ui ui;
 
     if (!window) {
@@ -316,7 +352,7 @@ int main(int argc, char **argv) {
         redraw = page == INSTALLING;
         if (redraw)
             follow(&ui);
-        if ((got = gui_wait_event(&e, page == INSTALLING ? 100 : -1)) < 0
+        if ((got = gui_wait_event(&e, redraw ? 100 : -1)) < 0
             || (got && e.type == GUI_CLOSE && page != INSTALLING))
             break;
         if (got)

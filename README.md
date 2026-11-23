@@ -60,7 +60,8 @@ system tools `mount umount dmesg uname hostname sync lsmod insmod rmmod modprobe
 with `id whoami passwd useradd sudo`, `disk` (lists drives and their free space, partitions
 them with GPT, adds partitions in free space beside what's there, and formats them as ext4 or
 FAT32), `efiboot` (the firmware's boot entries and their order), `install` (installs AximOS from the
-live system), `swapon`, and `host nc ping`. Run any of them with `--help`. ext4 is
+live system), `swapon`, `suspend`, `inputsim` (pretend laptop input, for the tests), and
+`host nc ping`. Run any of them with `--help`. ext4 is
 made and checked by [e2fsprogs](https://e2fsprogs.sourceforge.net)' `mkfs.ext4` and `e2fsck`.
 
 ### Desktop
@@ -87,6 +88,12 @@ made and checked by [e2fsprogs](https://e2fsprogs.sourceforge.net)' `mkfs.ext4` 
 - A tray with quick settings (airplane mode, night light, dark mode, do not disturb,
   volume), the network, notifications, a calendar, and the clipboard's history, to put
   back something copied earlier
+- On a laptop: the battery in the tray, with warnings at 10% and 5% and a suspend at 2%;
+  brightness and volume keys, with a popup, and a brightness slider in quick settings;
+  closing the lid locks and suspends (s2idle), and the power button asks whether to
+  suspend, restart or shut down; and on the touchpad, tap to click (two fingers
+  right-click), two-finger scrolling, and three-finger swipes between workspaces and up
+  to the overview
 - Notifications that can carry a button, and stack up when one app sends several
 - Soft sounds of its own for notifications, logging in and out, the volume, snapping
   windows and screenshots, made as they play, which Settings can turn off
@@ -234,6 +241,8 @@ as on AximOS, with the screen and input from logind, through libseat. `--window`
 | Super+arrows        | Maximize, or tile to a side, then Up or Down for a quarter |
 | Super+1 to 4        | Change workspace                      |
 | Super+L             | Lock it                               |
+| Three fingers left or right | The workspace either side     |
+| Three fingers up    | The overview                          |
 | Super+Shift+Q       | Log out                               |
 | Ctrl+Alt+F2 to F6   | A text console, and Ctrl+Alt+F1 back  |
 | Print Screen        | Save the screen, and copy it          |

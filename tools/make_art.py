@@ -340,6 +340,20 @@ def quiet(d, s):
     d.line((2 * s, 1.5 * s, 14.5 * s, 14 * s), fill=(150, 160, 180), width=int(1.4 * s))
 
 
+def sun(d, s):
+    yellow = (240, 190, 60)
+    d.ellipse((5 * s, 5 * s, 11 * s, 11 * s), fill=yellow)
+    for i in range(8):
+        a = i * math.pi / 4
+        d.line((8 * s + 4.5 * s * math.cos(a), 8 * s + 4.5 * s * math.sin(a), 8 * s + 7 * s * math.cos(a),
+                8 * s + 7 * s * math.sin(a)), fill=yellow, width=int(1.4 * s))
+
+
+def moon(d, s):
+    d.ellipse((2 * s, 2 * s, 14 * s, 14 * s), fill=(150, 160, 180))
+    d.ellipse((6 * s, 0 * s, 16 * s, 10 * s), fill=(0, 0, 0, 0))
+
+
 def clipboard(d, s):
     grey = (150, 160, 180)
     d.rounded_rectangle((2.5 * s, 2.5 * s, 13.5 * s, 15 * s), 1.5 * s, outline=grey, width=int(1.4 * s))
@@ -372,7 +386,8 @@ for name, paint in (('folder', folder), ('file', page), ('text', lambda d, s: pa
                     ('image', picture_icon), ('program', program), ('audio', audio),
                     ('speaker', speaker), ('muted', muted), ('lock', padlock), ('reboot', restart),
                     ('shutdown', power), ('logout', log_out), ('network', bars), ('offline', offline),
-                    ('bell', bell), ('quiet', quiet), ('clipboard', clipboard)):
+                    ('bell', bell), ('quiet', quiet), ('clipboard', clipboard), ('brightness', sun),
+                    ('suspend', moon)):
     icon(paint).save(f'{SHARE}/icons/{name}.png', optimize=True)
 for name, paint in (('term', terminal), ('editor', editor), ('files', files), ('widgets', widgets),
                     ('guidemo', demo), ('fbdemo', squares), ('viewer', picture_icon), ('settings', gear), ('run', run),

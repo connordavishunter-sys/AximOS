@@ -36,11 +36,11 @@ TARGET_CFLAGS := -std=gnu23 -O2 -Wall -Wextra -Wno-format-truncation -D_GNU_SOUR
 # libaximos.so, which has what they share beyond glibc.
 TOOLS := cat clear cp date df du echo env find free grep head kill ls mkdir more mv ps reboot rename rm rmdir \
 	shutdown sleep sort stat tail text top touch tz wc counter hello host nc ping mount umount dmesg uname \
-	hostname ln chmod chown id whoami sync lsmod insmod rmmod modprobe ttylogin sudo passwd useradd disk efiboot install swapon axfetch checkpass session
+	hostname ln chmod chown id whoami sync lsmod insmod rmmod modprobe ttylogin sudo passwd useradd disk efiboot install swapon suspend inputsim axfetch checkpass session
 LIBS_disk := -lblkid
 LIBS_mount := -lblkid
 LIBS_install := -lblkid
-SETUID := sudo passwd tz reboot shutdown checkpass# which start as root, whoever runs them
+SETUID := sudo passwd tz reboot shutdown suspend checkpass# which start as root, whoever runs them
 LIBAXIMOS := $(ROOT)/system/lib/libaximos.so
 
 # The desktop: libgui.so, wm, and the apps in /system/bin/gui, in the folders the

@@ -164,9 +164,9 @@ try:
 
     # The menu lists /system/bin/gui above the launcher, 24 pixels an item: its
     # folders, Accessories, Demos, Games and System, then the apps outside them, files
-    # and term. Then a line, Run..., Lock, Log out, Reboot and Shut down. It floats 8
+    # and term. Then a line, Run..., Lock, Log out, Suspend, Reboot and Shut down. It floats 8
     # above the taskbar.
-    menu_top = bar - 11 * 24 - 9 - 8 - 8
+    menu_top = bar - 12 * 24 - 9 - 8 - 8
     mouse.click(36, bar + 14)
     time.sleep(0.5)
     w, h, px = v.screenshot()
