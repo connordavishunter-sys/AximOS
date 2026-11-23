@@ -26,43 +26,11 @@
 //
 // Programs ask it on SOCKET, a line a connection: "status" gives the cards and their
 // addresses, a line each, then "end"; "dhcp CARD" and "set CARD ADDRESS/PREFIX
-// [GATEWAY [DNS]]" change a card, for anyone with an account.
+// [GATEWAY [DNS]]" change a card, for anyone with an account, as do wifi.c's "join",
+// "forget" and "airplane", while "networks" and "scan" are anyone's. CONF's
+// "CARD ignore" leaves a card to another program.
 
-#define SOCKET "/run/netd.sock"
-#define RESOLV "/run/resolv.conf"
-#define CONF "/system/etc/netd.conf"
-#define MAX_CARDS 8
-#define MAX_DNS 4
-#define WIRED_METRIC 100
-#define WIFI_METRIC 600
-#define DHCP_MAGIC 0x63825363
-#define RETRY_MS 4000   // DHCP asks again after this, doubling up to RETRY_MAX_MS
-#define RETRY_MAX_MS 64000
-#define SOLICITS 3      // DHCPv6 solicits before it only asks for DNS, as networks without its addresses answer
-
-enum { IDLE, SELECTING, REQUESTING, BOUND, RENEWING, REBINDING };
-enum { V6_IDLE, V6_SOLICIT, V6_REQUEST, V6_INFO, V6_DONE };
-
-struct card {
-    char name[IF_NAMESIZE];
-    int index;
-    uint8_t mac[6];
-    bool wifi, carrier, seen;
-    bool hand; // its IPv4 set by hand, from CONF
-    uint32_t hand_address, hand_gateway, hand_dns;
-    int hand_prefix;
-    // DHCPv4, in host byte order
-    int state, fd, tries;
-    uint32_t xid, offered, server, address, netmask, gateway, dns[MAX_DNS];
-    int64_t next, renew, rebind, expires;
-    // DHCPv6
-    int v6_state, v6_fd, v6_tries;
-    uint8_t v6_xid[3], v6_server[130];
-    int v6_server_len;
-    struct in6_addr v6_address, v6_dns[MAX_DNS];
-    bool has_v6_address;
-    int64_t v6_next, v6_renew;
-};
+#include "netd.h"
 
 // struct in6_ifreq, as Linux's headers have it, which glibc's can't be included with
 struct in6_request {
@@ -71,10 +39,12 @@ struct in6_request {
     int index;
 };
 
-static struct card cards[MAX_CARDS];
-static int card_count, inet = -1, inet6 = -1;
+struct card cards[MAX_CARDS];
+int card_count;
+static bool unsettled; // a card udev hasn't finished with, such as naming it, which scan looks at again
+static int inet = -1, inet6 = -1;
 
-static int64_t now_ms(void) {
+int64_t now_ms(void) {
     struct timespec t;
 
     clock_gettime(CLOCK_MONOTONIC, &t);
@@ -571,12 +541,26 @@ static void read_conf(struct card *c) {
         fclose(f);
 }
 
-// The cards Linux has, apart from loopback and those of no device, such as tunnels:
-// each is brought up, and those with a carrier connected.
+// Whether CONF says to leave a card alone, as "CARD ignore", for another program.
+static bool ignored(const char *name) {
+    FILE *f = fopen(CONF, "r");
+    char line[256], card[IF_NAMESIZE], word[16];
+    bool found = false;
+
+    while (f && fgets(line, sizeof(line), f))
+        found |= sscanf(line, "%15s %15s", card, word) == 2 && !strcmp(card, name) && !strcmp(word, "ignore");
+    if (f)
+        fclose(f);
+    return found;
+}
+
+// The cards Linux has, apart from loopback and those of no device, such as tunnels,
+// once udev's named them: each is brought up, and those with a carrier connected.
 static void scan(void) {
     DIR *dir = opendir("/sys/class/net");
     struct dirent *e;
 
+    unsettled = false;
     for (int i = 0; i < card_count; i++)
         cards[i].seen = false;
     while (dir && (e = readdir(dir))) {
@@ -584,8 +568,13 @@ static void scan(void) {
         struct card *c = NULL;
 
         snprintf(path, sizeof(path), "/sys/class/net/%s/device", e->d_name);
-        if (e->d_name[0] == '.' || access(path, F_OK) || strlen(e->d_name) >= IF_NAMESIZE)
+        if (e->d_name[0] == '.' || access(path, F_OK) || strlen(e->d_name) >= IF_NAMESIZE || ignored(e->d_name))
             continue;
+        snprintf(path, sizeof(path), "/run/udev/data/n%u", if_nametoindex(e->d_name));
+        if (access(path, F_OK)) { // which it writes once it's done, and named the card
+            unsettled = true;
+            continue;
+        }
         for (int i = 0; i < card_count; i++)
             c = !strcmp(cards[i].name, e->d_name) ? &cards[i] : c;
         if (!c && card_count < MAX_CARDS) {
@@ -607,6 +596,8 @@ static void scan(void) {
                 r.ifr_flags |= IFF_UP;
                 ioctl(inet, SIOCSIFFLAGS, &r);
             }
+            if (c->wifi)
+                wifi_found(c);
             printf("netd: found %s, %s\n", c->name, c->wifi ? "Wi-Fi" : "wired");
             fflush(stdout);
         }
@@ -628,6 +619,8 @@ static void scan(void) {
         if (!cards[i].seen) {
             if (cards[i].carrier)
                 disconnected(&cards[i]);
+            if (cards[i].wifi)
+                wifi_gone(&cards[i]);
             cards[i--] = cards[--card_count];
         }
     }
@@ -646,6 +639,7 @@ static struct card *card_named(const char *name) {
 static void status(FILE *out) {
     char text[INET6_ADDRSTRLEN];
 
+    fprintf(out, "airplane %s\n", airplane_on() ? "on" : "off");
     for (int wifi = 0; wifi < 2; wifi++) {
         for (int i = 0; i < card_count; i++) {
             struct card *c = &cards[i];
@@ -666,6 +660,8 @@ static void status(FILE *out) {
             }
             if (c->has_v6_address)
                 fprintf(out, "address %s %s/128\n", c->name, inet_ntop(AF_INET6, &c->v6_address, text, sizeof(text)));
+            if (c->wifi)
+                wifi_status(out, c);
         }
     }
 
@@ -704,17 +700,21 @@ static bool save_conf(const char *name, const char *line) {
 }
 
 static void command(char *line, FILE *out, uid_t uid) {
-    char *word = strtok(line, " \t\n"), *name = strtok(NULL, " \t\n");
-    struct card *c = name ? card_named(name) : NULL;
+    char *word = strtok(line, " \t\n"), *rest = strtok(NULL, "\n"), *name;
+    struct card *c;
 
     if (!word || !strcmp(word, "status")) {
         status(out);
         return;
     }
-    if (uid != 0 && uid < FIRST_UID) {
+    if (strcmp(word, "networks") && strcmp(word, "scan") && uid != 0 && uid < FIRST_UID) {
         fputs("error only accounts can change the network\n", out);
         return;
     }
+    if (wifi_command(word, rest ? rest : (char[]){""}, out))
+        return;
+    name = rest ? strtok(rest, " \t\n") : NULL;
+    c = name ? card_named(name) : NULL;
     if (!c) {
         fprintf(out, "error there's no card called %s\n", name ? name : "that");
         return;
@@ -741,7 +741,7 @@ static void command(char *line, FILE *out, uid_t uid) {
             return;
         }
     } else {
-        fputs("error try status, dhcp or set\n", out);
+        fputs("error try status, dhcp, set, networks, scan, join, forget or airplane\n", out);
         return;
     }
     read_conf(c);
@@ -773,10 +773,20 @@ static void answer(int listener) {
     fclose(f);
 }
 
+// Its wpa_supplicants go with it, so a netd started again starts its own.
+static void stopped(int signal) {
+    for (int i = 0; i < card_count; i++) {
+        if (cards[i].wpa > 0)
+            kill(cards[i].wpa, SIGTERM);
+    }
+    _exit(128 + signal);
+}
+
 int main(int argc, char **argv) {
     help_option(argc, argv, "usage: netd\n"
                             "Keeps the network: brings up each card, gets addresses by DHCP and DHCPv6, or\n"
-                            "uses those set by hand, and sets DNS. Started by init, as root. net asks it.\n");
+                            "uses those set by hand, and sets DNS, and joins Wi-Fi networks through\n"
+                            "wpa_supplicant. Started by init, as root. net and wifi ask it.\n");
 
     int links = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_ROUTE);
     int listener = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
@@ -786,6 +796,8 @@ int main(int argc, char **argv) {
     inet = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
     inet6 = socket(AF_INET6, SOCK_DGRAM | SOCK_CLOEXEC, 0);
     signal(SIGPIPE, SIG_IGN);
+    signal(SIGTERM, stopped);
+    signal(SIGINT, stopped);
     unlink(SOCKET);
     if (links < 0 || bind(links, (struct sockaddr *)&nl, sizeof(nl)) < 0 || listener < 0
         || bind(listener, (struct sockaddr *)&un, sizeof(un)) < 0 || listen(listener, 8) < 0 || inet < 0) {
@@ -794,6 +806,7 @@ int main(int argc, char **argv) {
     }
     chmod(SOCKET, 0666); // anyone may ask, and it checks who changes things
     write_resolv();
+    airplane_load();
     scan();
 
     for (;;) {
@@ -810,8 +823,17 @@ int main(int argc, char **argv) {
 
                 wait = due - now < wait ? due - now : wait;
             }
+            if (cards[i].wifi) {
+                int due = wifi_tick(&cards[i], now);
+
+                wait = due < wait ? due : wait;
+            }
         }
+        if (unsettled && wait > 500)
+            wait = 500;
         poll(fds, 2 + 2 * card_count, wait > 0 ? (int)wait : 0);
+        if (unsettled)
+            scan();
         if (fds[0].revents & POLLIN) { // a card came, went, or its cable did
             char buffer[8192];
 

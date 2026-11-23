@@ -1849,7 +1849,7 @@ static void draw_history(struct gui_canvas *c, struct rect p, int ox, int oy) {
 }
 
 static bool tile_on(int tile) {
-    return tile == TILE_AIRPLANE ? settings.airplane : tile == TILE_NIGHT ? settings.night_light
+    return tile == TILE_AIRPLANE ? net.airplane : tile == TILE_NIGHT ? settings.night_light
          : tile == TILE_QUIET ? settings.quiet : !settings.light;
 }
 
@@ -2120,9 +2120,9 @@ static void use_clip(int index) {
 
 // A tile in quick settings turns what it's for on or off.
 static void toggle_tile(int tile) {
-    if (tile == TILE_AIRPLANE) {
-        settings.airplane = !settings.airplane;
-        save_settings(settings.airplane ? "airplane on" : "airplane off");
+    if (tile == TILE_AIRPLANE) { // netd's, for the whole computer
+        if (net_airplane(!net.airplane) == 0)
+            printf("wm: airplane %s\n", net.airplane ? "off" : "on");
         check_network();
     } else if (tile == TILE_NIGHT) {
         settings.night_light = !settings.night_light;
@@ -5648,7 +5648,6 @@ static void load_settings(void) {
     theme_now.on_accent = gui_on_accent(settings.accent);
     theme = &theme_now;
     make_night();
-    net_airplane(settings.airplane);
     autohide();
     if (desktop().y != was.y || desktop().height != was.height) {
         fit_windows(was);

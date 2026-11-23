@@ -36,7 +36,7 @@ TARGET_CFLAGS := -std=gnu23 -O2 -Wall -Wextra -Wno-format-truncation -D_GNU_SOUR
 # libaximos.so, which has what they share beyond glibc.
 TOOLS := cat clear cp date df du echo env find free grep head kill ls mkdir more mv ps reboot rename rm rmdir \
 	shutdown sleep sort stat tail text top touch tz wc counter hello host nc ping mount umount dmesg uname \
-	hostname ln chmod chown id whoami sync lsmod insmod rmmod modprobe ttylogin sudo passwd useradd disk efiboot install swapon suspend inputsim netd net axfetch checkpass session
+	hostname ln chmod chown id whoami sync lsmod insmod rmmod modprobe ttylogin sudo passwd useradd disk efiboot install swapon suspend inputsim netd net wifi axfetch checkpass session
 LIBS_disk := -lblkid
 LIBS_mount := -lblkid
 LIBS_install := -lblkid
@@ -83,9 +83,10 @@ $(STAMPS)/e2fsprogs $(STAMPS)/eudev: $(STAMPS)/util-linux
 $(STAMPS)/seatd: $(STAMPS)/glibc
 $(STAMPS)/openssl $(STAMPS)/libnl: $(STAMPS)/glibc
 $(STAMPS)/wpa_supplicant: $(STAMPS)/openssl $(STAMPS)/libnl ports/wpa_supplicant.config
+$(STAMPS)/hostapd: $(STAMPS)/openssl $(STAMPS)/libnl ports/hostapd.config
 $(STAMPS)/dejavu: $(STAMPS)/skeleton
 $(STAMPS)/firmware: $(STAMPS)/skeleton kernel/firmware.list
-PORTS := dash libxcrypt util-linux e2fsprogs eudev seatd dejavu firmware openssl libnl wpa_supplicant
+PORTS := dash libxcrypt util-linux e2fsprogs eudev seatd dejavu firmware openssl libnl wpa_supplicant hostapd
 
 $(ROOT)/system/bin/init: user/init/init.c $(STAMPS)/glibc
 	$(TARGET_CC) $(TARGET_CFLAGS) $< -o $@

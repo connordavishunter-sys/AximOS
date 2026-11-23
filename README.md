@@ -37,7 +37,9 @@ Player and NetSurf, below, are still to come back, as are some of the tests.
   before it's made writable
 - netd, AximOS's own network service: it brings up each card as it appears, gets addresses
   by DHCP and DHCPv6, or uses those set by hand, takes IPv6 from the router, and sets DNS,
-  preferring wired cards to Wi-Fi
+  preferring wired cards to Wi-Fi. It joins open, WPA2 and WPA3 Wi-Fi networks through
+  wpa_supplicant, saving them, root-only, to rejoin the strongest by itself, and keeps
+  airplane mode, which turns every radio off, across restarts
 - AximOS's own init, which mounts what Linux shares, starts the services in
   `/system/etc/services`, one file each, restarting those that ask, and keeps a text login
   on the screen's consoles from the second, Ctrl+Alt+F2, and on the serial port
@@ -64,7 +66,8 @@ with `id whoami passwd useradd sudo`, `disk` (lists drives and their free space,
 them with GPT, adds partitions in free space beside what's there, and formats them as ext4 or
 FAT32), `efiboot` (the firmware's boot entries and their order), `install` (installs AximOS from the
 live system), `swapon`, `suspend`, `inputsim` (pretend laptop input, for the tests), `net`
-(the network, as netd has it, and addresses set by hand), and `host nc ping`. Run any of them with `--help`. ext4 is
+(the network, as netd has it, and addresses set by hand), `wifi` (the networks nearby, and
+joining, forgetting and airplane mode), and `host nc ping`. Run any of them with `--help`. ext4 is
 made and checked by [e2fsprogs](https://e2fsprogs.sourceforge.net)' `mkfs.ext4` and `e2fsck`.
 
 ### Desktop
@@ -295,7 +298,7 @@ AximOS uses [Linux](https://kernel.org), [glibc](https://www.gnu.org/software/li
 [libxcrypt](https://github.com/besser82/libxcrypt), [seatd](https://git.sr.ht/~kennylevinsen/seatd), [util-linux](https://github.com/util-linux/util-linux)'s
 libblkid and libuuid, [e2fsprogs](https://e2fsprogs.sourceforge.net), [eudev](https://github.com/eudev-project/eudev),
 [OpenSSL](https://openssl-library.org), [libnl](https://github.com/thom311/libnl),
-[wpa_supplicant](https://w1.fi/wpa_supplicant/), [stb_truetype](https://github.com/nothings/stb), the [DejaVu](https://dejavu-fonts.github.io) fonts,
+[wpa_supplicant and hostapd](https://w1.fi/), [stb_truetype](https://github.com/nothings/stb), the [DejaVu](https://dejavu-fonts.github.io) fonts,
 [linux-firmware](https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git),
 [Intel's microcode](https://github.com/intel/Intel-Linux-Processor-Microcode-Data-Files) and
 [Arch Linux](https://gitlab.archlinux.org/archlinux/packaging/packages/linux)'s kernel config.

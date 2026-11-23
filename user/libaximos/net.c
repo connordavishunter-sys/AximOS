@@ -53,7 +53,9 @@ int net_info(struct net_info *out) {
         char a[32], b[64], c[16], d[16], e[16];
         struct in_addr in;
 
-        if (sscanf(line, "card %31s %15s %15s %15s", a, c, d, e) == 4) {
+        if (!strcmp(line, "airplane on")) {
+            out->airplane = true;
+        } else if (sscanf(line, "card %31s %15s %15s %15s", a, c, d, e) == 4) {
             out->has_device = true;
             if (!card[0] && !strcmp(d, "up"))
                 snprintf(method, sizeof(method), "%s", e);
@@ -80,8 +82,8 @@ int net_info(struct net_info *out) {
     return 0;
 }
 
-// Until Wi-Fi's netd's, in phase 5, there's nothing to switch off.
 int net_airplane(bool on) {
-    (void)on;
-    return 0;
+    char reply[256];
+
+    return net_ask(on ? "airplane on" : "airplane off", reply, sizeof(reply));
 }

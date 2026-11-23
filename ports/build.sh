@@ -196,6 +196,14 @@ wpa_supplicant) # after openssl and libnl: joins Wi-Fi networks, for netd
 	make -j"$jobs" CC="$target_cc" PKG_CONFIG=pkg-config wpa_supplicant wpa_cli >/dev/null
 	install -m 755 wpa_supplicant wpa_cli "$target/system/bin/"
 	;;
+hostapd) # after openssl and libnl: an access point, which the Wi-Fi test joins, on a simulated radio
+	fetch https://w1.fi/releases hostapd-2.12.tar.gz f43502561c28ba47ab77e18e1a973d07361c68cc8b14178e619bd5796b70eabd
+	unpack hostapd-2.12.tar.gz hostapd-2.12
+	cd hostapd-2.12/hostapd
+	cp "$root/ports/hostapd.config" .config
+	make -j"$jobs" CC="$target_cc" PKG_CONFIG=pkg-config hostapd >/dev/null
+	install -m 755 hostapd "$target/system/bin/"
+	;;
 *)
 	echo "build.sh: no part called $1" >&2
 	exit 1
