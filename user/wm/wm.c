@@ -1480,15 +1480,39 @@ static void set_volume(int to, bool mute) {
     damage_tray();
 }
 
-// What audiod has, which it keeps across restarts.
+// What audiod has, which it keeps across restarts, and tells wm of each change to,
+// through audio_watch.
+static int audio_watch = -1;
+
+static void show_mixer(const struct audio_mixer *m) {
+    int had = mixer;
+
+    mixer = m->card ? 0 : -1;
+    if (had != mixer || m->volume != volume || m->muted != muted) {
+        volume = m->volume;
+        muted = m->muted;
+        printf("wm: the volume's %d%s\n", volume, muted ? ", muted" : "");
+        damage_tray();
+    }
+}
+
 static void load_volume(void) {
     struct audio_mixer m;
 
-    mixer = audio_mixer_get(&m) && m.card ? 0 : -1;
-    if (mixer >= 0) {
-        volume = m.volume;
-        muted = m.muted;
+    if (audio_watch < 0 && (audio_watch = audio_mixer_watch(&m)) >= 0)
+        show_mixer(&m);
+}
+
+static void mixer_changed(void) {
+    struct audio_mixer m;
+
+    if (audio_mixer_changed(audio_watch, &m)) {
+        show_mixer(&m);
+        return;
     }
+    close(audio_watch); // audiod's stopped, and is looked for again later
+    audio_watch = -1;
+    show_mixer(&(struct audio_mixer){0});
 }
 
 static void set_volume_at(int x) {
@@ -5644,13 +5668,6 @@ static void load_settings(void) {
     display->set_repeat(settings.repeat_delay, settings.repeat_rate);
 
     // The volume may have been set elsewhere, as Settings does.
-    struct audio_mixer m;
-
-    if (mixer >= 0 && audio_mixer_get(&m) && (m.volume != volume || m.muted != muted)) {
-        volume = m.volume;
-        muted = m.muted;
-        damage_tray();
-    }
     if (output.can_set_mode && settings.width && (settings.width != output.width || settings.height != output.height))
         change_resolution(settings.width, settings.height);
     fit_screen();
@@ -5732,8 +5749,9 @@ int main(int argc, char **argv) {
     find_backlight();
     check_battery();
     while (!quitting) {
-        struct pollfd fds[1 + DISPLAY_FDS + MAX_CLIENTS] = {{.fd = listener, .events = POLLIN}};
-        struct pollfd *input = fds + 1, *client_fds = input + display->poll_fds(input);
+        struct pollfd fds[2 + DISPLAY_FDS + MAX_CLIENTS] = {{.fd = listener, .events = POLLIN},
+                                                            {.fd = audio_watch, .events = POLLIN}};
+        struct pollfd *input = fds + 2, *client_fds = input + display->poll_fds(input);
 
         for (int i = 0; i < MAX_CLIENTS; i++) {
             client_fds[i].fd = clients[i] ? clients[i]->fd : -1;
@@ -5790,16 +5808,14 @@ int main(int argc, char **argv) {
             check_network();
             check_battery();
             load_desktop(false);
-            if (mixer < 0) { // as audiod may have found its card since
-                load_volume();
-                if (mixer >= 0)
-                    damage_tray();
-            }
+            load_volume(); // unless it's watched already
             net_checked = now_ms();
         }
 
         if (fds[0].revents & POLLIN)
             accept_client(listener);
+        if (fds[1].revents)
+            mixer_changed();
 
         if (display->read(input, &output, &(struct input){handle_mouse, handle_key, quit}))
             fit_screen();

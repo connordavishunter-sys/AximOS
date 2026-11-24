@@ -20,6 +20,7 @@ enum audiod_type {
     AUDIOD_VOLUME,    // a is 0 to 100
     AUDIOD_MUTE,      // a is 1 to mute
     AUDIOD_LATENCY,   // a is 1 for low latency
+    AUDIOD_WATCH,     // answered, then sent again with each change, as for AUDIOD_MIXER
 };
 
 #define AUDIOD_MUTED 1

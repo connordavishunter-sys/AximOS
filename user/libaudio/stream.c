@@ -110,12 +110,38 @@ static bool mixer_ask(uint32_t type, int32_t a, int32_t *answer, int32_t *flags)
     return false;
 }
 
+static struct audio_mixer mixer_of(int32_t volume, int32_t flags) {
+    return (struct audio_mixer){volume, flags & AUDIOD_MUTED, flags & AUDIOD_LOW_LATENCY, flags & AUDIOD_CARD};
+}
+
 bool audio_mixer_get(struct audio_mixer *mixer) {
     int32_t volume, flags;
 
     if (!mixer_ask(AUDIOD_MIXER, 0, &volume, &flags))
         return false;
-    *mixer = (struct audio_mixer){volume, flags & AUDIOD_MUTED, flags & AUDIOD_LOW_LATENCY, flags & AUDIOD_CARD};
+    *mixer = mixer_of(volume, flags);
+    return true;
+}
+
+int audio_mixer_watch(struct audio_mixer *mixer) {
+    int fd = connect_audiod();
+    int32_t volume, flags;
+
+    if (fd >= 0 && !ask(fd, AUDIOD_WATCH, 0, 0, &volume, &flags)) {
+        close(fd);
+        return -1;
+    }
+    if (fd >= 0)
+        *mixer = mixer_of(volume, flags);
+    return fd;
+}
+
+bool audio_mixer_changed(int fd, struct audio_mixer *mixer) {
+    struct audiod_message m;
+
+    if (recv(fd, &m, sizeof(m), MSG_DONTWAIT) != sizeof(m) || m.type != AUDIOD_WATCH)
+        return false;
+    *mixer = mixer_of(m.a, m.b);
     return true;
 }
 

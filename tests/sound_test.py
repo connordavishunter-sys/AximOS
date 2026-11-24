@@ -93,11 +93,19 @@ try:
     check('two programs play at once, mixed', all(f and abs(f[0] - a) < 10 and abs(f[1] - b) < 10
           for f, (a, b) in zip(found, ((1000, 700), (500, 300)))), found)
 
+    check("the card's own control sets the volume", "audiod: the volume's" in v.raw(),
+          [l for l in v.raw().split('\n') if 'audiod' in l])
+    # Its square, in loudness: 50 is -12 dB, on the card, and 1 is -80, which is past the
+    # -74 of QEMU's card, so audiod takes the rest away. QEMU's card plays its steps evenly,
+    # rather than in the decibels it gives them, so what's heard isn't what they'd be.
+    at = v.mark()
     out = v.run('volume 50')
     check('volume sets it', 'volume 50' in out, out)
-    out, sound = recorded('half', 'play /mnt/a48.wav')
-    loudest = np.abs(sound).max(initial=0)
-    check('which plays a quarter as loud', 2700 < loudest < 3300, loudest)
+    check('on the card, at -12 dB', v.wait('volume 50, the card at -12.00 dB and -0.04 dB more here', 2, at), v.text(at))
+    at = v.mark()
+    v.run('volume 1')
+    check("and past what the card goes down to, here", v.wait('volume 1, the card at -74.00 dB and -6.00 dB more here', 2, at),
+          v.text(at))
     v.run('volume mute')
     out, sound = recorded('muted', 'play /mnt/a48.wav')
     check('and muting it silences it', len(sound) == 0, np.abs(sound).max(initial=0))
@@ -111,6 +119,15 @@ try:
     gap = longest_gap(sound)
     check('and plays all of it, without gaps', 0.95 < len(sound) / 48000 < 1.05 and gap[0] < 8, (len(sound), gap))
     v.run('volume low-latency off')
+
+    # What's set is kept when audiod's started again.
+    v.run('volume 30')
+    at = v.mark()
+    v.run('for p in /proc/[0-9]*; do [ "$(cat $p/comm 2>/dev/null)" = audiod ] && kill ${p#/proc/}; done')
+    v.wait("audiod: the volume's", 10, at)
+    out = v.run('volume')
+    check("it's kept when audiod's started again", 'volume 30\n' in out, out)
+    v.run('volume 100')
 
     # The serial console's login isn't the one at the screen, which is the desktop's.
     v.run('exit')
@@ -133,6 +150,10 @@ try:
     sound = heard(path)
     check("wm's chime is heard on logging in", len(sound) > 4800 and abs(pitches(sound[:2400, 0])[0] - 523) < 15,
           (len(sound), pitches(sound[:2400, 0]) if len(sound) > 2400 else None))
+    at = v.mark()
+    out = v.run('volume 40')
+    check("the tray follows the volume set elsewhere", v.wait("wm: the volume's 40", 3, at), v.text(at))
+    v.run('volume 100')
     v.sudo('mount -o uid=1000,gid=100 /dev/sda /mnt')
     path = f'{v.dir}/player.wav'
     v.record(path)

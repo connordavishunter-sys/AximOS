@@ -87,3 +87,9 @@ bool audio_mixer_get(struct audio_mixer *mixer);
 bool audio_set_volume(int volume);
 bool audio_set_muted(bool muted);
 bool audio_set_low_latency(bool low);
+
+// A connection audiod tells of each change to the mixer, filling in mixer as it is
+// now, or -1 without audiod. It's readable, for poll, when there's been a change,
+// which audio_mixer_changed reads, returning false once audiod's gone.
+int audio_mixer_watch(struct audio_mixer *mixer);
+bool audio_mixer_changed(int fd, struct audio_mixer *mixer);

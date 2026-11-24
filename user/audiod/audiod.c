@@ -4,9 +4,11 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <math.h>
 #include <poll.h>
 #include <signal.h>
 #include <sound/asound.h>
+#include <sound/tlv.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -36,6 +38,7 @@ struct client {
     int fd;
     uid_t uid;
     bool stream, closed;         // whether it's a stream, and whether it's gone, with sound still to play
+    bool watching;               // whether it's told of each change to the mixer
     int rate, channels;
     struct audio_resampler *resampler;
     float ring[RING_FRAMES][2];
@@ -185,40 +188,122 @@ static bool configure(void) {
     return false;
 }
 
-// Turns the card's own playback controls on, and up to their highest, which for HDA
-// is no gain, as Linux starts them muted. The volume's audiod's.
+// The card's own volume, where it has one: its main playback control, which the
+// volume's set on in decibels, as far down as it goes, with its switch for muting.
+// What's quieter than that is audiod's, as is all of it on a card without one.
+struct control {
+    struct snd_ctl_elem_id id;
+    unsigned count;
+    long min, max;
+    bool scaled;          // whether its steps are in decibels, from db_min, db_step apart
+    int db_min, db_step;  // in hundredths of a decibel
+};
+
+static int ctl = -1;
+static struct control card_volume, card_switch;
+static bool has_volume, has_switch;
+static float soft_gain = 1; // what audiod scales by, besides the card
+
+static bool find(const char *name, struct control *c) {
+    struct snd_ctl_elem_info info = {.id = {.iface = SNDRV_CTL_ELEM_IFACE_MIXER}};
+    unsigned tlv[16] = {0};
+    struct snd_ctl_tlv *t = (struct snd_ctl_tlv *)tlv;
+
+    snprintf((char *)info.id.name, sizeof(info.id.name), "%s", name);
+    if (ioctl(ctl, SNDRV_CTL_IOCTL_ELEM_INFO, &info) < 0 || !(info.access & SNDRV_CTL_ELEM_ACCESS_WRITE))
+        return false;
+    *c = (struct control){.id = info.id, .count = info.count < 128 ? info.count : 128, .min = info.value.integer.min,
+                          .max = info.type == SNDRV_CTL_ELEM_TYPE_BOOLEAN ? 1 : info.value.integer.max};
+    t->numid = info.id.numid;
+    t->length = sizeof(tlv) - sizeof(*t);
+    if ((info.access & SNDRV_CTL_ELEM_ACCESS_TLV_READ) && ioctl(ctl, SNDRV_CTL_IOCTL_TLV_READ, t) == 0) {
+        unsigned *v = t->tlv;
+
+        if (v[0] == SNDRV_CTL_TLVT_DB_SCALE) {
+            c->scaled = true;
+            c->db_min = (int)v[2];
+            c->db_step = v[3] & 0xffff;
+        } else if ((v[0] == SNDRV_CTL_TLVT_DB_MINMAX || v[0] == SNDRV_CTL_TLVT_DB_MINMAX_MUTE) && c->max > c->min) {
+            c->scaled = true;
+            c->db_min = (int)v[2];
+            c->db_step = ((int)v[3] - (int)v[2]) / (c->max - c->min);
+        }
+    }
+    return true;
+}
+
+static void write_control(const struct control *c, long value) {
+    struct snd_ctl_elem_value v = {.id = c->id};
+
+    for (unsigned i = 0; i < c->count; i++)
+        v.value.integer.value[i] = value;
+    ioctl(ctl, SNDRV_CTL_IOCTL_ELEM_WRITE, &v);
+}
+
+// The step for a level in hundredths of a decibel, at or above it, so audiod only ever
+// takes away the rest.
+static long step_for(const struct control *c, int db) {
+    long step = db <= c->db_min ? 0 : (db - c->db_min + c->db_step - 1) / (c->db_step ? c->db_step : 1);
+
+    return c->min + step > c->max ? c->max : c->min + step;
+}
+
+// Sets the volume on the card and in audiod: its square, in loudness, which sounds even.
+static void apply_volume(void) {
+    float wanted = volume ? 40 * log10f(volume / 100.0f) : -1000; // in decibels
+
+    if (has_switch)
+        write_control(&card_switch, !muted);
+    if (!has_volume)
+        soft_gain = muted ? 0 : (float)(volume * volume) / 10000;
+    else if (card_volume.scaled) {
+        long step = step_for(&card_volume, (int)lroundf(wanted * 100));
+        float got = (card_volume.db_min + (step - card_volume.min) * card_volume.db_step) / 100.0f;
+
+        write_control(&card_volume, step);
+        soft_gain = muted || !volume ? 0 : powf(10, (wanted - got) / 20);
+        printf("audiod: volume %d, the card at %.2f dB and %.2f dB more here\n", volume, got, wanted > got ? 0 : wanted - got);
+        fflush(stdout);
+    } else { // steps of unknown size, taken as even in loudness
+        write_control(&card_volume, card_volume.min + lroundf((card_volume.max - card_volume.min) * volume * volume / 10000.0f));
+        soft_gain = muted || !volume ? 0 : 1;
+    }
+    if (muted && !has_switch)
+        soft_gain = 0;
+}
+
+// Opens the card's controls: its main volume, and the others it plays through at no
+// gain, switched on, as Linux starts them muted.
 static void open_controls(int card) {
-    char path[64];
-    struct snd_ctl_elem_list list = {0};
-    int fd;
+    static const char *const mains[] = {"Master", "PCM", "Speaker", "Headphone", "Line Out"};
+    static const char *const others[] = {"PCM", "Speaker", "Headphone", "Line Out", "Front", "Bass Speaker"};
+    char path[64], name[64];
+    struct control c;
 
     snprintf(path, sizeof(path), "/dev/snd/controlC%d", card);
-    if ((fd = open(path, O_RDWR | O_CLOEXEC)) < 0)
+    if (ctl >= 0)
+        close(ctl);
+    has_volume = has_switch = false;
+    if ((ctl = open(path, O_RDWR | O_CLOEXEC)) < 0)
         return;
-    if (ioctl(fd, SNDRV_CTL_IOCTL_ELEM_LIST, &list) == 0 && list.count
-        && (list.pids = calloc(list.count, sizeof(*list.pids)))) {
-        list.space = list.count;
-        if (ioctl(fd, SNDRV_CTL_IOCTL_ELEM_LIST, &list) == 0) {
-            for (unsigned i = 0; i < list.used; i++) {
-                struct snd_ctl_elem_info info = {.id = list.pids[i]};
-                struct snd_ctl_elem_value value = {.id = list.pids[i]};
-                const char *name = (const char *)info.id.name;
-
-                if (ioctl(fd, SNDRV_CTL_IOCTL_ELEM_INFO, &info) < 0 || strstr(name, "Beep")
-                    || !(info.access & SNDRV_CTL_ELEM_ACCESS_WRITE))
-                    continue;
-                bool on = info.type == SNDRV_CTL_ELEM_TYPE_BOOLEAN && strstr(name, "Playback Switch");
-                bool up = info.type == SNDRV_CTL_ELEM_TYPE_INTEGER && strstr(name, "Playback Volume");
-
-                for (unsigned v = 0; (on || up) && v < info.count && v < 128; v++)
-                    value.value.integer.value[v] = on ? 1 : info.value.integer.max;
-                if (on || up)
-                    ioctl(fd, SNDRV_CTL_IOCTL_ELEM_WRITE, &value);
-            }
+    for (size_t i = 0; !has_volume && i < sizeof(mains) / sizeof(*mains); i++) {
+        snprintf(name, sizeof(name), "%s Playback Volume", mains[i]);
+        if ((has_volume = find(name, &card_volume))) {
+            snprintf(name, sizeof(name), "%s Playback Switch", mains[i]);
+            has_switch = find(name, &card_switch);
+            printf("audiod: the volume's %s, %s\n", mains[i], card_volume.scaled ? "in decibels" : "in steps");
+            fflush(stdout);
         }
-        free(list.pids);
     }
-    close(fd);
+    for (size_t i = 0; i < sizeof(others) / sizeof(*others); i++) {
+        snprintf(name, sizeof(name), "%s Playback Volume", others[i]);
+        if (find(name, &c) && (!has_volume || c.id.numid != card_volume.id.numid))
+            write_control(&c, c.scaled ? step_for(&c, 0) : c.max);
+        snprintf(name, sizeof(name), "%s Playback Switch", others[i]);
+        if (find(name, &c) && (!has_switch || c.id.numid != card_switch.id.numid))
+            write_control(&c, 1);
+    }
+    apply_volume();
 }
 
 // The first card that plays anything but HDMI, which is the computer's own speakers
@@ -291,7 +376,7 @@ static bool mix(void) {
     static float out[4096][2];
     static int32_t wide[4096 * 2];
     static int16_t narrow[4096 * 2];
-    float scale = muted ? 0 : (float)(volume * volume) / 10000; // its square sounds more even
+    float scale = soft_gain;
     struct snd_pcm_status status = {0};
     bool any = false;
 
@@ -362,6 +447,17 @@ static int32_t mixer_flags(void) {
     return (muted ? AUDIOD_MUTED : 0) | (low_latency ? AUDIOD_LOW_LATENCY : 0) | (pcm >= 0 ? AUDIOD_CARD : 0);
 }
 
+// Tells those watching the mixer how it is now.
+static void tell_watchers(void) {
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        if (clients[i] && clients[i]->watching && !clients[i]->closed) {
+            struct audiod_message m = {AUDIOD_WATCH, volume, mixer_flags()};
+
+            send(clients[i]->fd, &m, sizeof(m), MSG_NOSIGNAL | MSG_DONTWAIT);
+        }
+    }
+}
+
 // Takes samples into a stream's ring, changed to 48 kHz stereo.
 static void take(struct client *c, const int16_t *samples, long frames) {
     static int16_t stereo[AUDIOD_PLAY_FRAMES * 2], changed[(AUDIOD_PLAY_FRAMES * AUDIOD_RATE / 8000 + 2) * 2];
@@ -424,6 +520,9 @@ static bool serve(struct client *c) {
         return true;
     case AUDIOD_MIXER:
         return reply(c, AUDIOD_MIXER, volume, mixer_flags());
+    case AUDIOD_WATCH:
+        c->watching = true;
+        return reply(c, AUDIOD_WATCH, volume, mixer_flags());
     case AUDIOD_VOLUME:
     case AUDIOD_MUTE:
     case AUDIOD_LATENCY:
@@ -438,7 +537,9 @@ static bool serve(struct client *c) {
                 ioctl(pcm, SNDRV_PCM_IOCTL_HW_FREE);
                 configure();
             }
+            apply_volume();
             save_conf();
+            tell_watchers();
         }
         return reply(c, m.type, allowed ? 0 : -1, 0);
     }
@@ -493,7 +594,8 @@ int main(int argc, char **argv) {
             seat_read = now_ms();
         }
         if (pcm < 0 && now_ms() - card_tried >= 2000) { // as its driver may still be starting
-            open_card();
+            if (open_card())
+                tell_watchers();
             card_tried = now_ms();
         }
         fds[n] = (struct pollfd){listener, POLLIN, 0};
