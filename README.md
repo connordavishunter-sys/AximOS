@@ -59,7 +59,7 @@ Player and NetSurf, below, are still to come back, as are some of the tests.
 Accounts log in with `bash`, while `dash` is `/bin/sh` for scripts. The usual tools are
 GNU's: coreutils (`ls cp mv rm sort sha256sum` and the rest), `sed`, `grep`, `gawk`,
 `find` and `xargs`, `diff`, and `bash`, `curl`, `git` (with AximOS's `more` and `text` as its
-pager and editor) and OpenSSL's `openssl`, so scripts and programs behave as on any Linux.
+pager and editor), OpenSSH's `ssh`, `ssh-keygen` and `scp`, and OpenSSL's `openssl`, so scripts and programs behave as on any Linux.
 Programs installed for one account go in `~/.local/bin`, as Claude Code's installer puts it,
 which runs as is: `curl -fsSL https://claude.ai/install.sh | bash`.
 
@@ -180,6 +180,36 @@ sudo btrfs filesystem resize max /
 
 The last grows btrfs back to fill what's left of the partition. `lsblk` then shows
 `nvme0n1p2` 128 GiB smaller, and AximOS's `disk` shows the space after it as free.
+
+## Pushing to GitHub from AximOS
+
+git, OpenSSH and curl are on the system, so either of GitHub's ways works.
+
+With an SSH key, which is what most people use. Make a key, then add the public half,
+`~/.ssh/id_ed25519.pub`, to your GitHub account under Settings, SSH and GPG keys:
+
+```bash
+ssh-keygen -t ed25519
+```
+
+```bash
+git clone git@github.com:you/project.git
+```
+
+Or over HTTPS, with a personal access token from Settings, Developer settings, in place of
+a password. git's credential store keeps it, once you've given it, in `~/.git-credentials`,
+in plain text, readable only by you:
+
+```bash
+git config --global credential.helper store
+```
+
+`sshd` comes too, for logging in to AximOS from other computers. It's off until
+`/system/etc/ssh/sshd_enabled` is there, from the next boot:
+
+```bash
+sudo touch /system/etc/ssh/sshd_enabled
+```
 
 ## Building
 
@@ -302,7 +332,7 @@ AximOS uses [Linux](https://kernel.org), [glibc](https://www.gnu.org/software/li
 libblkid and libuuid, [e2fsprogs](https://e2fsprogs.sourceforge.net), [eudev](https://github.com/eudev-project/eudev),
 [ncurses](https://invisible-island.net/ncurses/)'s terminfo, [OpenSSL](https://openssl-library.org), [libnl](https://github.com/thom311/libnl),
 [wpa_supplicant and hostapd](https://w1.fi/), [bash](https://www.gnu.org/software/bash/),
-[curl](https://curl.se), [git](https://git-scm.com), [zlib-ng](https://github.com/zlib-ng/zlib-ng), GNU
+[curl](https://curl.se), [git](https://git-scm.com), [OpenSSH](https://www.openssh.com), [zlib-ng](https://github.com/zlib-ng/zlib-ng), GNU
 [coreutils, sed, grep, gawk, findutils and diffutils](https://www.gnu.org/software/), [stb_truetype](https://github.com/nothings/stb), the [DejaVu](https://dejavu-fonts.github.io) fonts,
 [linux-firmware](https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git),
 [Intel's microcode](https://github.com/intel/Intel-Linux-Processor-Microcode-Data-Files) and

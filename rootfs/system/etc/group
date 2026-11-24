@@ -15,4 +15,5 @@ kvm:x:61:
 render:x:62:
 input:x:63:
 users:x:100:
+sshd:x:74:
 nogroup:x:65534:

@@ -22,7 +22,8 @@
 //
 // Each service is a file of lines: "command" and what to run, "after" and services
 // that start first, and "once" for one that runs to the end before those after it
-// start, or "restart" for one that's started again if it stops.
+// start, or "restart" for one that's started again if it stops. "if" and a file
+// starts it only when that file's there, as for a service that's off until turned on.
 
 #define SERVICES "/system/etc/services"
 #define LOGIN_PATH "/system/bin/ttylogin"
@@ -151,10 +152,14 @@ static void add_service(const char *name, const char *path) {
             snprintf(s->command, sizeof(s->command), "%s", value);
         else if (!strncmp(line, "after", 5))
             snprintf(s->after, sizeof(s->after), "%s", value);
+        else if (!strncmp(line, "if", 2) && access(value, F_OK))
+            s->started = true; // off: as if started and stopped, for those after it
         s->once |= !strncmp(line, "once", 4);
         s->restart |= !strncmp(line, "restart", 7);
     }
     fclose(f);
+    if (s->started)
+        s->restart = s->once = false;
     count += s->command[0] != '\0';
 }
 

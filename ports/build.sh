@@ -314,6 +314,20 @@ diffutils) # after glibc: diff and cmp
 	cd diffutils-3.12
 	autotools
 	;;
+openssh) # after openssl and zlib-ng: ssh, ssh-keygen and ssh-agent, for git and logging in, and sshd, off unless turned on
+	fetch https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable openssh-10.6p2.tar.gz \
+		9ae44872090cf2f06b3cf9ff147e7f16f309671340763ed2f99248398ae29d5b
+	unpack openssh-10.6p2.tar.gz openssh-10.6p2
+	cd openssh-10.6p2
+	# Its own SHA-2, not the host's libmd, which configure would otherwise find
+	[ -e Makefile ] || ac_cv_search_SHA256Update=no CC=$target_cc CFLAGS="-O2 -w" LDFLAGS="-L$target/system/lib" ./configure --host=x86_64-linux-gnu \
+		--prefix=/usr --sbindir=/usr/bin --libexecdir=/usr/lib/ssh --sysconfdir=/etc/ssh --with-privsep-path=/var/empty \
+		--with-privsep-user=sshd --with-default-path=/system/bin --with-superuser-path=/system/bin --without-pam \
+		--without-selinux --disable-strip >/dev/null
+	make -j"$jobs" >/dev/null
+	make install-nokeys DESTDIR="$target" >/dev/null # its host keys are made where it runs, the first time
+	install -d -m 755 "$target/var/empty"
+	;;
 *)
 	echo "build.sh: no part called $1" >&2
 	exit 1

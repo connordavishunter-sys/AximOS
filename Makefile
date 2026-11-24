@@ -89,10 +89,11 @@ $(STAMPS)/bash: ports/bash.sums $(STAMPS)/ncurses
 $(STAMPS)/ncurses: $(STAMPS)/glibc
 $(STAMPS)/curl: $(STAMPS)/openssl $(STAMPS)/zlib-ng
 $(STAMPS)/git: $(STAMPS)/curl
+$(STAMPS)/openssh: $(STAMPS)/openssl $(STAMPS)/zlib-ng
 $(STAMPS)/coreutils $(STAMPS)/sed $(STAMPS)/grep $(STAMPS)/gawk $(STAMPS)/findutils $(STAMPS)/diffutils: $(STAMPS)/glibc
 $(STAMPS)/dejavu: $(STAMPS)/skeleton
 $(STAMPS)/firmware: $(STAMPS)/skeleton kernel/firmware.list kernel/regdb.sums
-PORTS := dash libxcrypt util-linux e2fsprogs eudev seatd dejavu firmware openssl libnl wpa_supplicant hostapd ncurses zlib-ng curl bash git coreutils sed grep gawk findutils diffutils
+PORTS := dash libxcrypt util-linux e2fsprogs eudev seatd dejavu firmware openssl libnl wpa_supplicant hostapd ncurses zlib-ng curl bash git coreutils sed grep gawk findutils diffutils openssh
 
 $(ROOT)/system/bin/init: user/init/init.c $(STAMPS)/glibc
 	$(TARGET_CC) $(TARGET_CFLAGS) $< -o $@

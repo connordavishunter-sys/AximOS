@@ -70,6 +70,10 @@ try:
     at = v.mark()
     v.type('owner\nnewpass\n')
     check('with the account install made', v.wait('$ ', 10, at), v.text(at))
+    # As if installed before sshd had an account, which installing again should add
+    v.sudo("sed -i '/^sshd:/d' /etc/passwd /etc/group /etc/shadow", password='newpass')
+    out = v.run('grep -c ^sshd: /etc/passwd')
+    check("(its account taken away, as before there was one)", '\n0\n' in out, out)
     out = v.run('cat /proc/swaps; mount; echo mine > note; sync')
     check('its swap file in use, and its root on ext4', '/swapfile' in out and '/dev/root / ext4 rw' in out, out)
 finally:
@@ -93,6 +97,8 @@ try:
     check('keeping the account', v.wait('$ ', 10, at), v.text(at))
     out = v.run('cat note')
     check('and what was in /home', 'mine' in out, out)
+    out = v.run('grep -c ^sshd: /etc/passwd /etc/group')
+    check("with the system's accounts that came since added", out.count(':1') == 2, out)
 finally:
     v.close()
 finish()

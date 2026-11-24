@@ -32,6 +32,9 @@ try:
     check('IPv6 from the router, and resolv.conf', 'fec0' in out and 'nameserver 10.0.2.3' in out, out)
     out = v.run(f'nc 10.0.2.2 {port}', 2)
     check('so it reaches the host', 'hello from the host' in out, out)
+    out = v.run('ping -c 1 127.0.0.1; ping -c 1 localhost', 4)
+    check('and loopback is up, for programs reaching each other', out.count('1 received') + out.count('1 packets received') >= 2
+          or out.count(' 0% packet loss') >= 2, out)
 
     out = v.run('net set enp0s2 10.0.2.20/24 10.0.2.2 10.0.2.3; net', 2)
     check('an address can be set by hand', 'set by hand' in out and 'address  10.0.2.20/24' in out, out)

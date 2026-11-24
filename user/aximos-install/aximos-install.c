@@ -395,6 +395,25 @@ static void keep_accounts(void) {
     }
 }
 
+// Those of the system's own accounts and groups that came since the kept files were
+// written, as sshd's, without touching the rest.
+static void add_new_accounts(FILE *out, const char *built, const char *kept) {
+    FILE *in = fopen(built, "r");
+    char line[512];
+
+    while (in && fgets(line, sizeof(line), in)) {
+        size_t name = strcspn(line, ":");
+        bool found = false;
+
+        for (const char *at = kept; !found && at && *at; at = strchr(at, '\n') ? strchr(at, '\n') + 1 : NULL)
+            found = !strncmp(at, line, name + 1);
+        if (!found && line[name] == ':')
+            fputs(line, out);
+    }
+    if (in)
+        fclose(in);
+}
+
 // The accounts: those kept, or those the system was built with, not the live ones.
 static bool put_accounts(void) {
     for (int i = 0; i < 3; i++) {
@@ -423,8 +442,10 @@ static bool put_accounts(void) {
         }
         if (kept[i] && (!f || (i != 0 && fputs(kept[i], f) < 0)))
             return failed(to);
-        if (f)
+        if (f) {
+            add_new_accounts(f, from, kept[i]);
             fclose(f);
+        }
     }
     return true;
 }

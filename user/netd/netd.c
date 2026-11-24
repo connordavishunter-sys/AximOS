@@ -773,6 +773,20 @@ static void answer(int listener) {
     fclose(f);
 }
 
+// The loopback card, which programs on this computer reach each other through, as
+// at localhost: 127.0.0.1, and ::1, which Linux gives it once it's up.
+static void loopback(void) {
+    struct card lo = {.name = "lo"};
+    struct ifreq r = request_for(&lo);
+
+    set_ipv4(SIOCSIFADDR, &lo, 0x7F000001);
+    set_ipv4(SIOCSIFNETMASK, &lo, 0xFF000000);
+    if (ioctl(inet, SIOCGIFFLAGS, &r) == 0) {
+        r.ifr_flags |= IFF_UP;
+        ioctl(inet, SIOCSIFFLAGS, &r);
+    }
+}
+
 // Its wpa_supplicants go with it, so a netd started again starts its own.
 static void stopped(int signal) {
     for (int i = 0; i < card_count; i++) {
@@ -806,6 +820,7 @@ int main(int argc, char **argv) {
     }
     chmod(SOCKET, 0666); // anyone may ask, and it checks who changes things
     write_resolv();
+    loopback();
     airplane_load();
     scan();
 

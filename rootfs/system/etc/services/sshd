@@ -1,0 +1,7 @@
+# The SSH server, for logging in from other computers: off until
+# /system/etc/ssh/sshd_enabled is there, as sudo touch makes it, from the next boot.
+# Its host keys are made the first time.
+command ssh-keygen -A && exec sshd -D -e
+if /system/etc/ssh/sshd_enabled
+after netd
+restart
