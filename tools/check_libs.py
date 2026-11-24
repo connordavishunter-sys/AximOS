@@ -25,21 +25,33 @@ def is_elf(path):
 defined = {}  # a library's file name, to the versions it defines
 
 
-def versions_defined(name):
-    if name not in defined:
-        path = next((os.path.join(d, name) for d in LIB_DIRS if os.path.exists(os.path.join(d, name))), None)
-        defined[name] = set(re.findall(r'Name: (\S+)', readelf('-V', '--wide', path).split('Version needs')[0])) \
+def versions_defined(name, extra):
+    """Looking in the system's lib folders, and the program's others: its RUNPATH's, as Perl's
+    libperl is in its own, and the one it's in, as glibc's gconv modules find the libraries they
+    share."""
+    if (name, extra) not in defined:
+        path = next((os.path.join(d, name) for d in LIB_DIRS + list(extra) if os.path.exists(os.path.join(d, name))), None)
+        defined[name, extra] = set(re.findall(r'Name: (\S+)', readelf('-V', '--wide', path).split('Version needs')[0])) \
             if path else None
-    return defined[name]
+    return defined[name, extra]
+
+
+def programs(tree):
+    """Each program and library in the tree's bin and lib, and lib's folders, such as Perl's and
+    Python's modules and GCC's own programs, but not the kernel's modules or firmware."""
+    for folder in ('bin', 'lib'):
+        for base, dirs, files in os.walk(os.path.join(tree, folder)):
+            if base == os.path.join(tree, 'lib'):
+                dirs[:] = [d for d in dirs if d not in ('modules', 'firmware')]
+            for name in sorted(files):
+                path = os.path.join(base, name)
+                if not name.endswith(('.o', '.a')) and not os.path.islink(path) and is_elf(path):
+                    yield os.path.relpath(path, tree), path
 
 
 problems = []
-for tree, folder in [(t, f) for t in TREES for f in ('bin', 'lib', 'lib/git-core')]:
-    base = os.path.join(tree, folder)
-    for name in sorted(os.listdir(base)) if os.path.isdir(base) else []:
-        path = os.path.join(base, name)
-        if os.path.islink(path) or not os.path.isfile(path) or not is_elf(path):
-            continue
+for tree in TREES:
+    for where, path in programs(tree):
         needs = readelf('-V', '--wide', path)
         if 'Version needs' not in needs:
             versions = {}
@@ -52,12 +64,15 @@ for tree, folder in [(t, f) for t in TREES for f in ('bin', 'lib', 'lib/git-core
                 m = re.search(r'Name: (\S+)', line)
                 if m and library:
                     versions.setdefault(library, set()).add(m.group(1))
-        for lib in re.findall(r'\(NEEDED\).*\[(.+)\]', readelf('-d', path)):
-            have = versions_defined(lib)
+        dynamic = readelf('-d', path)
+        runpath = [os.path.join(t, os.path.relpath(d, '/usr')) for d in ':'.join(re.findall(r'R(?:UN)?PATH\).*\[(.+)\]', dynamic)).split(':')
+                   if d.startswith('/usr/') for t in TREES]
+        for lib in re.findall(r'\(NEEDED\).*\[(.+)\]', dynamic):
+            have = versions_defined(lib, (os.path.dirname(path), *runpath))
             if have is None:
-                problems.append(f'{os.path.basename(os.path.dirname(tree))}/{folder}/{name} needs {lib}, which the system hasn\'t')
+                problems.append(f'{os.path.basename(os.path.dirname(tree))}/{where} needs {lib}, which the system hasn\'t')
             elif versions.get(lib, set()) - have:
-                problems.append(f'{os.path.basename(os.path.dirname(tree))}/{folder}/{name} needs {", ".join(sorted(versions[lib] - have))} from {lib}, '
+                problems.append(f'{os.path.basename(os.path.dirname(tree))}/{where} needs {", ".join(sorted(versions[lib] - have))} from {lib}, '
                                 'which its copy hasn\'t: it was linked against the host\'s')
 
 for p in problems:

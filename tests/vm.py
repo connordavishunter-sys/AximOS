@@ -26,11 +26,11 @@ def key_for(c):
 
 
 class VM:
-    def __init__(self, timeout=300, extra=(), net='', smp=4, memory='2G', nvme=None, efivars=None):
+    def __init__(self, timeout=300, extra=(), net='', smp=4, memory='2G', nvme=None, efivars=None, iso=BUILD + '/aximos.iso'):
         """Boots the ISO, or with nvme, the disk image there as an NVMe drive. With efivars,
         the firmware keeps its variables in that file, a copy of OVMF_VARS."""
         boot = ['-drive', f'file={nvme},format=raw,if=none,id=boot', '-device', 'nvme,serial=aximos,drive=boot'] \
-            if nvme else ['-cdrom', BUILD + '/aximos.iso']
+            if nvme else ['-cdrom', iso]
         firmware = ['-drive', f'if=pflash,format=raw,readonly=on,file={OVMF_CODE}',
                     '-drive', f'if=pflash,format=raw,file={efivars}'] if efivars else ['-bios', OVMF]
         self.dir = tempfile.mkdtemp(dir=WORK)

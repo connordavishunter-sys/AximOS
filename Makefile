@@ -1,4 +1,4 @@
-LIMINE_DIR := /usr/share/limine
+LIMINE_DIR = $(DEV)/system/share/limine# built from source, as a development tool
 OVMF := /usr/share/edk2/x64/OVMF.4m.fd
 
 BUILD := build
@@ -63,7 +63,7 @@ GUI_TOOLS := run notify login
 WM := $(ROOT)/system/bin/wm
 WM_SOURCES := user/wm/wm.c linux/wm_drm.c linux/wm_display.c linux/evdev.c
 
-.PHONY: all debug disk tools desktop linux run run-disk test clean help FORCE
+.PHONY: all debug disk tools desktop linux run run-disk test test-build clean help FORCE
 .SECONDEXPANSION:
 
 all: $(ISO)
@@ -82,6 +82,7 @@ $(STAMPS)/linux: $(STAMPS)/skeleton
 $(STAMPS)/glibc: $(STAMPS)/linux
 $(STAMPS)/dash: $(STAMPS)/glibc $(LIBAXIMOS) ports/dash.patch
 $(STAMPS)/libxcrypt $(STAMPS)/util-linux: $(STAMPS)/glibc
+$(STAMPS)/util-linux: $(STAMPS)/ncurses
 $(STAMPS)/e2fsprogs $(STAMPS)/eudev: $(STAMPS)/util-linux
 $(STAMPS)/seatd: $(STAMPS)/glibc
 $(STAMPS)/openssl $(STAMPS)/libnl: $(STAMPS)/glibc
@@ -94,14 +95,26 @@ $(STAMPS)/curl: $(STAMPS)/openssl $(STAMPS)/zlib-ng
 $(STAMPS)/git: $(STAMPS)/curl
 $(STAMPS)/openssh: $(STAMPS)/openssl $(STAMPS)/zlib-ng
 $(STAMPS)/zstd $(STAMPS)/tar: $(STAMPS)/glibc
-# The development tools, into DEV, which go only on installed systems
-DEV_PORTS := binutils make m4 gzip patch xz bzip2 gcc
+# The development tools, into DEV, which go only on installed systems, and are what
+# building AximOS needs there
+DEV_PORTS := binutils make m4 gzip patch xz bzip2 gcc perl libffi python bc flex bison gperf elfutils pkgconf \
+	autoconf automake rsync cpio xorriso mtools nasm limine ninja meson kmod
 $(DEV_PORTS:%=$(STAMPS)/%): $(STAMPS)/glibc $(STAMPS)/zlib-ng
 $(STAMPS)/gcc: $(STAMPS)/binutils
+$(STAMPS)/python: $(STAMPS)/libffi $(STAMPS)/xz $(STAMPS)/bzip2 $(STAMPS)/openssl $(STAMPS)/ncurses $(STAMPS)/util-linux
+$(STAMPS)/flex $(STAMPS)/bison $(STAMPS)/autoconf: $(STAMPS)/m4
+$(STAMPS)/autoconf: $(STAMPS)/perl
+$(STAMPS)/automake: $(STAMPS)/autoconf
+$(STAMPS)/elfutils: $(STAMPS)/xz $(STAMPS)/bzip2 $(STAMPS)/zstd
+$(STAMPS)/rsync: $(STAMPS)/openssl $(STAMPS)/zstd
+$(STAMPS)/limine: $(STAMPS)/nasm $(STAMPS)/mtools
+$(STAMPS)/ninja: $(STAMPS)/python
+$(STAMPS)/meson: $(STAMPS)/ninja
+$(STAMPS)/kmod: $(STAMPS)/zstd
 $(STAMPS)/coreutils $(STAMPS)/sed $(STAMPS)/grep $(STAMPS)/gawk $(STAMPS)/findutils $(STAMPS)/diffutils: $(STAMPS)/glibc
-$(STAMPS)/dejavu: $(STAMPS)/skeleton
+$(STAMPS)/dejavu $(STAMPS)/tzdata: $(STAMPS)/skeleton
 $(STAMPS)/firmware: $(STAMPS)/skeleton kernel/firmware.list kernel/regdb.sums
-PORTS := dash libxcrypt util-linux e2fsprogs eudev seatd dejavu firmware openssl libnl wpa_supplicant hostapd ncurses zlib-ng curl bash git coreutils sed grep gawk findutils diffutils openssh zstd tar
+PORTS := dash libxcrypt util-linux e2fsprogs eudev seatd dejavu firmware openssl libnl wpa_supplicant hostapd ncurses zlib-ng curl bash git coreutils sed grep gawk findutils diffutils openssh zstd tar tzdata
 
 $(ROOT)/system/bin/init: user/init/init.c $(STAMPS)/glibc
 	$(TARGET_CC) $(TARGET_CFLAGS) $< -o $@
@@ -114,6 +127,8 @@ $(LIBAXIMOS): $(wildcard user/libaximos/*.c user/libaximos/include/*.h) $(STAMPS
 $(TOOLS:%=$(ROOT)/system/bin/%): $(ROOT)/system/bin/%: $$(wildcard user/$$*/*.c) $(LIBAXIMOS)
 	$(TARGET_CC) $(TARGET_CFLAGS) $(filter %.c,$^) -laximos $(LIBS_$*) -o $@
 	$(if $(filter $*,$(SETUID)),chmod 4755 $@)
+
+$(ROOT)/system/bin/disk $(ROOT)/system/bin/mount $(ROOT)/system/bin/aximos-install: $(STAMPS)/util-linux # for libblkid
 
 tools: $(TOOLS:%=$(ROOT)/system/bin/%)
 
@@ -151,10 +166,9 @@ $(KERNEL): $(KERNEL_BUILD)/.config
 # Until the system has a disk of its own, all of it is the initramfs, with this kernel's
 # modules, after the CPU's microcode, which the kernel looks for in a plain cpio first.
 # It has what install puts on a drive's ESP too, and the accounts as they were built.
-$(INITRAMFS): $(ROOT)/system/bin/init tools desktop $(PORTS:%=$(STAMPS)/%) $(KERNEL) kernel/initramfs.list FORCE
+$(INITRAMFS): $(ROOT)/system/bin/init tools desktop $(PORTS:%=$(STAMPS)/%) $(STAMPS)/limine $(KERNEL) kernel/initramfs.list FORCE
 	cp -r rootfs/. $(ROOT)/
 	python3 tools/check_libs.py # that nothing was linked against the host's libraries
-	rsync -a --exclude posix --exclude right /usr/share/zoneinfo/ $(ROOT)/system/share/zoneinfo/
 	rsync -a --delete --exclude /system/include --exclude /system/lib/modules --exclude '*.a' --exclude '*.o' \
 		--exclude /system/share/man --exclude /system/share/info --exclude /system/share/doc \
 		$(ROOT)/ $(IMAGE)/
@@ -193,7 +207,7 @@ $(ISO): $(KERNEL) $(INITRAMFS) $(DEV_ARCHIVE) limine.conf
 # The system as it's installed, on a disk image: an EFI system partition with Limine,
 # the kernel and the microcode, and the system on ext4 after it, which the kernel
 # mounts itself, by its PARTUUID. Its files are root's, through a tarball.
-$(DISK): $(KERNEL) $(INITRAMFS) limine-disk.conf
+$(DISK): $(KERNEL) $(INITRAMFS) $(STAMPS)/limine limine-disk.conf
 	rm -f $@ $(BUILD)/esp.img $(BUILD)/system.img
 	truncate -s $$(( $(ESP_MIB) + $(SYSTEM_MIB) + 2 ))M $@
 	printf 'label: gpt\nstart=1MiB, size=$(ESP_MIB)MiB, type=uefi\nsize=$(SYSTEM_MIB)MiB, type=linux\n' | sfdisk -q $@
@@ -268,6 +282,11 @@ run-disk: $(DISK)
 test: $(ISO) $(DISK)
 	@python3 tests/run.py $(if $(JOBS),-j $(JOBS)) $(TESTS)
 
+# AximOS building itself, which takes an hour or more: an installed system clones this
+# tree, as it is, makes the ISO, and the ISO it makes is booted.
+test-build: $(ISO)
+	@python3 tests/long/selfbuild_test.py
+
 help:
 	@echo "make           build the system into $(ISO)"
 	@echo "make debug     the same, with a kernel of only QEMU's and the laptop's drivers, built in"
@@ -276,6 +295,7 @@ help:
 	@echo "make run-disk  the same, from the disk image"
 	@echo "make test      build it, then run the tests in tests/, several at once"
 	@echo "               (JOBS=n sets how many, TESTS=\"tests/x_test.py ...\" picks which)"
+	@echo "make test-build  build it, then have an installed AximOS build itself, which takes an hour or more"
 	@echo "make linux     build wm and some apps to run on this computer, in $(LINUX)"
 	@echo "make clean     delete everything that was built"
 

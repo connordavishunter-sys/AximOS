@@ -38,10 +38,11 @@ autotools() { # configure options...
 	make install DESTDIR="$target" >/dev/null
 }
 
-# The same for a development tool, into the development tree, finding libraries in it too.
+# The same for a development tool, into the development tree, finding libraries in it too, with
+# CFLAGS of the port's own, if it has them.
 devtools() { # configure options...
 	if [ ! -e Makefile ]; then
-		CC="$target_cc" CXX="g++ --sysroot=$target" CFLAGS="-O2" CXXFLAGS="-O2" \
+		CC="$target_cc" CXX="g++ --sysroot=$target" CFLAGS="${CFLAGS:--O2}" CXXFLAGS="-O2" \
 			CPPFLAGS="-I$dev/system/include" LDFLAGS="-L$target/system/lib -L$dev/system/lib" \
 			./configure --host=x86_64-linux-gnu --prefix=/usr --libdir=/usr/lib --sbindir=/usr/bin --sysconfdir=/etc \
 			--disable-static --disable-nls "$@" >/dev/null
@@ -119,13 +120,13 @@ libxcrypt) # after glibc: hashing passwords, which glibc no longer does
 	cd libxcrypt-4.5.2
 	autotools --enable-hashes=strong,glibc --enable-obsolete-api=no --disable-failure-tokens --disable-werror
 	;;
-util-linux) # after glibc: only its libraries, finding filesystems by what's on them and making UUIDs
+util-linux) # after glibc and ncurses: its libraries, finding filesystems by what's on them and making UUIDs, and fdisk, sfdisk and cfdisk
 	fetch https://mirrors.edge.kernel.org/pub/linux/utils/util-linux/v2.42 util-linux-2.42.4.tar.xz \
 		fbd62a100ab7bb8746ba0661255c3c48185b1e9021507c624da01fbc696330ec
 	unpack util-linux-2.42.4.tar.xz util-linux-2.42.4
 	cd util-linux-2.42.4
-	autotools --disable-all-programs --enable-libblkid --enable-libuuid --without-python --without-systemd \
-		--without-udev --without-ncursesw --without-ncurses --disable-bash-completion
+	autotools --disable-all-programs --enable-libblkid --enable-libuuid --enable-libfdisk --enable-libsmartcols --enable-fdisks \
+		--without-python --without-systemd --without-udev --without-readline --disable-bash-completion
 	;;
 e2fsprogs) # after util-linux: making and checking ext4
 	fetch https://mirrors.edge.kernel.org/pub/linux/kernel/people/tytso/e2fsprogs/v1.47.4 e2fsprogs-1.47.4.tar.xz \
@@ -281,14 +282,15 @@ bash) # after glibc and ncurses: the shell most scripts expect, with its patches
 	cd bash-5.3
 	bash_cv_termcap_lib=libncurses autotools --without-bash-malloc --disable-rpath
 	;;
-git) # after curl: version control, with HTTPS through curl, and AximOS's more and text as its pager and editor
+git) # after curl: version control, with HTTPS through curl, and AximOS's more and text as its pager and editor,
+	# without its parts in Rust, which AximOS has no compiler for
 	fetch https://mirrors.edge.kernel.org/pub/software/scm/git git-2.56.1.tar.xz \
 		f0b0bf89264b9bd2e1c640363e7529643989da76281600473c50745cd34a607f
 	unpack git-2.56.1.tar.xz git-2.56.1
 	cd git-2.56.1
 	make -j"$jobs" prefix=/usr gitexecdir=/usr/lib/git-core CC="$target_cc" CFLAGS="-O2 -w" \
 		LDFLAGS="-L$target/system/lib" CURL_LDFLAGS="-L$target/system/lib -lcurl" \
-		NO_PERL=1 NO_PYTHON=1 NO_TCLTK=1 NO_GETTEXT=1 NO_EXPAT=1 NO_OPENSSL=1 INSTALL_SYMLINKS=1 \
+		NO_PERL=1 NO_PYTHON=1 NO_TCLTK=1 NO_GETTEXT=1 NO_EXPAT=1 NO_OPENSSL=1 NO_RUST=1 INSTALL_SYMLINKS=1 \
 		DEFAULT_PAGER=more DEFAULT_EDITOR=text DESTDIR="$target" strip install >/dev/null
 	rm -f "$target"/system/lib/git-core/git-daemon "$target"/system/lib/git-core/git-http-backend \
 		"$target"/system/lib/git-core/git-imap-send # serving repositories, and mailing patches, which it isn't for
@@ -313,9 +315,9 @@ grep) # after glibc, without Perl's regular expressions
 	autotools --disable-perl-regexp
 	;;
 gawk) # after glibc: awk
-	fetch https://ftp.gnu.org/gnu/gawk gawk-5.4.1.tar.xz 07f6f7342b7febe4313fc2c2542ad93d64fe20ad8717200109f105a826f5fd37
-	unpack gawk-5.4.1.tar.xz gawk-5.4.1
-	cd gawk-5.4.1
+	fetch https://ftp.gnu.org/gnu/gawk gawk-5.4.2.tar.xz b95e4909533b5f988c6b5e5539b3b3ddf76e7d7df02ca2e5b5b7d6f62db78e6a
+	unpack gawk-5.4.2.tar.xz gawk-5.4.2
+	cd gawk-5.4.2
 	autotools --without-readline --without-mpfr --disable-pma
 	;;
 findutils) # after glibc: find and xargs
@@ -442,6 +444,184 @@ gcc) # after binutils: GCC, for C and C++, with GMP, MPFR and MPC built with it.
 	make install-strip DESTDIR="$dev" >/dev/null
 	ln -sf gcc "$dev/system/bin/cc"
 	rm -f "$dev"/system/lib/*.la "$dev"/system/lib/gcc/*/*/*.la
+	;;
+perl) # after glibc: Perl, which the kernel's build, OpenSSL's and autoconf need. Its Configure looks for
+	# libraries only in the system's folders, not the host's.
+	fetch https://www.cpan.org/src/5.0 perl-5.44.0.tar.xz 505cf43912e9480495c344c70260452e32aa2a73c546a026b3f100053b23ce91
+	unpack perl-5.44.0.tar.xz perl-5.44.0
+	cd perl-5.44.0
+	[ -e config.sh ] || sh Configure -des -Dprefix=/usr -Dvendorprefix=/usr -Dcc="$target_cc" -Doptimize=-O2 \
+		-Dlibpth="$target/system/lib $dev/system/lib" -Dglibpth= -Dloclibpth= -Dlocincpth= \
+		-Dldflags="-L$target/system/lib -L$dev/system/lib" -Dlddlflags="-shared -O2 -L$target/system/lib" \
+		-Duseshrplib -Dusethreads -Dman1dir=none -Dman3dir=none >/dev/null
+	make -j"$jobs" >/dev/null
+	make install DESTDIR="$dev" >/dev/null
+	;;
+libffi) # after glibc: calling C from Python, for its ctypes
+	fetch https://github.com/libffi/libffi/releases/download/v3.8.1 libffi-3.8.1.tar.gz \
+		81e879c094cc5ec3186c48510c6385ac6b3e866192e8bc71a35245703757ee40
+	unpack libffi-3.8.1.tar.gz libffi-3.8.1
+	cd libffi-3.8.1
+	devtools --with-gcc-arch=x86-64 --disable-docs # any x86-64, not this one's
+	;;
+python) # after libffi, xz, bzip2 and openssl: Python, which the build's checks and the tests are in. Its build
+	# runs the host's Python of the same version, as for another machine, whose answers configure is given.
+	fetch https://www.python.org/ftp/python/3.14.10 Python-3.14.10.tar.xz \
+		de414a57119abef52784d8993e341d53aed635fc2b05c2607d9f98a2c5b72032
+	unpack Python-3.14.10.tar.xz Python-3.14.10
+	cd Python-3.14.10
+	# OpenSSL 4 has no methods of one TLS version only, which Python's ssl looks for unless told
+	no_methods="-DOPENSSL_NO_SSL3 -DOPENSSL_NO_SSL3_METHOD -DOPENSSL_NO_TLS1_METHOD -DOPENSSL_NO_TLS1_1_METHOD -DOPENSSL_NO_TLS1_2_METHOD"
+	[ -e Makefile ] || ac_cv_file__dev_ptmx=yes ac_cv_file__dev_ptc=no ac_cv_buggy_getaddrinfo=no CC="$target_cc" CXX="g++ --sysroot=$target" \
+		CFLAGS=-O2 CPPFLAGS="-I$dev/system/include $no_methods" LDFLAGS="-L$target/system/lib -L$dev/system/lib" \
+		./configure --build=x86_64-pc-linux-gnu --host=x86_64-linux-gnu --prefix=/usr --enable-shared \
+		--with-build-python=python3.14 --without-ensurepip --disable-test-modules >/dev/null
+	make -j"$jobs" >/dev/null
+	make install DESTDIR="$dev" >/dev/null
+	ln -sf python3 "$dev/system/bin/python"
+	;;
+bc) # after glibc: the calculator the kernel's build works out its timer constants with
+	fetch https://ftp.gnu.org/gnu/bc bc-1.08.2.tar.gz ae470fec429775653e042015edc928d07c8c3b2fc59765172a330d3d87785f86
+	unpack bc-1.08.2.tar.gz bc-1.08.2
+	cd bc-1.08.2
+	MAKEFLAGS=MAKEINFO=true devtools # set for make, as its configure ignores MAKEINFO
+	;;
+flex) # after m4: the scanner generator, which the kernel's build needs
+	fetch https://github.com/westes/flex/releases/download/v2.7.7 flex-2.7.7.tar.gz \
+		4fff8a32ce095788537fdc4dbecd04ec069110c84429d182259f108db1003db2
+	unpack flex-2.7.7.tar.gz flex-2.7.7
+	cd flex-2.7.7
+	M4=/usr/bin/m4 devtools
+	ln -sf flex "$dev/system/bin/lex"
+	;;
+bison) # after m4: the parser generator, which the kernel's and glibc's builds need
+	fetch https://ftp.gnu.org/gnu/bison bison-3.8.2.tar.xz 9bba0214ccf7f1079c5d59210045227bcf619519840ebfa80cd3849cff5a5bf2
+	unpack bison-3.8.2.tar.xz bison-3.8.2
+	cd bison-3.8.2
+	M4=/usr/bin/m4 devtools
+	;;
+gperf) # after glibc: perfect hash tables, which eudev's build makes
+	fetch https://ftp.gnu.org/gnu/gperf gperf-3.3.tar.gz fd87e0aba7e43ae054837afd6cd4db03a3f2693deb3619085e6ed9d8d9604ad8
+	unpack gperf-3.3.tar.gz gperf-3.3
+	cd gperf-3.3
+	devtools
+	;;
+elfutils) # after xz and bzip2: libelf, which the kernel's objtool reads its objects with, and the eu- tools
+	fetch https://sourceware.org/elfutils/ftp/0.197 elfutils-0.197.tar.bz2 \
+		1fdf525f22dcf796d99a99ba3ea00a1f7b1ae5421bc62e8443a708920b99b904
+	unpack elfutils-0.197.tar.bz2 elfutils-0.197
+	cd elfutils-0.197
+	devtools --disable-debuginfod --disable-libdebuginfod --without-valgrind
+	;;
+pkgconf) # after glibc: pkg-config, which finds libraries' flags for packages' builds
+	fetch https://distfiles.ariadne.space/pkgconf pkgconf-3.0.11.tar.xz \
+		d0cd841bc8e55b9da888106c00dc256d05b7d1d8e5a46f4be4eb4c5125bd2dc4
+	unpack pkgconf-3.0.11.tar.xz pkgconf-3.0.11
+	cd pkgconf-3.0.11
+	devtools --with-system-libdir=/usr/lib --with-system-includedir=/usr/include \
+		--with-pkg-config-dir=/usr/lib/pkgconfig:/usr/share/pkgconfig
+	ln -sf pkgconf "$dev/system/bin/pkg-config"
+	;;
+autoconf) # after perl and m4: configure scripts, which dash's build makes
+	fetch https://ftp.gnu.org/gnu/autoconf autoconf-2.73.tar.xz 9fd672b1c8425fac2fa67fa0477b990987268b90ff36d5f016dae57be0d6b52e
+	unpack autoconf-2.73.tar.xz autoconf-2.73
+	cd autoconf-2.73
+	M4=/usr/bin/m4 PERL=/usr/bin/perl devtools
+	;;
+automake) # after autoconf: makefiles from Makefile.am, which dash's build makes
+	fetch https://ftp.gnu.org/gnu/automake automake-1.20.tar.xz f6f34dad4cbe395715762b0710f7c511e39bd5cf777e6b95818ccbecf7714248
+	unpack automake-1.20.tar.xz automake-1.20
+	cd automake-1.20
+	PERL=/usr/bin/perl devtools
+	;;
+rsync) # after openssl and zstd: copying trees, which the build makes the system's image with
+	fetch https://github.com/RsyncProject/rsync/releases/download/v3.5.2 rsync-3.5.2.tar.gz \
+		a10d591825251e070f74c98df3daad195def4ed81b4a2de16169026aea33f6c8
+	unpack rsync-3.5.2.tar.gz rsync-3.5.2
+	cd rsync-3.5.2
+	devtools --disable-xxhash --disable-lz4 --disable-idn --disable-md2man --disable-acl-support --disable-xattr-support \
+		--with-included-popt
+	;;
+cpio) # after glibc: cpio archives, which the initramfs is
+	fetch https://ftp.gnu.org/gnu/cpio cpio-2.15.tar.bz2 937610b97c329a1ec9268553fb780037bcfff0dcffe9725ebc4fd9c1aa9075db
+	unpack cpio-2.15.tar.bz2 cpio-2.15
+	cd cpio-2.15
+	CFLAGS='-O2 -std=gnu17' devtools --with-rmt=/dev/null # its declarations, from before C23's
+	;;
+xorriso) # after glibc: makes the ISO, with libburn's, libisofs' and libisoburn's code in it
+	fetch https://ftp.gnu.org/gnu/xorriso xorriso-1.5.8.pl02.tar.gz \
+		b1455ecafbf0692ddafe1d71002a96f2ce2d77f4deae602678261ce033f97bc8
+	unpack xorriso-1.5.8.pl02.tar.gz xorriso-1.5.8
+	cd xorriso-1.5.8
+	devtools --disable-libreadline --disable-libedit --disable-libacl --disable-xattr --disable-launch-frontend
+	;;
+mtools) # after glibc: writes FAT images without mounting them, for Limine's CD image and the disk's ESP
+	fetch https://ftp.gnu.org/gnu/mtools mtools-4.0.50.tar.bz2 f3a58e6cfc2634b03c240442548e3b00103692357afc28e1e7104744dd6478b5
+	unpack mtools-4.0.50.tar.bz2 mtools-4.0.50
+	cd mtools-4.0.50
+	devtools --without-x
+	;;
+nasm) # after glibc: the assembler Limine's x86 code is in
+	fetch https://www.nasm.us/pub/nasm/releasebuilds/3.02 nasm-3.02.tar.xz \
+		87336eba53b4acfe917424ab5d500d2b0054d9f5148d35c2273ccf2cfb712f0d
+	unpack nasm-3.02.tar.xz nasm-3.02
+	cd nasm-3.02
+	devtools
+	;;
+limine) # after nasm and mtools: the bootloader, its UEFI program and CD image, built by this machine's
+	# GCC and binutils, for the ISO and installed systems
+	fetch https://github.com/Limine-Bootloader/Limine/releases/download/v12.11.1 limine-12.11.1.tar.xz \
+		31518344aa35d0c86910e8a03016a7d742ab7d0e42098c7a7fa322945034d28a
+	unpack limine-12.11.1.tar.xz limine-12.11.1
+	cd limine-12.11.1
+	[ -e GNUmakefile ] || TOOLCHAIN_FOR_TARGET= CC="$target_cc" LDFLAGS="-L$target/system/lib" ./configure \
+		--prefix=/usr --enable-uefi-x86-64 --enable-uefi-cd >/dev/null
+	make -j"$jobs" >/dev/null
+	make install DESTDIR="$dev" >/dev/null
+	;;
+ninja) # after python: the build tool meson's builds run
+	fetch https://github.com/ninja-build/ninja/archive/v1.13.2 ninja-1.13.2.tar.gz \
+		974d6b2f4eeefa25625d34da3cb36bdcebe7fbce40f4c16ac0835fd1c0cbae17
+	unpack ninja-1.13.2.tar.gz ninja-1.13.2
+	cd ninja-1.13.2
+	[ -e ninja ] || CXX="g++ --sysroot=$target" CXXFLAGS=-O2 LDFLAGS="-L$target/system/lib -L$dev/system/lib" \
+		python3 configure.py --bootstrap >/dev/null
+	install -D -m 755 ninja "$dev/system/bin/ninja"
+	;;
+meson) # after python and ninja: the build system many libraries use, as one file Python runs
+	fetch https://github.com/mesonbuild/meson/releases/download/1.12.1 meson-1.12.1.tar.gz \
+		ab0a6ca09f8ef70c564c8241fb5a23957886a0b53fb58412b5e07eaf07dba743
+	unpack meson-1.12.1.tar.gz meson-1.12.1
+	cd meson-1.12.1
+	python3 packaging/create_zipapp.py --outfile "$dev/system/bin/meson" --interpreter /usr/bin/python3 . >/dev/null
+	;;
+kmod) # after zstd: only depmod, which lists the kernel's modules for modprobe, as modules_install runs it.
+	# AximOS has its own modprobe, insmod, rmmod and lsmod.
+	fetch https://mirrors.kernel.org/pub/linux/utils/kernel/kmod kmod-34.4.tar.xz \
+		4c7942dda4793d08f975270322db582c9701438afd4d76ed9e6e7cf4094cb967
+	unpack kmod-34.4.tar.xz kmod-34.4
+	cd kmod-34.4
+	if [ ! -e Makefile ]; then
+		CC="$target_cc" CFLAGS=-O2 LDFLAGS="-L$target/system/lib" ./configure --host=x86_64-linux-gnu --prefix=/usr \
+			--libdir=/usr/lib --sysconfdir=/etc --with-zstd --without-xz --without-zlib --without-openssl \
+			--disable-manpages --disable-static >/dev/null
+	fi
+	make -j"$jobs" >/dev/null
+	install -D -m 755 tools/kmod "$dev/system/bin/kmod"
+	ln -sf kmod "$dev/system/bin/depmod"
+	;;
+tzdata) # the time zones, compiled from IANA's database by its own zic, built for this machine
+	fetch https://data.iana.org/time-zones/releases tzcode2026f.tar.gz \
+		5a18da01393679ef2559214dc687563f7f3d05691f6f58b7fbc0166f3e796cd6
+	fetch https://data.iana.org/time-zones/releases tzdata2026f.tar.gz \
+		01b4a91cec5167ed48c11e8ab78f2048cead78ce94b0cafcad0ae8c5a3044d3d
+	rm -rf tzdb && mkdir tzdb && cd tzdb
+	tar xf "$root/ports/dist/tzcode2026f.tar.gz" && tar xf "$root/ports/dist/tzdata2026f.tar.gz"
+	make -s cc=gcc CC=gcc zic tzdata.zi >/dev/null
+	zones=$target/system/share/zoneinfo
+	rm -rf "$zones"
+	./zic -d "$zones" africa antarctica asia australasia europe northamerica southamerica etcetera backward factory
+	cp iso3166.tab zone.tab zone1970.tab zonenow.tab leapseconds leap-seconds.list tzdata.zi SECURITY "$zones/"
 	;;
 *)
 	echo "build.sh: no part called $1" >&2
