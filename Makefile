@@ -34,12 +34,12 @@ TARGET_CFLAGS := -std=gnu23 -O2 -Wall -Wextra -Wno-format-truncation -D_GNU_SOUR
 
 # The command-line programs, each from its folder in user/, linked against
 # libaximos.so, which has what they share beyond glibc.
-TOOLS := clear free kill more ps reboot rename shutdown text top tz counter hello host nc ping mount umount \
-	dmesg hostname lsmod insmod rmmod modprobe ttylogin sudo passwd useradd disk efiboot install swapon suspend \
+TOOLS := free kill more ps reboot rename shutdown text top tz counter hello host nc ping mount umount \
+	dmesg hostname lsmod insmod rmmod modprobe ttylogin sudo passwd useradd disk efiboot aximos-install swapon suspend \
 	inputsim netd net wifi axfetch checkpass session
 LIBS_disk := -lblkid
 LIBS_mount := -lblkid
-LIBS_install := -lblkid
+LIBS_aximos-install := -lblkid
 SETUID := sudo passwd tz reboot shutdown suspend checkpass# which start as root, whoever runs them
 LIBAXIMOS := $(ROOT)/system/lib/libaximos.so
 
@@ -85,13 +85,14 @@ $(STAMPS)/openssl $(STAMPS)/libnl: $(STAMPS)/glibc
 $(STAMPS)/wpa_supplicant: $(STAMPS)/openssl $(STAMPS)/libnl ports/wpa_supplicant.config
 $(STAMPS)/hostapd: $(STAMPS)/openssl $(STAMPS)/libnl ports/hostapd.config
 $(STAMPS)/zlib-ng $(STAMPS)/bash: $(STAMPS)/glibc
-$(STAMPS)/bash: ports/bash.sums
+$(STAMPS)/bash: ports/bash.sums $(STAMPS)/ncurses
+$(STAMPS)/ncurses: $(STAMPS)/glibc
 $(STAMPS)/curl: $(STAMPS)/openssl $(STAMPS)/zlib-ng
 $(STAMPS)/git: $(STAMPS)/curl
 $(STAMPS)/coreutils $(STAMPS)/sed $(STAMPS)/grep $(STAMPS)/gawk $(STAMPS)/findutils $(STAMPS)/diffutils: $(STAMPS)/glibc
 $(STAMPS)/dejavu: $(STAMPS)/skeleton
 $(STAMPS)/firmware: $(STAMPS)/skeleton kernel/firmware.list kernel/regdb.sums
-PORTS := dash libxcrypt util-linux e2fsprogs eudev seatd dejavu firmware openssl libnl wpa_supplicant hostapd zlib-ng curl bash git coreutils sed grep gawk findutils diffutils
+PORTS := dash libxcrypt util-linux e2fsprogs eudev seatd dejavu firmware openssl libnl wpa_supplicant hostapd ncurses zlib-ng curl bash git coreutils sed grep gawk findutils diffutils
 
 $(ROOT)/system/bin/init: user/init/init.c $(STAMPS)/glibc
 	$(TARGET_CC) $(TARGET_CFLAGS) $< -o $@
@@ -143,6 +144,7 @@ $(KERNEL): $(KERNEL_BUILD)/.config
 # It has what install puts on a drive's ESP too, and the accounts as they were built.
 $(INITRAMFS): $(ROOT)/system/bin/init tools desktop $(PORTS:%=$(STAMPS)/%) $(KERNEL) kernel/initramfs.list FORCE
 	cp -r rootfs/. $(ROOT)/
+	python3 tools/check_libs.py # that nothing was linked against the host's libraries
 	rsync -a --exclude posix --exclude right /usr/share/zoneinfo/ $(ROOT)/system/share/zoneinfo/
 	rsync -a --delete --exclude /system/include --exclude /system/lib/modules --exclude '*.a' --exclude '*.o' \
 		--exclude /system/share/man --exclude /system/share/info --exclude /system/share/doc \

@@ -67,7 +67,7 @@ AximOS's own tools: `more free ps top kill tz clear text rename axfetch`, system
 umount dmesg hostname lsmod insmod rmmod modprobe`, accounts with `passwd useradd sudo`,
 `disk` (lists drives and their free space, partitions them with GPT, adds partitions in free
 space beside what's there, and formats them as ext4 or FAT32), `efiboot` (the firmware's
-boot entries and their order), `install` (installs AximOS from the live system), `swapon`,
+boot entries and their order), `aximos-install` (installs AximOS from the live system), `swapon`,
 `suspend`, `inputsim` (pretend laptop input, for the tests), `net` (the network, as netd has
 it, and addresses set by hand), `wifi` (the networks nearby, and joining, forgetting and
 airplane mode), and `host nc ping`. Run any of them with `--help`. ext4 is made and checked
@@ -127,7 +127,7 @@ by [e2fsprogs](https://e2fsprogs.sourceforge.net)' `mkfs.ext4` and `e2fsck`.
 |------------|-----------------------------------------------------------------------|
 | NetSurf    | Web browser, with HTTPS, CSS, smooth text, PNG, JPEG, GIF and WebP pictures, some JavaScript, downloads to ~/Downloads, and the system clipboard |
 | Files      | File manager: places, recent files, search through folders, tabs, multi-select, thumbnails, Open with, and a trash you can restore from |
-| Terminal   | Tabs, scrollback, selection, find, and a see-through background       |
+| Terminal   | An xterm to programs (TERM=xterm-256color): UTF-8 and wide characters, true colour, the alternate screen, mouse and bracketed paste, so full-screen programs like Claude Code run in it. Tabs, scrollback, selection, find, and a see-through background |
 | Editor     | Tabs, find and replace, go to line, colouring for C and shell scripts |
 | Paint      | Pencil, shapes, fill, text, selections, zoom, undo and redo           |
 | Viewer     | PNG, JPEG, BMP, GIF and WebP pictures, with zoom and turning          |
@@ -140,8 +140,8 @@ by [e2fsprogs](https://e2fsprogs.sourceforge.net)' `mkfs.ext4` and `e2fsck`.
 
 ## Installing
 
-Boot the USB stick, then open System → Installer, or run `sudo install` at a terminal (see
-`install --help`). It asks for the drive and how to install on it:
+Boot the USB stick, then open System → Installer, or run `sudo aximos-install` at a terminal (see
+`aximos-install --help`). It asks for the drive and how to install on it:
 
 - **In its free space**, beside what's there, in the largest stretch no partition has
 - **Over the whole drive**, erasing it
@@ -300,7 +300,7 @@ AximOS uses [Linux](https://kernel.org), [glibc](https://www.gnu.org/software/li
 [Limine](https://github.com/limine-bootloader/limine), [dash](http://gondor.apana.org.au/~herbert/dash/),
 [libxcrypt](https://github.com/besser82/libxcrypt), [seatd](https://git.sr.ht/~kennylevinsen/seatd), [util-linux](https://github.com/util-linux/util-linux)'s
 libblkid and libuuid, [e2fsprogs](https://e2fsprogs.sourceforge.net), [eudev](https://github.com/eudev-project/eudev),
-[OpenSSL](https://openssl-library.org), [libnl](https://github.com/thom311/libnl),
+[ncurses](https://invisible-island.net/ncurses/)'s terminfo, [OpenSSL](https://openssl-library.org), [libnl](https://github.com/thom311/libnl),
 [wpa_supplicant and hostapd](https://w1.fi/), [bash](https://www.gnu.org/software/bash/),
 [curl](https://curl.se), [git](https://git-scm.com), [zlib-ng](https://github.com/zlib-ng/zlib-ng), GNU
 [coreutils, sed, grep, gawk, findutils and diffutils](https://www.gnu.org/software/), [stb_truetype](https://github.com/nothings/stb), the [DejaVu](https://dejavu-fonts.github.io) fonts,

@@ -15,6 +15,8 @@
 // as wide as it is. Without a font, the bitmap one is used.
 #define MONO_FONT GUI_ROOT "/system/share/fonts/mono.ttf"
 #define SANS_FONT GUI_ROOT "/system/share/fonts/DejaVuSans.ttf"
+#define BOLD_FONT GUI_ROOT "/system/share/fonts/DejaVuSansMono-Bold.ttf" // for terminals' bold
+#define CELL_CACHE 2048 // characters in cells kept drawn, past ASCII
 #define SANS_EM 13 // pixels to its em, which makes it look the size of the monospaced one
 #define MAX_FONT (4 * 1024 * 1024)
 #define MAX_SCALE 4
@@ -43,7 +45,7 @@ struct face {
 
 bool font_smooth = true;
 static bool settings_read;
-static struct face faces[] = {{.path = MONO_FONT, .mono = true}, {.path = SANS_FONT}};
+static struct face faces[] = {{.path = MONO_FONT, .mono = true}, {.path = SANS_FONT}, {.path = BOLD_FONT, .mono = true}};
 
 static bool load(struct face *f) {
     int fd = open(f->path, O_RDONLY | O_CLOEXEC), advance, other, unused;
@@ -68,8 +70,8 @@ static bool load(struct face *f) {
 
 // The face, if text is smooth and it could be loaded. The first time, the settings,
 // which say whether to use them, are loaded for programs that don't load them themselves.
-static struct face *face_for(bool mono, int scale) {
-    struct face *f = &faces[mono ? 0 : 1];
+static struct face *face_numbered(int number, int scale) {
+    struct face *f = &faces[number];
 
     if (!settings_read) {
         struct gui_settings settings;
@@ -82,6 +84,10 @@ static struct face *face_for(bool mono, int scale) {
     if (f->state == UNTRIED)
         f->state = load(f) ? LOADED : FAILED;
     return f->state == LOADED ? f : NULL;
+}
+
+static struct face *face_for(bool mono, int scale) {
+    return face_numbered(mono ? 0 : 1, scale);
 }
 
 static struct size *size_of(struct face *f, int scale) {
@@ -127,6 +133,28 @@ static uint32_t blend(uint32_t under, uint32_t color, uint32_t a) {
          | ((((color & 0x00FF00) * a + (under & 0x00FF00) * keep) >> 8) & 0x00FF00);
 }
 
+// A glyph, with its pen at x and its baseline at y.
+static void blit(struct gui_canvas *canvas, int x, int y, const struct glyph *g, uint32_t color) {
+    if (!g->coverage || x + g->x + g->width <= 0)
+        return;
+    for (int row = 0; row < g->height; row++) {
+        int py = y + g->y + row;
+
+        if (py < 0 || py >= canvas->height)
+            continue;
+
+        uint32_t *line = canvas->pixels + (long)py * canvas->stride;
+        const uint8_t *cover = g->coverage + row * g->width;
+
+        for (int col = 0; col < g->width; col++) {
+            int px = x + g->x + col;
+
+            if (cover[col] && px >= 0 && px < canvas->width)
+                line[px] = cover[col] == 255 ? color : blend(line[px], color, cover[col]);
+        }
+    }
+}
+
 static bool draw(bool mono, struct gui_canvas *canvas, int x, int y, const char *text, uint32_t color, int scale) {
     struct face *f = face_for(mono, scale);
 
@@ -141,24 +169,7 @@ static bool draw(bool mono, struct gui_canvas *canvas, int x, int y, const char 
         unsigned char c = (unsigned char)*text < 128 ? (unsigned char)*text : '?';
         const struct glyph *g = glyph_of(f, s, c);
 
-        if (g->coverage && x + g->x + g->width > 0) {
-            for (int row = 0; row < g->height; row++) {
-                int py = y + s->baseline + g->y + row;
-
-                if (py < 0 || py >= canvas->height)
-                    continue;
-
-                uint32_t *line = canvas->pixels + (long)py * canvas->stride;
-                const uint8_t *cover = g->coverage + row * g->width;
-
-                for (int col = 0; col < g->width; col++) {
-                    int px = x + g->x + col;
-
-                    if (cover[col] && px >= 0 && px < canvas->width)
-                        line[px] = cover[col] == 255 ? color : blend(line[px], color, cover[col]);
-                }
-            }
-        }
+        blit(canvas, x, y + s->baseline, g, color);
         x += mono ? GUI_CHAR_WIDTH * scale : g->advance;
     }
     return true;
@@ -176,4 +187,44 @@ int font_sans_advance(unsigned char c, int scale) {
     struct face *f = face_for(false, scale);
 
     return f ? glyph_of(f, size_of(f, scale), c < 128 ? c : '?')->advance : -1;
+}
+
+// Characters in a terminal's cells, kept once drawn, by character and the face they
+// came from: the monospaced one, its bold, or DejaVu Sans for those it hasn't, shrunk
+// to fit the cells, and centred in them.
+static struct cell_glyph {
+    uint32_t cp;
+    uint8_t kind; // 1 monospaced, 2 bold, 3 and up DejaVu Sans, as many cells as it's for plus 2
+    struct glyph g;
+} cell_glyphs[CELL_CACHE];
+
+bool font_cell(struct gui_canvas *canvas, int x, int y, uint32_t cp, int cells, bool bold, uint32_t color) {
+    struct face *mono = face_numbered(bold ? 2 : 0, 1), *f = mono;
+
+    if (!mono && bold)
+        mono = f = face_numbered(0, 1);
+    if (!mono)
+        return false;
+    if (!stbtt_FindGlyphIndex(&f->info, (int)cp) && !((f = face_numbered(1, 1)) && stbtt_FindGlyphIndex(&f->info, (int)cp)))
+        return false;
+
+    uint8_t kind = f == mono ? (bold ? 2 : 1) : 2 + cells;
+    struct cell_glyph *c = &cell_glyphs[(cp * 31 + kind) % CELL_CACHE];
+    struct size *s = size_of(mono, 1);
+
+    if (c->cp != cp || c->kind != kind) { // made, or made again in the place of another
+        float scale = f == mono ? s->scale : size_of(f, 1)->scale;
+        int advance, unused;
+
+        free(c->g.coverage);
+        *c = (struct cell_glyph){.cp = cp, .kind = kind};
+        stbtt_GetCodepointHMetrics(&f->info, (int)cp, &advance, &unused);
+        if (advance * scale > GUI_CHAR_WIDTH * cells)
+            scale = (float)(GUI_CHAR_WIDTH * cells) / advance;
+        c->g.advance = (int)(advance * scale + 0.5f);
+        c->g.coverage = stbtt_GetCodepointBitmap(&f->info, scale, scale, (int)cp, &c->g.width, &c->g.height, &c->g.x, &c->g.y);
+        c->g.made = true;
+    }
+    blit(canvas, x + (GUI_CHAR_WIDTH * cells - c->g.advance) / 2, y + s->baseline, &c->g, color);
+    return true;
 }

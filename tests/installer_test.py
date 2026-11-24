@@ -26,7 +26,7 @@ try:
     time.sleep(0.3)
     at = v.mark()
     v.keys('secret\n')
-    check('and installs', v.wait('installer: installing', 5, at) and v.wait('install: copied 50%', 120, at), v.text(at))
+    check('and installs', v.wait('installer: installing', 5, at) and v.wait('aximos-install: copied 50%', 120, at), v.text(at))
     check('to the end', v.wait('installer: done', 180, at), v.text(at)[-2000:])
     check('which it shows', v.wait('installer: drew done', 5, at), v.text(at)[-500:])
 finally:

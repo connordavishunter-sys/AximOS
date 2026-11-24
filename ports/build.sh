@@ -25,10 +25,12 @@ unpack() { # file directory
 	[ -d "$2" ] || tar xf "$root/ports/dist/$1"
 }
 
-# Configures, builds and installs an autotools package for the system, in its folder.
+# Configures, builds and installs an autotools package for the system, in its folder,
+# linking against the system's libraries first, as the compiler's own paths can reach
+# the host's.
 autotools() { # configure options...
 	if [ ! -e Makefile ]; then
-		CC=$target_cc CFLAGS="-O2" ./configure --host=x86_64-linux-gnu --prefix=/usr --libdir=/usr/lib --sbindir=/usr/bin \
+		CC=$target_cc CFLAGS="-O2" LDFLAGS="-L$target/system/lib" ./configure --host=x86_64-linux-gnu --prefix=/usr --libdir=/usr/lib --sbindir=/usr/bin \
 			--sysconfdir=/etc --disable-static --disable-nls "$@" >/dev/null
 	fi
 	make -j"$jobs" >/dev/null
@@ -69,7 +71,8 @@ glibc) # after linux
 	if [ ! -e config.status ]; then
 		printf 'slibdir=/usr/lib\nrtlddir=/usr/lib\n' > configparms # in lib, not lib64, which links to it
 		../$glibc/configure --prefix=/usr --libdir=/usr/lib --libexecdir=/usr/lib --with-headers="$target/system/include" \
-			--enable-kernel=5.10 --enable-stack-protector=strong --disable-werror --disable-nscd >/dev/null
+			--enable-kernel=5.10 --enable-stack-protector=strong --disable-werror --disable-nscd \
+			--without-gd >/dev/null # not memusagestat, which would draw with the host's libgd
 	fi
 	make -j"$jobs" >/dev/null
 	make install DESTDIR="$target" >/dev/null
@@ -230,7 +233,24 @@ curl) # after openssl and zlib-ng: HTTPS downloads, for git, and Claude Code's i
 		--disable-ldap --disable-ldaps --disable-manual --without-libpsl --without-brotli --without-zstd \
 		--without-libidn2 --without-nghttp2 --without-libssh2
 	;;
-bash) # after glibc: the shell most scripts expect, with its patches to 5.3.20, and its own line editing
+ncurses) # after glibc: terminfo, the terminals' sequences, for the few terminals AximOS meets, and the library that reads it
+	fetch https://invisible-island.net/archives/ncurses ncurses-6.6.tar.gz \
+		355b4cbbed880b0381a04c46617b7656e362585d52e9cf84a67e2009b749ff11
+	unpack ncurses-6.6.tar.gz ncurses-6.6
+	cd ncurses-6.6
+	autotools --with-shared --without-normal --without-debug --without-cxx-binding --without-ada --without-manpages \
+		--without-tests --enable-widec --enable-pc-files --with-pkg-config-libdir=/usr/lib/pkgconfig \
+		--with-default-terminfo-dir=/usr/share/terminfo --disable-root-environ --disable-db-install
+	# Compiled by the host's tic, which writes the same format, as the system's can't run here
+	mkdir -p "$target/system/share/terminfo"
+	tic -x -e linux,xterm,xterm-256color,xterm-color,vt100,vt220,screen,screen-256color,tmux,tmux-256color,dumb,ansi \
+		-o "$target/system/share/terminfo" misc/terminfo.src
+	for lib in ncurses tinfo; do # for programs linked against those names
+		ln -sf libncursesw.so.6 "$target/system/lib/lib$lib.so.6"
+		ln -sf libncursesw.so "$target/system/lib/lib$lib.so"
+	done
+	;;
+bash) # after glibc and ncurses: the shell most scripts expect, with its patches to 5.3.20
 	fetch https://ftp.gnu.org/gnu/bash bash-5.3.tar.gz "$(grep ' bash-5.3.tar.gz$' "$root/ports/bash.sums" | cut -d' ' -f1)"
 	for patch in $(seq -f %03g 1 20); do
 		fetch https://ftp.gnu.org/gnu/bash/bash-5.3-patches bash53-$patch \
@@ -243,14 +263,15 @@ bash) # after glibc: the shell most scripts expect, with its patches to 5.3.20, 
 		done
 	fi
 	cd bash-5.3
-	bash_cv_termcap_lib=gnutermcap autotools --without-bash-malloc --disable-rpath # its own termcap, as there are no curses
+	bash_cv_termcap_lib=libncurses autotools --without-bash-malloc --disable-rpath
 	;;
 git) # after curl: version control, with HTTPS through curl, and AximOS's more and text as its pager and editor
 	fetch https://mirrors.edge.kernel.org/pub/software/scm/git git-2.56.1.tar.xz \
 		f0b0bf89264b9bd2e1c640363e7529643989da76281600473c50745cd34a607f
 	unpack git-2.56.1.tar.xz git-2.56.1
 	cd git-2.56.1
-	make -j"$jobs" prefix=/usr gitexecdir=/usr/lib/git-core CC="$target_cc" CFLAGS="-O2 -w" CURL_LDFLAGS=-lcurl \
+	make -j"$jobs" prefix=/usr gitexecdir=/usr/lib/git-core CC="$target_cc" CFLAGS="-O2 -w" \
+		LDFLAGS="-L$target/system/lib" CURL_LDFLAGS="-L$target/system/lib -lcurl" \
 		NO_PERL=1 NO_PYTHON=1 NO_TCLTK=1 NO_GETTEXT=1 NO_EXPAT=1 NO_OPENSSL=1 INSTALL_SYMLINKS=1 \
 		DEFAULT_PAGER=more DEFAULT_EDITOR=text DESTDIR="$target" strip install >/dev/null
 	rm -f "$target"/system/lib/git-core/git-daemon "$target"/system/lib/git-core/git-http-backend \

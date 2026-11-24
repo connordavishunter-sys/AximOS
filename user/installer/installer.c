@@ -8,7 +8,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-// Installs AximOS from the live system, through the install command, which it runs
+// Installs AximOS from the live system, through aximos-install, which it runs
 // as root with sudo: it asks which drive, and how, then for the first account, and
 // shows how far it's got.
 
@@ -37,7 +37,7 @@ static int to_child = -1, from_child = -1;
 static bool gave_password, gave_again;
 
 static void find_drives(void) {
-    FILE *f = popen("install list", "r");
+    FILE *f = popen("aximos-install list", "r");
     char line[256];
 
     while (f && drive_count < MAX_DRIVES && fgets(line, sizeof(line), f)) {
@@ -116,7 +116,7 @@ static void start(struct gui_ui *ui) {
         dup2(out[1], 2);
         close(in[1]);
         close(out[0]);
-        char *argv[8] = {"sudo", "install", drives[chosen].name, (char *)how[ways[way]], "-y"};
+        char *argv[8] = {"sudo", "aximos-install", drives[chosen].name, (char *)how[ways[way]], "-y"};
         int n = 5;
 
         if (fresh())
@@ -150,7 +150,7 @@ static int last_lines(char lines[][96], int count) {
 
         while (start > output && start[-1] != '\n')
             start--;
-        if (end - start > 1 && strncmp(start, "install: copied ", 16) && strncmp(start, "Password for", 12))
+        if (end - start > 1 && strncmp(start, "aximos-install: copied ", 23) && strncmp(start, "Password for", 12))
             snprintf(lines[n++], 96, "%.*s", (int)(end - start - (end[-1] == '\n')), start);
         end = start;
     }
@@ -173,8 +173,8 @@ static void follow(struct gui_ui *ui) {
         }
     }
     fflush(stdout);
-    for (char *p = output; (p = strstr(p, "install: copied ")); p++)
-        percent = atoi(p + 16);
+    for (char *p = output; (p = strstr(p, "aximos-install: copied ")); p++)
+        percent = atoi(p + 23);
     if (!gave_password && strstr(output, "New password: ")) {
         dprintf(to_child, "%s\n", password);
         gave_password = true;
@@ -190,7 +190,7 @@ static void follow(struct gui_ui *ui) {
         to_child = from_child = -1;
         memset(password, 0, sizeof(password));
         memset(again, 0, sizeof(again));
-        if (WIFEXITED(status) && WEXITSTATUS(status) == 0 && strstr(output, "install: done"))
+        if (WIFEXITED(status) && WEXITSTATUS(status) == 0 && strstr(output, "aximos-install: done"))
             go_to(ui, DONE);
         else
             fail(ui, strstr(output, "sudo: wrong password") ? "That password isn't right."

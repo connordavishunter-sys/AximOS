@@ -47,12 +47,12 @@ static uint64_t total, done;
 static int shown = -1;
 
 static void say(const char *text) {
-    printf("install: %s\n", text);
+    printf("aximos-install: %s\n", text);
     fflush(stdout);
 }
 
 static bool failed(const char *what) {
-    printf("install: %s: %s\n", what, strerror(errno));
+    printf("aximos-install: %s: %s\n", what, strerror(errno));
     return false;
 }
 
@@ -254,7 +254,7 @@ static bool run(char *const argv[], const char *want, char *out, size_t size) {
     }
     fclose(f);
     if (waitpid(pid, &status, 0) != pid || !WIFEXITED(status) || WEXITSTATUS(status)) {
-        printf("install: %s didn't work\n", argv[0]);
+        printf("aximos-install: %s didn't work\n", argv[0]);
         return false;
     }
     return true;
@@ -291,7 +291,7 @@ static void progress(uint64_t bytes) {
     int percent = total ? done * 100 / total : 100;
 
     if (percent != shown) {
-        printf("install: copied %d%%\n", percent > 100 ? 100 : percent);
+        printf("aximos-install: copied %d%%\n", percent > 100 ? 100 : percent);
         fflush(stdout);
         shown = percent;
     }
@@ -564,23 +564,23 @@ static int install(const char *name, const char *how, bool erase, const char *ac
     for (int i = 0; i < n; i++)
         drive = !strcmp(d[i].name, name) ? &d[i] : drive;
     if (!drive) {
-        printf("install: %s isn't a drive it can go on\n", name);
+        printf("aximos-install: %s isn't a drive it can go on\n", name);
         return 1;
     }
     if (again && !drive->aximos[0]) {
-        printf("install: there's no AximOS on %s to install again\n", name);
+        printf("aximos-install: there's no AximOS on %s to install again\n", name);
         return 1;
     }
     if (!again && !whole && strcmp(how, "free")) {
-        printf("install: it goes in free space, on the whole drive, or again over AximOS, not %s\n", how);
+        printf("aximos-install: it goes in free space, on the whole drive, or again over AximOS, not %s\n", how);
         return 1;
     }
     if (!whole && !again && !drive->gpt) {
-        printf("install: %s has no GPT partition table, so no free space it can use\n", name);
+        printf("aximos-install: %s has no GPT partition table, so no free space it can use\n", name);
         return 1;
     }
     if ((whole ? drive->sectors : again ? MIN_MIB * 2048ULL : drive->free) < MIN_MIB * 2048ULL) {
-        printf("install: %s hasn't the %d MiB it needs\n", name, MIN_MIB);
+        printf("aximos-install: %s hasn't the %d MiB it needs\n", name, MIN_MIB);
         return 1;
     }
     snprintf(question, sizeof(question), whole ? "This erases everything on %s."
@@ -624,7 +624,7 @@ static int install(const char *name, const char *how, bool erase, const char *ac
     ok = ok && mount_at(system, SYSTEM, "ext4") && mount_at(esp, ESP, "vfat");
     if (!ok)
         return 1;
-    printf("install: AximOS goes on %s, booting from %s\n", system, esp);
+    printf("aximos-install: AximOS goes on %s, booting from %s\n", system, esp);
 
     // The system, then what boots it
     struct stat root;
@@ -656,8 +656,8 @@ static int install(const char *name, const char *how, bool erase, const char *ac
 }
 
 int main(int argc, char **argv) {
-    help_option(argc, argv, "usage: install [list]\n"
-                            "       install DRIVE free|whole|again [NAME] [--erase] [-y]\n"
+    help_option(argc, argv, "usage: aximos-install [list]\n"
+                            "       aximos-install DRIVE free|whole|again [NAME] [--erase] [-y]\n"
                             "Installs AximOS from the live system onto a drive: in its largest free space,\n"
                             "over the whole drive, or again over the AximOS on it, which keeps its /home\n"
                             "and accounts, unless --erase. It asks for the first account's name, unless\n"
@@ -682,15 +682,15 @@ int main(int argc, char **argv) {
     struct stat root;
 
     if (getuid() != 0) {
-        puts("install: only root can, as with sudo install");
+        puts("aximos-install: only root can, as with sudo aximos-install");
         return 1;
     }
     if (stat("/", &root) == 0 && major(root.st_dev) != 0) {
-        puts("install: installs from the live system, on the USB stick, not from an installed one");
+        puts("aximos-install: installs from the live system, on the USB stick, not from an installed one");
         return 1;
     }
     if (n < 2 || n > 3) {
-        puts("install: try install --help");
+        puts("aximos-install: try aximos-install --help");
         return 1;
     }
     return install(args[0], args[1], erase, args[2]);

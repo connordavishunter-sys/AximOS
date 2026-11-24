@@ -225,6 +225,11 @@ int gui_corner_coverage(int x, int y, int radius);
 #define GUI_CHAR_HEIGHT 16
 void gui_text(struct gui_canvas *canvas, int x, int y, const char *text, uint32_t color, int scale);
 void gui_mono_text(struct gui_canvas *canvas, int x, int y, const char *text, uint32_t color, int scale);
+
+// A character in a terminal's cell, or two for a wide one: box-drawing and block
+// characters drawn to meet their neighbours, others from the monospaced font, its
+// bold, or DejaVu Sans for those it hasn't, and a box for those none has.
+void gui_cell_char(struct gui_canvas *canvas, int x, int y, uint32_t codepoint, int cells, bool bold, uint32_t color);
 int gui_text_width(const char *text, int scale);
 // How many of the first length bytes of text fit in width, at scale 1.
 size_t gui_text_fit(const char *text, size_t length, int width);

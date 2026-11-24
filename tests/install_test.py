@@ -22,13 +22,13 @@ nvme = ['-drive', f'file={drive},format=raw,if=none,id=target', '-device', 'nvme
 def install(v, how, password='newpass'):
     """Runs install as root, answering sudo and, for a new system, the account's password."""
     at = v.mark()
-    v.type(f'sudo install nvme0n1 {how} -y\n')
+    v.type(f'sudo aximos-install nvme0n1 {how} -y\n')
     v.wait('Password for ', 5, at)
     v.type('secret\n')
     if 'again' not in how:
         v.wait('New password', 10, at)
         v.type(f'{password}\n{password}\n')
-    v.wait('install: done', 180, at) or v.wait('$ ', 1, at)
+    v.wait('aximos-install: done', 180, at) or v.wait('$ ', 1, at)
     return v.text(at)
 
 
@@ -45,11 +45,11 @@ def boot_installed():
 v = VM(extra=nvme, efivars=efivars)
 try:
     v.login()
-    out = v.run('install list')
+    out = v.run('aximos-install list')
     check('install lists the drive, with its free space', re.search(r'nvme0n1\t8\.0 GiB\t7\.4 GiB\tfree whole', out), out)
     v.sudo('efiboot add nvme0n1p1 /EFI/other/other.efi Other')
     out = install(v, 'free owner')
-    check('installs in the free space', 'install: done' in out and 'copied 100%' in out, out)
+    check('installs in the free space', 'aximos-install: done' in out and 'copied 100%' in out, out)
     out = v.run('efiboot')
     check('with an entry first in the firmware\'s order', re.search(r'Order +([0-9A-F]{4})', out)
           and re.search(r'\* AximOS +nvme0n1p3 \\EFI\\BOOT\\BOOTX64.EFI', out), out)
@@ -81,7 +81,7 @@ v = VM(extra=nvme, efivars=WORK + '/vars-again.fd')
 try:
     v.login()
     out = install(v, 'again')
-    check('installs again, over itself', 'install: done' in out and 'replaces' not in out, out)
+    check('installs again, over itself', 'aximos-install: done' in out and 'replaces' not in out, out)
 finally:
     v.close()
 

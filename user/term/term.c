@@ -1,3 +1,4 @@
+#include "vt.h"
 #include <aximos.h>
 #include <ctype.h>
 #include <errno.h>
@@ -13,87 +14,45 @@
 #include <unistd.h>
 #include <utmp.h>
 
+// The window: tabs, each a terminal from vt.c with a program on it, drawn in cells,
+// with the scrollback, selecting and copying, finding, and a menu. Keys go to the
+// program as xterm sends them, and the mouse too, when the program asks for it.
+
 #define COLS 80 // to start with
 #define ROWS 25
-#define MAX_COLS 320
-#define MAX_ROWS 200
-#define CELL_WIDTH 8
-#define CELL_HEIGHT 16
+#define CELL_WIDTH GUI_CHAR_WIDTH
+#define CELL_HEIGHT GUI_CHAR_HEIGHT
 #define PADDING 4
-#define TAB_WIDTH 8
-#define MAX_PARAMS 8
-#define PARAM_HIDE_CURSOR 25
-#define SCROLLBACK 1000 // lines kept after scrolling off the top
 #define WHEEL_LINES 3
 #define DRAG_SCROLL_MS 50 // between scrolls while a selection is dragged out of the window
 #define KEY_C 0x2E
 #define KEY_V 0x2F
-
-// The console's colours, then the defaults, which aren't any of them and follow
-// the theme.
-#define BRIGHT 8
-#define DEFAULT_FOREGROUND 16
-#define DEFAULT_BACKGROUND 17
-// How see-through the background is, in its top byte, which wm reads: as much as title bars.
-#define SEE_THROUGH 0x38000000
-static uint32_t palette[18] = {
-    0x000000, 0xCC3333, 0x33AA33, 0xCCAA33, 0x3366CC, 0xAA44AA, 0x33AAAA, 0xC0C0C0,
-    0x666666, 0xFF6666, 0x66DD66, 0xFFDD66, 0x6699FF, 0xDD77DD, 0x66DDDD, 0xFFFFFF,
-    0xD8DEE9, 0x161A22,
-};
-
-struct cell {
-    char c;
-    uint8_t foreground, background;
-};
-
+#define KEY_T 0x14
+#define KEY_W 0x11
+#define KEY_F 0x21
 #define MAX_TABS 8
 #define TAB_BAR 26 // across the top, when there's more than one tab
 #define TAB_WIDTH_MAX 160
 #define MENU_WIDTH 160
 #define MENU_ROW 22
-#define KEY_T 0x14
-#define KEY_W 0x11
-#define KEY_F 0x21
+// How see-through the default background is, in its top byte, which wm reads: as much as title bars.
+#define SEE_THROUGH 0x38000000
 
-// What the mouse has selected, from where it was pressed to where it's been
-// dragged, by line counting from the oldest kept, and column.
-struct place {
-    int line, col;
-};
-
-// Each tab is a shell on a terminal of its own, with what's on its screen, the
-// lines that scrolled off the top, oldest first from history_start, and how many
-// of them the view is scrolled back by.
-struct session {
-    int master;
-    pid_t child;
-    int number; // in the order they were opened, for its name
-    struct cell cells[MAX_ROWS][MAX_COLS];
-    struct cell history[SCROLLBACK][MAX_COLS];
-    int history_start, history_count, view;
-    struct place select_from, select_to;
-    bool selected;
-    int row, col;
-    bool cursor_hidden;
-
-    // What the next character is drawn in, and the escape sequence being read.
-    uint8_t foreground, background;
-    bool bold, reverse;
-    enum { PARSE_TEXT, PARSE_ESCAPE, PARSE_CSI } state;
-    int params[MAX_PARAMS], param_count;
-    bool private_sequence;
+// The console's 16 colours, which the rest of the 256 follow.
+static const uint32_t base_colors[16] = {
+    0x000000, 0xCC3333, 0x33AA33, 0xCCAA33, 0x3366CC, 0xAA44AA, 0x33AAAA, 0xC0C0C0,
+    0x666666, 0xFF6666, 0x66DD66, 0xFFDD66, 0x6699FF, 0xDD77DD, 0x66DDDD, 0xFFFFFF,
 };
 
 static struct gui_window *window;
 static struct session *sessions[MAX_TABS];
-static int session_count, active;
-static struct session *t; // the one being written to, or shown
-static bool dirty[MAX_ROWS]; // rows of the screen to draw again
-static int cols = COLS, rows = ROWS, top = PADDING;
+static int session_count, active, top = PADDING;
 static bool focused, selecting;
 static int drag_x, drag_y; // where the mouse is while selecting
 static long last_press;    // for double clicks
+static uint8_t modifiers;  // held, as the last key said, which mouse events don't
+static int mouse_button = -1; // held, for reporting drags to the program
+static volatile sig_atomic_t dump_asked;
 
 // Over the cells: a menu from a right-click, searching what's kept, and the help.
 static const char *const menu_items[] = {"Copy", "Paste", "New tab", "Find...", "Keyboard shortcuts"};
@@ -111,216 +70,80 @@ static const char *const help[] = {
     "Enter, Shift+Enter   Find older, newer",
     "Shift+Page Up, Down  Scroll back and forth",
     "Double click         Select a word",
+    "Shift+drag           Select, while a program has the mouse",
     "Escape               Close this",
 };
 #define HELP_LINES ((int)(sizeof(help) / sizeof(*help)))
-
-static void set_cell(int r, int c, char ch) {
-    t->cells[r][c] = (struct cell){ch, t->reverse ? t->background : t->foreground, t->reverse ? t->foreground : t->background};
-    dirty[r] = true;
-}
-
-static void clear_cells(int r, int from, int to) {
-    for (int c = from; c < to; c++)
-        t->cells[r][c] = (struct cell){' ', t->foreground, t->background};
-    dirty[r] = true;
-}
-
-static struct cell *history_line(int i) {
-    return t->history[(t->history_start + i) % SCROLLBACK];
-}
-
-static void mark_all_dirty(void) {
-    for (int r = 0; r < rows; r++)
-        dirty[r] = true;
-}
-
-// Keeps a line leaving the top of the screen, losing the oldest when full. A view
-// scrolled back stays on the lines it shows.
-static void keep_line(const struct cell *line) {
-    struct cell *to = history_line(t->history_count);
-
-    if (t->history_count < SCROLLBACK) {
-        t->history_count++;
-    } else {
-        // Every kept line moves up one, and the selection with them.
-        t->history_start = (t->history_start + 1) % SCROLLBACK;
-        t->select_from.line--;
-        t->select_to.line--;
-        t->selected &= t->select_from.line >= 0 && t->select_to.line >= 0;
-    }
-    memcpy(to, line, cols * sizeof(*line));
-    for (int c = cols; c < MAX_COLS; c++)
-        to[c] = (struct cell){' ', DEFAULT_FOREGROUND, DEFAULT_BACKGROUND};
-    if (t->view) {
-        t->view = t->view < t->history_count ? t->view + 1 : t->history_count;
-        mark_all_dirty();
-    }
-}
-
-static void new_line(void) {
-    t->col = 0;
-    if (++t->row < rows)
-        return;
-    t->row = rows - 1;
-    keep_line(t->cells[0]);
-    memmove(t->cells[0], t->cells[1], (rows - 1) * sizeof(t->cells[0]));
-    clear_cells(rows - 1, 0, cols);
-    mark_all_dirty();
-}
 
 static int clamp(int value, int low, int high) {
     return value < low ? low : value > high ? high : value;
 }
 
-static int param_or_one(int index) {
-    return index < t->param_count && t->params[index] > 0 ? t->params[index] : 1;
+static long now_ms(void) {
+    struct timespec now;
+
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return now.tv_sec * 1000 + now.tv_nsec / 1000000;
 }
 
-// Bold shows as the bright version, as the font has no heavier one.
-static void set_graphics(void) {
-    for (int i = 0; i < (t->param_count ? t->param_count : 1); i++) {
-        int p = t->params[i];
+static void write_all(int fd, const char *s, size_t len) {
+    while (len > 0) {
+        ssize_t n = write(fd, s, len);
 
-        if (p == 0) {
-            t->foreground = DEFAULT_FOREGROUND;
-            t->background = DEFAULT_BACKGROUND;
-            t->bold = t->reverse = false;
-        } else if (p == 1 || p == 22) {
-            t->bold = p == 1;
-        } else if (p == 7 || p == 27) {
-            t->reverse = p == 7;
-        } else if (p >= 30 && p <= 37) {
-            t->foreground = p - 30 + (t->bold ? BRIGHT : 0);
-        } else if (p == 39) {
-            t->foreground = DEFAULT_FOREGROUND;
-        } else if (p >= 40 && p <= 47) {
-            t->background = p - 40;
-        } else if (p == 49) {
-            t->background = DEFAULT_BACKGROUND;
-        } else if (p >= 90 && p <= 97) {
-            t->foreground = p - 90 + BRIGHT;
-        } else if (p >= 100 && p <= 107) {
-            t->background = p - 100 + BRIGHT;
-        } else if (p == 38 || p == 48) {
-            return; // what follows says which of the many colours there's no room for
-        }
+        if (n < 0 && errno == EINTR)
+            continue;
+        if (n <= 0)
+            return;
+        s += n;
+        len -= n;
     }
 }
 
-static void run_csi(char final) {
-    int mode = t->param_count > 0 ? t->params[0] : 0;
-
-    dirty[t->row] = true; // where the cursor was
-    if (t->private_sequence) {
-        if (mode == PARAM_HIDE_CURSOR && (final == 'h' || final == 'l'))
-            t->cursor_hidden = final == 'l';
-        return;
-    }
-
-    switch (final) {
-    case 'A':
-        t->row = clamp(t->row - param_or_one(0), 0, rows - 1);
-        break;
-    case 'B':
-        t->row = clamp(t->row + param_or_one(0), 0, rows - 1);
-        break;
-    case 'C':
-        t->col = clamp(t->col + param_or_one(0), 0, cols - 1);
-        break;
-    case 'D':
-        t->col = clamp(t->col - param_or_one(0), 0, cols - 1);
-        break;
-    case 'G':
-        t->col = clamp(param_or_one(0) - 1, 0, cols - 1);
-        break;
-    case 'H':
-    case 'f':
-        t->row = clamp(param_or_one(0) - 1, 0, rows - 1);
-        t->col = clamp(param_or_one(1) - 1, 0, cols - 1);
-        break;
-    case 'J':
-        if (mode == 2) {
-            for (int r = 0; r < rows; r++)
-                clear_cells(r, 0, cols);
-            break;
-        }
-        clear_cells(t->row, t->col, cols);
-        for (int r = t->row + 1; r < rows; r++)
-            clear_cells(r, 0, cols);
-        break;
-    case 'K':
-        clear_cells(t->row, mode == 2 ? 0 : mode == 1 ? 0 : t->col, mode == 1 ? t->col + 1 : cols);
-        break;
-    case 'm':
-        set_graphics();
-        break;
-    }
+static size_t utf8(uint32_t cp, char *out) {
+    if (cp < 0x80)
+        return out[0] = (char)cp, 1;
+    if (cp < 0x800)
+        return out[0] = (char)(0xC0 | cp >> 6), out[1] = (char)(0x80 | (cp & 0x3F)), 2;
+    if (cp < 0x10000)
+        return out[0] = (char)(0xE0 | cp >> 12), out[1] = (char)(0x80 | (cp >> 6 & 0x3F)), out[2] = (char)(0x80 | (cp & 0x3F)), 3;
+    out[0] = (char)(0xF0 | cp >> 18), out[1] = (char)(0x80 | (cp >> 12 & 0x3F)), out[2] = (char)(0x80 | (cp >> 6 & 0x3F));
+    out[3] = (char)(0x80 | (cp & 0x3F));
+    return 4;
 }
 
-static void put_text(char c) {
-    dirty[t->row] = true;
-    switch (c) {
-    case '\n':
-        new_line();
-        return;
-    case '\r':
-        t->col = 0;
-        return;
-    case '\b':
-        if (t->col > 0)
-            t->col--;
-        return;
-    case '\t':
-        do {
-            set_cell(t->row, t->col, ' ');
-            if (++t->col == cols)
-                new_line();
-        } while (t->col % TAB_WIDTH != 0);
-        return;
-    case '\a':
-        return;
-    case '\x1b':
-        t->state = PARSE_ESCAPE;
-        return;
-    }
+// --- Colours ---
 
-    // Other control characters and non-ASCII bytes have no glyph here.
-    set_cell(t->row, t->col, (uint8_t)c >= 0x20 && (uint8_t)c < 0x7F ? c : '?');
-    if (++t->col == cols)
-        new_line();
+// The 16, then a 6 by 6 by 6 cube, then 24 greys, as xterm's 256.
+static void make_colors(void) {
+    static const uint8_t level[6] = {0, 95, 135, 175, 215, 255};
+
+    memcpy(colors, base_colors, sizeof(base_colors));
+    for (int i = 0; i < 216; i++)
+        colors[16 + i] = level[i / 36] << 16 | level[i / 6 % 6] << 8 | level[i % 6];
+    for (int i = 0; i < 24; i++)
+        colors[232 + i] = (8 + i * 10) * 0x010101;
 }
 
-static void put_byte(char c) {
-    switch (t->state) {
-    case PARSE_TEXT:
-        put_text(c);
-        break;
-    case PARSE_ESCAPE:
-        t->state = c == '[' ? PARSE_CSI : PARSE_TEXT;
-        t->param_count = 0;
-        t->private_sequence = false;
-        memset(t->params, 0, sizeof(t->params));
-        break;
-    case PARSE_CSI:
-        if (c == '?') {
-            t->private_sequence = true;
-        } else if (c >= '0' && c <= '9') {
-            if (t->param_count == 0)
-                t->param_count = 1;
-            t->params[t->param_count - 1] = t->params[t->param_count - 1] * 10 + (c - '0');
-        } else if (c == ';') {
-            if (t->param_count == 0)
-                t->param_count = 1;
-            if (t->param_count < MAX_PARAMS)
-                t->param_count++;
-        } else {
-            run_csi(c);
-            t->state = PARSE_TEXT;
-        }
-        break;
-    }
+static uint32_t resolve(uint32_t color, bool is_fg, bool bold) {
+    if (color == COLOR_DEFAULT)
+        return is_fg ? default_fg : default_bg;
+    if ((color & 0xFF000000) == COLOR_RGB)
+        return color & 0xFFFFFF;
+
+    int index = color & 0xFF;
+
+    return colors[is_fg && bold && index < 8 ? index + 8 : index]; // bold shows brighter, as on the console
 }
+
+static void use_theme(void) {
+    struct gui_settings settings;
+
+    gui_settings_load(&settings);
+    default_fg = settings.light ? 0x1E2129 : 0xD8DEE9;
+    default_bg = SEE_THROUGH | (settings.light ? 0xFAFAFA : 0x161A22);
+}
+
+// --- Drawing ---
 
 // A line counting from the oldest kept, through the scrollback and onto the screen.
 static const struct cell *line_cells(int line) {
@@ -343,24 +166,43 @@ static bool is_selected(int line, int c) {
 }
 
 static void draw_cell(int r, int c) {
-    struct cell cell = line_cells(shown_line(r))[c];
-    bool cursor = r - t->view == t->row && c == t->col && !t->cursor_hidden;
-    uint32_t fg = palette[cell.foreground], bg = palette[cell.background];
-    int x = PADDING + c * CELL_WIDTH, y = top + r * CELL_HEIGHT;
+    const struct cell *line = line_cells(shown_line(r));
+    struct cell cell = line[c];
+    uint32_t ch = cell.ch & CH_MASK;
+    bool wide = cell.ch & ATTR_WIDE, bold = cell.ch & ATTR_BOLD;
+    bool cursor = r - t->view == t->row && c == t->col && !t->cursor_hidden && !t->view;
+    uint32_t fg = resolve(cell.fg, true, bold), bg = resolve(cell.bg, false, false);
+    int x = PADDING + c * CELL_WIDTH, y = top + r * CELL_HEIGHT, width = (wide && c + 1 < cols ? 2 : 1) * CELL_WIDTH;
 
+    if (!ch && c > 0 && line[c - 1].ch & ATTR_WIDE)
+        return; // the second half of a wide character, drawn with the first
+    if (cell.ch & ATTR_REVERSE) {
+        uint32_t swap = fg;
+
+        fg = bg & 0xFFFFFF, bg = swap;
+    }
+    if (cell.bg != COLOR_DEFAULT || cell.ch & ATTR_REVERSE)
+        bg &= 0xFFFFFF; // only the default background is see-through
     // A solid block when focused, an outline when not, and what's selected reversed.
     if ((cursor && focused) != is_selected(shown_line(r), c)) {
         uint32_t swap = fg;
-        fg = bg;
-        bg = swap;
+
+        fg = bg & 0xFFFFFF, bg = swap;
     }
-    gui_fill(&window->canvas, x, y, CELL_WIDTH, CELL_HEIGHT, bg);
-    gui_mono_text(&window->canvas, x, y, (char[]){(char)(cell.c & 0x7F), '\0'}, fg, 1);
+    if (cell.ch & ATTR_DIM)
+        fg = gui_mix(fg, bg, 110);
+    gui_fill(&window->canvas, x, y, width, CELL_HEIGHT, bg);
+    if (!(cell.ch & ATTR_HIDDEN))
+        gui_cell_char(&window->canvas, x, y, ch, width / CELL_WIDTH, bold, fg);
+    if (cell.ch & ATTR_UNDERLINE)
+        gui_fill(&window->canvas, x, y + CELL_HEIGHT - 2, width, 1, fg);
+    if (cell.ch & ATTR_STRIKE)
+        gui_fill(&window->canvas, x, y + CELL_HEIGHT / 2, width, 1, fg);
     if (cursor && !focused) {
-        gui_fill(&window->canvas, x, y, CELL_WIDTH, 1, fg);
-        gui_fill(&window->canvas, x, y + CELL_HEIGHT - 1, CELL_WIDTH, 1, fg);
+        gui_fill(&window->canvas, x, y, width, 1, fg);
+        gui_fill(&window->canvas, x, y + CELL_HEIGHT - 1, width, 1, fg);
         gui_fill(&window->canvas, x, y, 1, CELL_HEIGHT, fg);
-        gui_fill(&window->canvas, x + CELL_WIDTH - 1, y, 1, CELL_HEIGHT, fg);
+        gui_fill(&window->canvas, x + width - 1, y, 1, CELL_HEIGHT, fg);
     }
 }
 
@@ -368,15 +210,15 @@ static void draw_cell(int r, int c) {
 static void draw_scrollbar(void) {
     int x = window->canvas.width - PADDING, height = window->canvas.height - top + PADDING, total = t->history_count + rows;
 
-    gui_fill(&window->canvas, x, top - PADDING, PADDING, height, palette[DEFAULT_BACKGROUND]);
+    gui_fill(&window->canvas, x, top - PADDING, PADDING, height, default_bg);
     if (t->view)
         gui_fill(&window->canvas, x + 1, top - PADDING + (t->history_count - t->view) * height / total, PADDING - 2,
-                 rows * height / total, palette[BRIGHT]);
+                 rows * height / total, colors[8]);
     gui_update(window, x, top - PADDING, PADDING, height);
 }
 
 static uint32_t panel_colour(void) {
-    return (palette[DEFAULT_BACKGROUND] & 0xFFFFFF) == 0x161A22 ? 0x2B303B : 0xE2E5EB;
+    return (default_bg & 0xFFFFFF) == 0x161A22 ? 0x2B303B : 0xE2E5EB;
 }
 
 static void box_text(int x, int y, const char *s, uint32_t colour) {
@@ -390,6 +232,19 @@ static int tab_width(void) {
     return w < TAB_WIDTH_MAX ? w : TAB_WIDTH_MAX;
 }
 
+static void tab_name(const struct session *s, char *out, size_t size, int fits) {
+    char ascii[sizeof(s->title)];
+    size_t n = 0;
+
+    for (const char *p = s->title; *p && n < sizeof(ascii) - 1; p++) // the bitmap-wide font's tab text is ASCII
+        ascii[n++] = (unsigned char)*p < 0x80 ? *p : '?';
+    ascii[n] = '\0';
+    if (n)
+        snprintf(out, size, "%.*s", fits > 0 ? fits : 0, ascii);
+    else
+        snprintf(out, size, "Shell %d", s->number);
+}
+
 static void draw_tabs(void) {
     struct gui_canvas *c = &window->canvas;
     int w = tab_width();
@@ -398,13 +253,13 @@ static void draw_tabs(void) {
         return;
     gui_fill(c, 0, 0, c->width, TAB_BAR, panel_colour());
     for (int i = 0; i < session_count; i++) {
-        char name[32];
+        char name[64];
 
-        snprintf(name, sizeof(name), "Shell %d", sessions[i]->number);
+        tab_name(sessions[i], name, sizeof(name), (w - 30) / CELL_WIDTH);
         if (i == active)
-            gui_fill(c, 4 + i * w, 4, w - 2, TAB_BAR - 4, palette[DEFAULT_BACKGROUND]);
-        box_text(4 + i * w + 8, 6, name, i == active ? palette[DEFAULT_FOREGROUND] : palette[BRIGHT]);
-        box_text(4 + (i + 1) * w - 18, 6, "x", palette[BRIGHT]);
+            gui_fill(c, 4 + i * w, 4, w - 2, TAB_BAR - 4, default_bg);
+        box_text(4 + i * w + 8, 6, name, i == active ? default_fg : colors[8]);
+        box_text(4 + (i + 1) * w - 18, 6, "x", colors[8]);
     }
     gui_update(window, 0, 0, c->width, TAB_BAR);
 }
@@ -417,24 +272,24 @@ static void draw_search(void) {
 
     snprintf(line, sizeof(line), "Find: %s_  %s", query, search_status);
     gui_fill(c, 0, y, c->width, CELL_HEIGHT + 8, panel_colour());
-    box_text(PADDING + 4, y + 4, line, palette[DEFAULT_FOREGROUND]);
+    box_text(PADDING + 4, y + 4, line, default_fg);
     gui_update(window, 0, y, c->width, CELL_HEIGHT + 8);
 }
 
 static void draw_menu(void) {
     gui_fill(&window->canvas, menu_x, menu_y, MENU_WIDTH, MENU_ITEMS * MENU_ROW + 8, panel_colour());
     for (int i = 0; i < MENU_ITEMS; i++)
-        box_text(menu_x + 10, menu_y + 4 + i * MENU_ROW + 3, menu_items[i], palette[DEFAULT_FOREGROUND]);
+        box_text(menu_x + 10, menu_y + 4 + i * MENU_ROW + 3, menu_items[i], default_fg);
     gui_update(window, menu_x, menu_y, MENU_WIDTH, MENU_ITEMS * MENU_ROW + 8);
 }
 
 static void draw_help(void) {
-    int w = 40 * CELL_WIDTH + 32, h = HELP_LINES * CELL_HEIGHT + 32;
+    int w = 54 * CELL_WIDTH + 32, h = HELP_LINES * CELL_HEIGHT + 32;
     int x = (window->canvas.width - w) / 2, y = (window->canvas.height - h) / 2;
 
     gui_fill(&window->canvas, x, y, w, h, panel_colour());
     for (int i = 0; i < HELP_LINES; i++)
-        box_text(x + 16, y + 16 + i * CELL_HEIGHT, help[i], palette[DEFAULT_FOREGROUND]);
+        box_text(x + 16, y + 16 + i * CELL_HEIGHT, help[i], default_fg);
     gui_update(window, x, y, w, h);
 }
 
@@ -474,82 +329,171 @@ static void draw(void) {
     draw_over();
 }
 
-static void write_all(int fd, const char *s, size_t len) {
-    while (len > 0) {
-        ssize_t n = write(fd, s, len);
-
-        if (n < 0 && errno == EINTR)
-            continue;
-        if (n <= 0)
-            return;
-        s += n;
-        len -= n;
+void vt_title_changed(void) {
+    if (window && t == sessions[active]) {
+        gui_set_title(window, t->title[0] ? t->title : "Terminal");
+        draw_tabs();
     }
 }
 
-// What a key sends, as the console's keyboard would. Alt adds an escape first.
-// Returns whether it sent anything.
+// For the tests: the active tab's screen, its text a row a line, and where the cursor is.
+static void dump_screen(void) {
+    printf("term: screen %dx%d cursor %d %d%s\n", cols, rows, t->row, t->col, t->alternate_screen ? " alternate" : "");
+    for (int r = 0; r < rows; r++) {
+        char line[MAX_COLS * 4 + 1];
+        size_t n = 0, end = 0;
+
+        for (int c = 0; c < cols; c++) {
+            uint32_t ch = t->cells[r][c].ch & CH_MASK;
+
+            if (!ch)
+                continue; // the second half of a wide character
+            n += utf8(ch, line + n);
+            if (ch != ' ')
+                end = n;
+        }
+        line[end] = '\0';
+        printf("term: row %d %s\n", r, line);
+    }
+    fflush(stdout);
+}
+
+// --- Keys, the mouse and pasting, to the program ---
+
+// xterm's modifier number: 1, and 1 for Shift, 2 for Alt and 4 for Ctrl.
+static int modifier_number(uint8_t m) {
+    return 1 + (m & KEY_MOD_SHIFT ? 1 : 0) + (m & KEY_MOD_ALT ? 2 : 0) + (m & KEY_MOD_CTRL ? 4 : 0);
+}
+
+// What a key sends, as xterm sends it. Alt adds an escape first. Returns whether it sent anything.
 static bool send_key(int master, const struct key_event *key) {
-    const char *sequence = NULL;
-    char text = key->text;
+    static const struct { uint16_t code; char final; int number; } special[] = {
+        {KEY_UP, 'A', 0}, {KEY_DOWN, 'B', 0}, {KEY_RIGHT, 'C', 0}, {KEY_LEFT, 'D', 0}, {KEY_HOME, 'H', 0},
+        {KEY_END, 'F', 0}, {KEY_INSERT, '~', 2}, {KEY_DELETE, '~', 3}, {KEY_PAGE_UP, '~', 5}, {KEY_PAGE_DOWN, '~', 6},
+        {KEY_F1, 'P', 0}, {KEY_F1 + 1, 'Q', 0}, {KEY_F1 + 2, 'R', 0}, {KEY_F1 + 3, 'S', 0}, {KEY_F1 + 4, '~', 15},
+        {KEY_F1 + 5, '~', 17}, {KEY_F1 + 6, '~', 18}, {KEY_F1 + 7, '~', 19}, {KEY_F1 + 8, '~', 20}, {KEY_F10, '~', 21},
+        {KEY_F11, '~', 23}, {KEY_F12, '~', 24},
+    };
+    int m = modifier_number(key->modifiers);
+    char out[32] = "";
 
-    switch (key->code) {
-    case KEY_UP: sequence = "\x1b[A"; break;
-    case KEY_DOWN: sequence = "\x1b[B"; break;
-    case KEY_RIGHT: sequence = key->modifiers & KEY_MOD_CTRL ? "\x1b[1;5C" : "\x1b[C"; break;
-    case KEY_LEFT: sequence = key->modifiers & KEY_MOD_CTRL ? "\x1b[1;5D" : "\x1b[D"; break;
-    case KEY_HOME: sequence = "\x1b[H"; break;
-    case KEY_END: sequence = "\x1b[F"; break;
-    case KEY_INSERT: sequence = "\x1b[2~"; break;
-    case KEY_DELETE: sequence = "\x1b[3~"; break;
-    case KEY_PAGE_UP: sequence = "\x1b[5~"; break;
-    case KEY_PAGE_DOWN: sequence = "\x1b[6~"; break;
+    for (size_t i = 0; i < sizeof(special) / sizeof(special[0]); i++) {
+        if (key->code != special[i].code)
+            continue;
+
+        bool ss3 = special[i].final >= 'P' && special[i].final <= 'S';
+
+        if (special[i].number)
+            snprintf(out, sizeof(out), m > 1 ? "\x1b[%d;%d~" : "\x1b[%d~", special[i].number, m);
+        else if (m > 1)
+            snprintf(out, sizeof(out), "\x1b[1;%d%c", m, special[i].final);
+        else
+            snprintf(out, sizeof(out), "\x1b%c%c", ss3 || (t->app_cursor && special[i].final <= 'H') ? 'O' : '[',
+                     special[i].final);
+        write_all(master, out, strlen(out));
+        return true;
     }
-    if (sequence) {
-        write_all(master, sequence, strlen(sequence));
-    } else if (text) {
-        if (key->modifiers & KEY_MOD_ALT)
-            write_all(master, "\x1b", 1);
-        write_all(master, &text, 1);
-    }
-    return sequence || text;
+
+    char text = (char)key->text;
+
+    if (key->code == KEY_TAB && key->modifiers & KEY_MOD_SHIFT)
+        snprintf(out, sizeof(out), "\x1b[Z");
+    else if (key->code == KEY_BACKSPACE)
+        snprintf(out, sizeof(out), "%s%c", key->modifiers & KEY_MOD_ALT ? "\x1b" : "", key->modifiers & KEY_MOD_CTRL ? 0x08 : 0x7F);
+    else if (key->code == KEY_SPACE && key->modifiers & KEY_MOD_CTRL)
+        write_all(master, "", 1); // NUL
+    else if (text)
+        snprintf(out, sizeof(out), "%s%c", key->modifiers & KEY_MOD_ALT ? "\x1b" : "", text);
+    write_all(master, out, strlen(out));
+    return out[0] || (key->code == KEY_SPACE && key->modifiers & KEY_MOD_CTRL);
 }
 
-static void use_theme(void) {
-    struct gui_settings settings;
+// A mouse report, in SGR's form if the program asked, else the old one.
+static void report_mouse(int button, int col, int row, bool release, bool motion) {
+    char out[32];
+    int b = button | (motion ? 32 : 0) | (modifiers & KEY_MOD_SHIFT ? 4 : 0) | (modifiers & KEY_MOD_ALT ? 8 : 0)
+          | (modifiers & KEY_MOD_CTRL ? 16 : 0);
 
-    gui_settings_load(&settings);
-    palette[DEFAULT_FOREGROUND] = settings.light ? 0x1E2129 : 0xD8DEE9;
-    palette[DEFAULT_BACKGROUND] = SEE_THROUGH | (settings.light ? 0xFAFAFA : 0x161A22);
+    if (t->mouse_sgr)
+        snprintf(out, sizeof(out), "\x1b[<%d;%d;%d%c", b, col + 1, row + 1, release ? 'm' : 'M');
+    else
+        snprintf(out, sizeof(out), "\x1b[M%c%c%c", 32 + (release ? 3 : b), 32 + clamp(col + 1, 1, 223),
+                 32 + clamp(row + 1, 1, 223));
+    write_all(t->master, out, strlen(out));
 }
 
-static void paint_background(void);
+// Whether the mouse goes to the program, which asks for it, unless Shift's held to select.
+static bool program_has_mouse(const struct gui_message *e) {
+    if (!t->mouse || modifiers & KEY_MOD_SHIFT || e->y < top || t->view)
+        return false;
+
+    int col = clamp((e->x - PADDING) / CELL_WIDTH, 0, cols - 1), row = clamp((e->y - top) / CELL_HEIGHT, 0, rows - 1);
+
+    if (e->type == GUI_MOUSE_BUTTON) {
+        for (int b = 0; b < 3; b++) {
+            static const int numbers[3] = {0, 2, 1}; // left, right, middle as gui has them, to xterm's
+            if (e->changed & 1u << b) {
+                bool down = e->buttons & 1u << b;
+
+                mouse_button = down ? numbers[b] : -1;
+                report_mouse(numbers[b], col, row, !down, false);
+            }
+        }
+    } else if (e->type == GUI_MOUSE_MOVE && (t->mouse == 1003 || (t->mouse == 1002 && mouse_button >= 0))) {
+        report_mouse(mouse_button >= 0 ? mouse_button : 3, col, row, false, true);
+    } else if (e->type == GUI_MOUSE_WHEEL) {
+        for (int i = 0; i < (e->wheel < 0 ? -e->wheel : e->wheel); i++)
+            report_mouse(e->wheel < 0 ? 64 : 65, col, row, false, false);
+    }
+    return true;
+}
 
 static void scroll_view(int lines) {
     t->view = clamp(t->view + lines, 0, t->history_count);
     mark_all_dirty();
 }
 
-// The cell under a point in the window.
-static struct place place_at(int x, int y) {
-    return (struct place){shown_line(clamp((y - top) / CELL_HEIGHT, 0, rows - 1)),
-                          clamp((x - PADDING) / CELL_WIDTH, 0, cols - 1)};
+// Pasting types what's on the clipboard, with Enter for each line break, marked as
+// pasted if the program asked.
+static void paste(int master) {
+    size_t length;
+    char *text = gui_clipboard_get(&length);
+
+    if (!text)
+        return;
+    for (size_t i = 0; i < length; i++)
+        text[i] = text[i] == '\n' ? '\r' : text[i];
+    if (t->bracketed_paste)
+        write_all(master, "\x1b[200~", 6);
+    write_all(master, text, length);
+    if (t->bracketed_paste)
+        write_all(master, "\x1b[201~", 6);
+    free(text);
 }
 
-static long now_ms(void);
+// --- Selecting ---
+
+// The cell under a point in the window.
+static struct place place_at(int x, int y) {
+    return (struct place){shown_line(clamp((y - top) / CELL_HEIGHT, 0, rows - 1)), clamp((x - PADDING) / CELL_WIDTH, 0, cols - 1)};
+}
+
+static bool is_space(const struct cell *c) {
+    return (c->ch & CH_MASK) == ' ';
+}
 
 // Selects the word at a place: the run of characters there that aren't spaces.
 static void select_word(struct place p) {
     const struct cell *line = line_cells(p.line);
     int from = p.col, to = p.col;
 
-    while (from > 0 && line[from - 1].c != ' ')
+    while (from > 0 && !is_space(&line[from - 1]))
         from--;
-    while (to < cols - 1 && line[to + 1].c != ' ')
+    while (to < cols - 1 && !is_space(&line[to + 1]))
         to++;
     t->select_from = (struct place){p.line, from};
     t->select_to = (struct place){p.line, to};
-    t->selected = line[p.col].c != ' ';
+    t->selected = !is_space(&line[p.col]);
 }
 
 // The mouse selects by dragging, or a word with a double click. A click on its own
@@ -589,13 +533,6 @@ static int drag_lines(void) {
     return 0;
 }
 
-static long now_ms(void) {
-    struct timespec now;
-
-    clock_gettime(CLOCK_MONOTONIC, &now);
-    return now.tv_sec * 1000 + now.tv_nsec / 1000000;
-}
-
 // Scrolls every DRAG_SCROLL_MS while the selection is dragged out of the window,
 // taking the selection along, and returns how long until the next scroll, or -1.
 static int drag_scroll(void) {
@@ -618,7 +555,7 @@ static int drag_scroll(void) {
 static void copy_selection(void) {
     struct place from = order(t->select_from) < order(t->select_to) ? t->select_from : t->select_to;
     struct place to = order(t->select_from) < order(t->select_to) ? t->select_to : t->select_from;
-    char *text = t->selected ? malloc((size_t)(to.line - from.line + 1) * (MAX_COLS + 1)) : NULL;
+    char *text = t->selected ? malloc((size_t)(to.line - from.line + 1) * (MAX_COLS * 4 + 1)) : NULL;
     size_t length = 0;
 
     if (!text)
@@ -627,10 +564,12 @@ static void copy_selection(void) {
         const struct cell *cells_of = line_cells(line);
         int first = line == from.line ? from.col : 0, last = line == to.line ? to.col : cols - 1;
 
-        while (last >= first && cells_of[last].c == ' ')
+        while (last >= first && is_space(&cells_of[last]))
             last--;
-        for (int c = first; c <= last; c++)
-            text[length++] = cells_of[c].c;
+        for (int c = first; c <= last; c++) {
+            if (cells_of[c].ch & CH_MASK)
+                length += utf8(cells_of[c].ch & CH_MASK, text + length);
+        }
         if (line < to.line)
             text[length++] = '\n';
     }
@@ -638,29 +577,22 @@ static void copy_selection(void) {
     free(text);
 }
 
-// Pasting types what's on the clipboard, with Enter for each line break.
-static void paste(int master) {
-    size_t length;
-    char *text = gui_clipboard_get(&length);
+// --- Tabs and the window ---
 
-    if (!text)
-        return;
-    for (size_t i = 0; i < length; i++)
-        text[i] = text[i] == '\n' ? '\r' : text[i];
-    write_all(master, text, length);
-    free(text);
-}
+static void paint_background(void);
 
 // Fits as many cells as the new size holds, keeping the cursor's line on the
 // screen, and tells the programs on the terminal.
 static void fit(struct session *s, int new_cols, int new_rows) {
+    struct session *was = t;
     int lost = s->row - (new_rows - 1);
 
     t = s;
     if (lost > 0) {
-        for (int r = 0; r < lost; r++)
-            keep_line(s->cells[r]);
-        memmove(s->cells[0], s->cells[lost], (rows - lost) * sizeof(s->cells[0]));
+        for (int r = 0; r < lost && !s->alternate_screen; r++)
+            keep_line(s->primary[r]);
+        memmove(s->primary[0], s->primary[lost], (rows - lost) * sizeof(s->primary[0]));
+        memmove(s->alternate[0], s->alternate[lost], (rows - lost) * sizeof(s->alternate[0]));
         s->row -= lost;
     }
 
@@ -669,15 +601,19 @@ static void fit(struct session *s, int new_cols, int new_rows) {
 
     for (int r = 0; r < new_rows; r++) {
         for (int c = r < kept ? cols : 0; c < new_cols; c++)
-            s->cells[r][c] = (struct cell){' ', DEFAULT_FOREGROUND, DEFAULT_BACKGROUND};
+            s->primary[r][c] = s->alternate[r][c] = (struct cell){' ', COLOR_DEFAULT, COLOR_DEFAULT};
     }
     s->col = clamp(s->col, 0, new_cols - 1);
     s->view = clamp(s->view, 0, s->history_count);
+    s->top = 0;
+    s->bottom = new_rows - 1;
+    s->wrap_next = false;
 
     struct winsize size = {.ws_row = new_rows, .ws_col = new_cols, .ws_xpixel = new_cols * CELL_WIDTH,
                            .ws_ypixel = new_rows * CELL_HEIGHT};
 
     ioctl(s->master, TIOCSWINSZ, &size);
+    t = was;
 }
 
 // Lays the window out again: the tab bar if there's more than one tab, and every
@@ -709,7 +645,7 @@ static void resize(int width, int height) {
 }
 
 static void paint_background(void) {
-    gui_fill(&window->canvas, 0, 0, window->canvas.width, window->canvas.height, palette[DEFAULT_BACKGROUND]);
+    gui_fill(&window->canvas, 0, 0, window->canvas.width, window->canvas.height, default_bg);
     draw_tabs();
     mark_all_dirty();
 }
@@ -733,6 +669,8 @@ static bool new_session(char **command) {
         for (int i = 0; i < session_count; i++)
             close(sessions[i]->master);
         login_tty(slave);
+        setenv("TERM", "xterm-256color", 1); // what it is, which programs find in terminfo
+        setenv("COLORTERM", "truecolor", 1);
         if (command && *command)
             execvp(command[0], command);
         else { // the account's shell, as a login shell, so it reads /etc/profile
@@ -746,13 +684,10 @@ static bool new_session(char **command) {
     }
     close(slave);
     s->number = ++opened;
-    s->foreground = DEFAULT_FOREGROUND;
-    s->background = DEFAULT_BACKGROUND;
-    t = s;
-    for (int r = 0; r < MAX_ROWS; r++)
-        clear_cells(r, 0, MAX_COLS);
+    vt_init(s);
     sessions[session_count++] = s;
     active = session_count - 1;
+    t = s;
     printf("term: tab %d of %d\n", active + 1, session_count);
     fflush(stdout);
     if (window)
@@ -766,6 +701,7 @@ static void switch_to(int index) {
     searching = false;
     printf("term: tab %d of %d\n", active + 1, session_count);
     fflush(stdout);
+    vt_title_changed();
     paint_background();
     draw();
     draw_scrollbar();
@@ -784,11 +720,13 @@ static void close_session(int index) {
     active = active > index || active == session_count ? active - 1 : active;
     printf("term: tab %d of %d\n", active + 1, session_count);
     fflush(stdout);
+    t = sessions[active];
+    vt_title_changed();
     layout();
 }
 
 // Searches what's kept for the query, from the line before or after the last found,
-// going older or newer, and shows it selected.
+// going older or newer, and shows it selected. Only ASCII is matched without case.
 static void find(bool older) {
     int total = t->history_count + rows, step = older ? -1 : 1;
     int from = found_line >= 0 && found_line < total ? found_line + step : older ? total - 1 : 0;
@@ -800,7 +738,8 @@ static void find(bool older) {
         for (int c = 0; c + (int)length <= cols; c++) {
             size_t i = 0;
 
-            while (i < length && tolower((unsigned char)cells_of[c + i].c) == tolower((unsigned char)query[i]))
+            while (i < length && (cells_of[c + i].ch & CH_MASK) < 0x80
+                   && tolower((int)(cells_of[c + i].ch & CH_MASK)) == tolower((unsigned char)query[i]))
                 i++;
             if (i < length)
                 continue;
@@ -888,12 +827,6 @@ static bool mouse_over(const struct gui_message *e) {
         close_over();
         return true;
     }
-    if (right) {
-        menu_x = clamp(e->x, 0, window->canvas.width - MENU_WIDTH);
-        menu_y = clamp(e->y, 0, window->canvas.height - MENU_ITEMS * MENU_ROW - 8);
-        menu_open = true;
-        return true;
-    }
     if (pressed && session_count > 1 && e->y < TAB_BAR) {
         int i = (e->x - 4) / tab_width();
 
@@ -903,10 +836,18 @@ static bool mouse_over(const struct gui_message *e) {
             switch_to(i);
         return true;
     }
+    if (program_has_mouse(e))
+        return true;
+    if (right) {
+        menu_x = clamp(e->x, 0, window->canvas.width - MENU_WIDTH);
+        menu_y = clamp(e->y, 0, window->canvas.height - MENU_ITEMS * MENU_ROW - 8);
+        menu_open = true;
+        return true;
+    }
     return e->type == GUI_MOUSE_BUTTON && e->y < top - PADDING && !selecting;
 }
 
-// Keys for the window rather than the shell: copying and pasting, tabs and finding.
+// Keys for the window rather than the program: copying and pasting, tabs and finding.
 static bool window_key(const struct key_event *k) {
     bool shifted = k->modifiers & KEY_MOD_SHIFT, ctrl = k->modifiers & KEY_MOD_CTRL;
 
@@ -931,20 +872,35 @@ static bool window_key(const struct key_event *k) {
         start_search();
     else if (ctrl && (k->code == KEY_TAB || k->code == KEY_PAGE_DOWN || k->code == KEY_PAGE_UP))
         switch_to(active + (k->code == KEY_PAGE_UP || (k->code == KEY_TAB && shifted) ? -1 : 1));
-    else if (shifted && (k->code == KEY_PAGE_UP || k->code == KEY_PAGE_DOWN))
+    else if (shifted && !t->alternate_screen && (k->code == KEY_PAGE_UP || k->code == KEY_PAGE_DOWN))
         scroll_view((k->code == KEY_PAGE_UP ? 1 : -1) * (rows > 1 ? rows - 1 : 1));
     else
         return false;
     return true;
 }
 
+static void dump_signal(int signal) {
+    (void)signal;
+    dump_asked = 1;
+}
+
 int main(int argc, char **argv) {
     help_option(argc, argv, "usage: term [command [argument]...]\n"
-                            "Opens a terminal window running the shell, or the command.\n");
+                            "Opens a terminal window running the shell, or the command. It's an xterm to\n"
+                            "programs, TERM=xterm-256color. SIGUSR1 has it print its screen, for tests.\n");
     if (!gui_connect()) {
         dprintf(STDERR_FILENO, "term: wm isn't running\n");
         return 1;
     }
+    sigset_t blocked, waiting;
+
+    make_colors();
+    use_theme();
+    // SIGUSR1 comes only while waiting, so asking can't slip in after it's looked for.
+    signal(SIGUSR1, dump_signal);
+    sigemptyset(&blocked);
+    sigaddset(&blocked, SIGUSR1);
+    sigprocmask(SIG_BLOCK, &blocked, &waiting);
     if (!new_session(argv + 1)) {
         dprintf(STDERR_FILENO, "term: %s\n", strerror(errno));
         return 1;
@@ -956,12 +912,11 @@ int main(int argc, char **argv) {
     }
     gui_set_cursor(window, GUI_CURSOR_TEXT);
     gui_set_translucent(window, true);
-    use_theme();
     layout();
 
     while (session_count) {
         struct pollfd fds[1 + MAX_TABS] = {{.fd = gui_fd(), .events = POLLIN}};
-        char buf[4096];
+        char buf[16384];
         int count = session_count;
 
         for (int i = 0; i < count; i++)
@@ -970,10 +925,19 @@ int main(int argc, char **argv) {
         int timeout = drag_scroll();
 
         draw(); // what came last time round, and any scrolling
-        if (poll(fds, 1 + count, timeout) < 0 && errno != EINTR)
-            break;
+        if (dump_asked) {
+            dump_asked = 0;
+            dump_screen();
+        }
+        struct timespec wait = {timeout / 1000, timeout % 1000 * 1000000L};
 
-        // Each shell's output, and its tab closing when everything on its terminal has exited.
+        if (ppoll(fds, 1 + count, timeout < 0 ? NULL : &wait, &waiting) < 0 && errno != EINTR)
+            break;
+        if (dump_asked)
+            continue; // to print it, at the top
+
+
+        // Each program's output, and its tab closing when everything on its terminal has exited.
         for (int i = count - 1; i >= 0; i--) {
             if (!(fds[1 + i].revents & (POLLIN | POLLHUP)))
                 continue;
@@ -981,8 +945,9 @@ int main(int argc, char **argv) {
             ssize_t n = read(sessions[i]->master, buf, sizeof(buf));
 
             t = sessions[i];
-            for (ssize_t j = 0; j < n; j++)
-                put_byte(buf[j]);
+            dirty[t->row] = i == active; // where the cursor was
+            if (n > 0)
+                vt_write(buf, (size_t)n);
             if (i == active)
                 dirty[t->row] = true; // where the cursor is now
             t = sessions[active];
@@ -998,19 +963,28 @@ int main(int argc, char **argv) {
         struct gui_message e;
 
         if ((fds[0].revents & (POLLIN | POLLHUP)) && gui_next_event(&e)) {
-            // Keys go to the shell, taking the view back to the bottom, unless
+            // Keys go to the program, taking the view back to the bottom, unless
             // they're the window's.
-            if (e.type == GUI_KEY && e.key.pressed && !window_key(&e.key)) {
-                if (send_key(t->master, &e.key) && t->view)
+            if (e.type == GUI_KEY) {
+                modifiers = e.key.modifiers;
+                if (e.key.pressed && !window_key(&e.key) && send_key(t->master, &e.key) && t->view)
                     scroll_view(-t->view);
             } else if (e.type == GUI_MOUSE_MOVE || e.type == GUI_MOUSE_BUTTON) {
                 if (!mouse_over(&e))
                     mouse(&e);
             } else if (e.type == GUI_MOUSE_WHEEL) {
-                scroll_view(-e.wheel * WHEEL_LINES);
+                if (program_has_mouse(&e))
+                    ;
+                else if (t->alternate_screen) // a full-screen program's arrow keys, as xterm does
+                    for (int i = 0; i < WHEEL_LINES * (e.wheel < 0 ? -e.wheel : e.wheel); i++)
+                        write_all(t->master, e.wheel < 0 ? (t->app_cursor ? "\x1bOA" : "\x1b[A") : (t->app_cursor ? "\x1bOB" : "\x1b[B"), 3);
+                else
+                    scroll_view(-e.wheel * WHEEL_LINES);
             } else if (e.type == GUI_FOCUS) {
                 focused = e.focused;
                 dirty[t->row] = true;
+                if (t->focus_events)
+                    write_all(t->master, focused ? "\x1b[I" : "\x1b[O", 3);
             } else if (e.type == GUI_RESIZE) {
                 resize(e.width, e.height);
             } else if (e.type == GUI_SETTINGS) {
