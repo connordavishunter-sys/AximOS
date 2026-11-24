@@ -435,6 +435,20 @@ static void sound(struct gui_ui *ui) {
         gui_label(ui, "There's no sound card.");
         return;
     }
+    struct audio_output outputs[8];
+    const char *names[8];
+    int count = audio_outputs(outputs, 8), which = 0;
+
+    count = count > 8 ? 8 : count;
+    for (int i = 0; i < count; i++) {
+        names[i] = outputs[i].name;
+        which = outputs[i].current ? i : which;
+    }
+    if (count > 1) { // each with its own volume, which the slider then shows
+        if (gui_dropdown(ui, "Play through", names, count, &which) && audio_set_output(outputs[which].key))
+            printf("settings: playing through %s\n", outputs[which].name);
+        report(ui, 37, "output");
+    }
     gui_label(ui, "How loud everything plays:");
 
     bool changed = gui_slider(ui, "##volume", &m.volume, 0, 100);

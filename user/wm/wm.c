@@ -1251,8 +1251,17 @@ static int tray_item_at(int x, int y) {
     return -1;
 }
 
+// What can be played through, listed under the volume when there's a choice.
+#define MAX_OUTPUTS 8
+static struct audio_output outputs[MAX_OUTPUTS];
+static int output_count;
+
+static int outputs_height(void) {
+    return output_count > 1 ? output_count * PANEL_LINE + 6 : 0;
+}
+
 static int sound_height(void) {
-    return mixer < 0 ? 0 : 32 + (now_playing[0] ? 22 : 0);
+    return mixer < 0 ? 0 : 32 + (now_playing[0] ? 22 : 0) + outputs_height();
 }
 
 // The brightness, under the volume, then the battery.
@@ -1292,6 +1301,12 @@ static struct rect volume_slider(void) {
     struct rect p = panel_rect(TRAY_QUICK), m = mute_button();
 
     return (struct rect){m.x + m.width + 10, m.y, p.x + p.width - 56 - (m.x + m.width + 10), 20};
+}
+
+static struct rect output_row(int i) {
+    struct rect p = panel_rect(TRAY_QUICK), m = mute_button();
+
+    return (struct rect){p.x + 10, m.y + 32 + (now_playing[0] ? 22 : 0) + i * PANEL_LINE, p.width - 20, PANEL_LINE};
 }
 
 // The brightness's sun and slider, laid out as the volume's.
@@ -1484,6 +1499,20 @@ static void set_volume(int to, bool mute) {
 // through audio_watch.
 static int audio_watch = -1;
 
+static void load_outputs(void) {
+    struct audio_output found[MAX_OUTPUTS];
+    int n = mixer < 0 ? 0 : audio_outputs(found, MAX_OUTPUTS);
+
+    n = n < 0 ? 0 : n > MAX_OUTPUTS ? MAX_OUTPUTS : n;
+    if (n != output_count || memcmp(found, outputs, n * sizeof(*found))) {
+        memcpy(outputs, found, n * sizeof(*found));
+        output_count = n;
+        damage_tray();
+        if (panel == TRAY_QUICK) // its size changes with them
+            add_damage((struct rect){0, 0, screen.width, screen.height});
+    }
+}
+
 static void show_mixer(const struct audio_mixer *m) {
     int had = mixer;
 
@@ -1494,6 +1523,12 @@ static void show_mixer(const struct audio_mixer *m) {
         printf("wm: the volume's %d%s\n", volume, muted ? ", muted" : "");
         damage_tray();
     }
+    if (had != mixer) { // the speaker comes or goes beside the network
+        struct rect q = tray_item(TRAY_QUICK);
+
+        printf("wm: quick settings' icons at %d %d %d %d\n", q.x, q.y, q.width, q.height);
+    }
+    load_outputs();
 }
 
 static void load_volume(void) {
@@ -1755,6 +1790,12 @@ static void report_panel(int item) {
 
         printf("wm: mute at %d %d %d %d\nwm: slider at %d %d %d %d\n", m.x, m.y, m.width, m.height, v.x, v.y, v.width,
                v.height);
+        for (int i = 0; output_count > 1 && i < output_count; i++) {
+            struct rect r = output_row(i);
+
+            printf("wm: output %d at %d %d %d %d, %s%s\n", i, r.x, r.y, r.width, r.height, outputs[i].name,
+                   outputs[i].current ? ", playing" : "");
+        }
     }
     if (backlight[0]) {
         struct rect b = brightness_slider();
@@ -1931,6 +1972,18 @@ static void draw_quick(struct gui_canvas *c, struct rect p, int ox, int oy) {
 
             snprintf(shown, sizeof(shown), "%.*s", (int)gui_text_fit(now_playing, strlen(now_playing), p.width - 24), now_playing);
             gui_text(c, p.x + 12 - ox, m.y + 28 - oy, shown, TASKBAR_DIM_TEXT, 1);
+        }
+        for (int i = 0; output_count > 1 && i < output_count; i++) {
+            struct rect o = output_row(i);
+            char name[sizeof(outputs[i].name)];
+
+            snprintf(name, sizeof(name), "%.*s", (int)gui_text_fit(outputs[i].name, strlen(outputs[i].name), o.width - 16),
+                     outputs[i].name);
+            if (outputs[i].current || contains(o, cursor_x, cursor_y))
+                gui_fill_rounded(c, o.x - ox, o.y - oy, o.width, o.height, SMALL_RADIUS,
+                                 outputs[i].current ? TITLE_FOCUSED : TASKBAR_BUTTON);
+            gui_text(c, o.x + 8 - ox, o.y + (o.height - GUI_CHAR_HEIGHT) / 2 - oy, name,
+                     outputs[i].current ? ON_ACCENT : TASKBAR_TEXT, 1);
         }
     }
     if (backlight[0]) {
@@ -2164,6 +2217,11 @@ static bool panel_click(void) {
     } else if (panel == TRAY_QUICK && mixer >= 0 && contains(mute_button(), cursor_x, cursor_y)) {
         set_volume(volume, !muted);
         play_sound(SOUND_VOLUME);
+    } else if (panel == TRAY_QUICK && mixer >= 0 && output_count > 1) {
+        for (int i = 0; i < output_count; i++) {
+            if (contains(output_row(i), cursor_x, cursor_y) && !outputs[i].current && audio_set_output(outputs[i].key))
+                printf("wm: playing through %s\n", outputs[i].name);
+        }
     } else if (panel == TRAY_NOTICES && history_count && contains(clear_button(TRAY_NOTICES), cursor_x, cursor_y)) {
         clear_history();
         printf("wm: notifications cleared\n");

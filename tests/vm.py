@@ -43,8 +43,8 @@ class VM:
              '-M', 'q35', '-display', 'none', *firmware, *boot,
              '-netdev', 'user,id=net0' + net, '-device', 'e1000,netdev=net0', '-device', 'qemu-xhci',
              '-device', 'usb-tablet',
-             *(['-audiodev', 'none,id=snd0,timer-period=1000', '-device', 'ich9-intel-hda', '-device', 'hda-output,audiodev=snd0']
-               if sound else []),
+             *(['-audiodev', 'none,id=snd0,timer-period=1000', '-device', 'ich9-intel-hda', '-device', 'hda-output,audiodev=snd0',
+                '-audiodev', 'none,id=snd1,timer-period=1000'] if sound else []),  # snd1 for a USB card, plugged in later
              '-chardev', f'socket,id=serial,path={serial},server=on,wait=off,logfile={self.log}', '-serial', 'chardev:serial',
              '-monitor', f'unix:{monitor},server=on,wait=off', '-qmp', f'unix:{qmp},server=on,wait=off', *extra],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -129,10 +129,14 @@ class VM:
         except socket.timeout:
             pass
 
-    def record(self, path):
+    def record(self, path, card='snd0'):
         """Keeps what the sound card plays in a WAV file, 16-bit stereo at 48 kHz, until
-        stop_recording()."""
-        self.command(f'wavcapture {path} snd0 48000 16 2')
+        stop_recording(): the HDA card's, or with snd1, the USB card's plug_usb_sound() adds."""
+        self.command(f'wavcapture {path} {card} 48000 16 2')
+
+    def plug_usb_sound(self, plugged=True):
+        """Plugs a USB sound card in, or unplugs it."""
+        self.command('device_add usb-audio,audiodev=snd1,id=usbsound' if plugged else 'device_del usbsound')
 
     def stop_recording(self):
         self.command('stopcapture 0')

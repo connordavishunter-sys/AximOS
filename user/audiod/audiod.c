@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/inotify.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -33,6 +34,9 @@
 #define IDLE_MS 2000      // how long the card keeps playing silence once there's nothing
 #define PERIOD_NORMAL 480 // frames: 10 ms, twice over, so about 20 ms
 #define PERIOD_LOW 120    // and 2.5 ms, so about 5 ms
+#define MAX_OUTPUTS 16
+#define MAX_LEVELS 32     // the outputs whose volumes are kept, plugged in or not
+#define SCAN_MS 5000      // how often the cards are looked at again, for HDMI monitors coming and going
 
 struct client {
     int fd;
@@ -47,8 +51,30 @@ struct client {
 };
 
 static struct client *clients[MAX_CLIENTS];
-static int volume = 100;
+static int volume = 100; // the output's that's playing
 static bool muted, low_latency;
+
+// What can be played through, and which is: the one chosen, or the one plugged in
+// last, or else the computer's own.
+struct output {
+    char key[64], name[80];
+    int card, device;
+    bool usb;
+};
+
+static struct output outputs[MAX_OUTPUTS];
+static int output_count, current = -1;
+static char chosen[64];
+
+// Each output's volume, kept whether it's plugged in or not.
+struct level {
+    char key[64];
+    int volume;
+    bool muted;
+};
+
+static struct level levels[MAX_LEVELS];
+static int level_count;
 
 static int pcm = -1;                   // the card's playback device
 static snd_pcm_format_t format;
@@ -65,18 +91,48 @@ static int64_t now_ms(void) {
     return t.tv_sec * 1000LL + t.tv_nsec / 1000000;
 }
 
+// An output's volume, made from the one that's playing if it hasn't one yet.
+static struct level *level_of(const char *key) {
+    for (int i = 0; i < level_count; i++) {
+        if (!strcmp(levels[i].key, key))
+            return &levels[i];
+    }
+
+    struct level *l = &levels[level_count < MAX_LEVELS ? level_count++ : MAX_LEVELS - 1];
+
+    *l = (struct level){.volume = volume, .muted = muted};
+    snprintf(l->key, sizeof(l->key), "%s", key);
+    return l;
+}
+
+static void keep_level(void) {
+    if (current >= 0) {
+        struct level *l = level_of(outputs[current].key);
+
+        l->volume = volume;
+        l->muted = muted;
+    }
+}
+
 static void load_conf(void) {
     FILE *f = fopen(CONF, "r");
-    char key[32];
-    int value;
+    char line[128], key[64];
+    int a, b;
 
-    while (f && fscanf(f, "%31s %d", key, &value) == 2) {
-        if (!strcmp(key, "volume"))
-            volume = value < 0 ? 0 : value > 100 ? 100 : value;
-        else if (!strcmp(key, "muted"))
-            muted = value;
-        else if (!strcmp(key, "low-latency"))
-            low_latency = value;
+    while (f && fgets(line, sizeof(line), f)) {
+        if (sscanf(line, "level %63s %d %d", key, &a, &b) == 3) {
+            struct level *l = level_of(key);
+
+            l->volume = a < 0 ? 0 : a > 100 ? 100 : a;
+            l->muted = b;
+        } else if (sscanf(line, "chosen %63s", chosen) == 1)
+            ;
+        else if (sscanf(line, "low-latency %d", &a) == 1)
+            low_latency = a;
+        else if (sscanf(line, "volume %d", &a) == 1) // for outputs not seen before
+            volume = a < 0 ? 0 : a > 100 ? 100 : a;
+        else if (sscanf(line, "muted %d", &a) == 1)
+            muted = a;
     }
     if (f)
         fclose(f);
@@ -85,9 +141,14 @@ static void load_conf(void) {
 static void save_conf(void) {
     FILE *f = fopen(CONF ".new", "w");
 
+    keep_level();
     if (!f)
         return;
     fprintf(f, "volume %d\nmuted %d\nlow-latency %d\n", volume, muted, low_latency);
+    if (chosen[0])
+        fprintf(f, "chosen %s\n", chosen);
+    for (int i = 0; i < level_count; i++)
+        fprintf(f, "level %s %d %d\n", levels[i].key, levels[i].volume, levels[i].muted);
     if (fclose(f) == 0)
         rename(CONF ".new", CONF);
 }
@@ -306,32 +367,147 @@ static void open_controls(int card) {
     apply_volume();
 }
 
-// The first card that plays anything but HDMI, which is the computer's own speakers
-// and headphones.
-static bool open_card(void) {
-    for (int card = 0; card < 8; card++) {
-        for (int device = 0; device < 8; device++) {
-            char path[64];
-            struct snd_pcm_info info = {0};
-            int fd;
+// Whether an HDMI or DisplayPort output has a monitor on it, as its jack says.
+static bool monitor_on(int fd, int device) {
+    struct snd_ctl_elem_value v = {.id = {.iface = SNDRV_CTL_ELEM_IFACE_CARD}};
 
-            snprintf(path, sizeof(path), "/dev/snd/pcmC%dD%dp", card, device);
-            if ((fd = open(path, O_RDWR | O_NONBLOCK | O_CLOEXEC)) < 0)
+    snprintf((char *)v.id.name, sizeof(v.id.name), "HDMI/DP,pcm=%d Jack", device);
+    return ioctl(fd, SNDRV_CTL_IOCTL_ELEM_READ, &v) == 0 && v.value.integer.value[0];
+}
+
+// Every card's playback devices, from its control device, which can be asked while
+// one's playing: the computer's own, USB cards by their names, and HDMI only with a
+// monitor on it.
+static int scan(struct output *found) {
+    int n = 0;
+
+    for (int card = 0; card < 32 && n < MAX_OUTPUTS; card++) {
+        char path[64];
+        struct snd_ctl_card_info info = {0};
+        int fd;
+
+        snprintf(path, sizeof(path), "/dev/snd/controlC%d", card);
+        if ((fd = open(path, O_RDONLY | O_CLOEXEC)) < 0)
+            continue;
+        for (int device = -1; n < MAX_OUTPUTS && ioctl(fd, SNDRV_CTL_IOCTL_CARD_INFO, &info) == 0
+                              && ioctl(fd, SNDRV_CTL_IOCTL_PCM_NEXT_DEVICE, &device) == 0 && device >= 0;) {
+            struct snd_pcm_info p = {.device = device, .stream = SNDRV_PCM_STREAM_PLAYBACK};
+
+            if (ioctl(fd, SNDRV_CTL_IOCTL_PCM_INFO, &p) < 0)
                 continue;
-            if (ioctl(fd, SNDRV_PCM_IOCTL_INFO, &info) == 0 && !strstr((char *)info.name, "HDMI")
-                && !strstr((char *)info.id, "HDMI")) {
-                pcm = fd;
-                printf("audiod: card %d, %s\n", card, (char *)info.name);
-                fflush(stdout);
-                open_controls(card);
-                if (configure())
-                    return true;
-                pcm = -1;
+            bool hdmi = strstr((char *)p.id, "HDMI") || strstr((char *)p.name, "HDMI");
+            bool usb = !strcmp((char *)info.driver, "USB-Audio");
+
+            if (hdmi && !monitor_on(fd, device))
+                continue;
+            found[n] = (struct output){.card = card, .device = device, .usb = usb};
+            snprintf(found[n].key, sizeof(found[n].key), "%s,%d", (char *)info.id, device);
+            snprintf(found[n].name, sizeof(found[n].name), "%s", usb ? (char *)info.name : hdmi ? "HDMI" : "Built-in");
+            n++;
+        }
+        close(fd);
+    }
+    for (int i = 0; i < n; i++) { // the same names told apart
+        for (int j = i + 1; j < n; j++) {
+            if (!strcmp(found[i].name, found[j].name)) {
+                size_t len = strlen(found[j].name);
+
+                snprintf(found[j].name + len, sizeof(found[j].name) - len, " %d", j - i + 1);
             }
-            close(fd);
         }
     }
-    return false;
+    return n;
+}
+
+static void close_card(void) {
+    if (running)
+        ioctl(pcm, SNDRV_PCM_IOCTL_DROP);
+    running = false;
+    if (pcm >= 0)
+        close(pcm);
+    if (ctl >= 0)
+        close(ctl);
+    pcm = ctl = -1;
+    has_volume = has_switch = false;
+}
+
+// Plays through an output from now on, at its own volume.
+static void play_through(int i) {
+    char path[64];
+
+    keep_level();
+    close_card();
+    current = i;
+    if (i < 0) {
+        puts("audiod: there's no sound card");
+        fflush(stdout);
+        return;
+    }
+
+    struct level *l = level_of(outputs[i].key);
+
+    volume = l->volume;
+    muted = l->muted;
+    snprintf(path, sizeof(path), "/dev/snd/pcmC%dD%dp", outputs[i].card, outputs[i].device);
+    if ((pcm = open(path, O_RDWR | O_NONBLOCK | O_CLOEXEC)) < 0 || !configure()) {
+        printf("audiod: can't play through %s\n", outputs[i].name);
+        fflush(stdout);
+        close_card();
+        return;
+    }
+    printf("audiod: playing through %s\n", outputs[i].name);
+    fflush(stdout);
+    open_controls(outputs[i].card);
+}
+
+static void tell_watchers(void);
+
+// Looks at the cards again: one plugged in is played through, and when the one that
+// played's gone, the one chosen, or the computer's own.
+static void update_outputs(bool first) {
+    struct output found[MAX_OUTPUTS];
+    int n = scan(found), plugged = -1, want = -1;
+    char was[64] = "";
+    bool changed = n != output_count;
+
+    if (current >= 0)
+        snprintf(was, sizeof(was), "%s", outputs[current].key);
+    for (int i = 0; i < n; i++) {
+        bool known = false;
+
+        for (int j = 0; j < output_count; j++)
+            known = known || !strcmp(found[i].key, outputs[j].key);
+        changed = changed || !known;
+        if (!first && !known && found[i].usb)
+            plugged = i;
+    }
+    memcpy(outputs, found, sizeof(found));
+    output_count = n;
+    current = -1;
+    for (int i = 0; i < n; i++) {
+        if (!strcmp(outputs[i].key, was))
+            current = want = i;
+    }
+    if (plugged >= 0) {
+        want = plugged;
+        snprintf(chosen, sizeof(chosen), "%s", outputs[plugged].key);
+        save_conf();
+    }
+    for (int i = 0; want < 0 && i < n; i++) { // the one chosen
+        if (!strcmp(outputs[i].key, chosen))
+            want = i;
+    }
+    for (int i = 0; want < 0 && i < n; i++) { // or the computer's own
+        if (!outputs[i].usb)
+            want = i;
+    }
+    want = want < 0 && n ? 0 : want;
+    if (want != current || (want >= 0 && pcm < 0)) {
+        play_through(want);
+        changed = true;
+    }
+    if (changed)
+        tell_watchers();
 }
 
 static void start(void) {
@@ -380,8 +556,11 @@ static bool mix(void) {
     struct snd_pcm_status status = {0};
     bool any = false;
 
-    if (ioctl(pcm, SNDRV_PCM_IOCTL_STATUS, &status) < 0)
+    if (ioctl(pcm, SNDRV_PCM_IOCTL_STATUS, &status) < 0) {
+        if (errno == ENODEV) // unplugged, so another plays
+            update_outputs(false);
         return false;
+    }
     if (status.state == SNDRV_PCM_STATE_XRUN) { // it ran out, so it starts again
         printf("audiod: the card ran out\n");
         fflush(stdout);
@@ -424,7 +603,9 @@ static bool mix(void) {
     struct snd_xferi x = {.buf = format == SNDRV_PCM_FORMAT_S32_LE ? (void *)wide : (void *)narrow, .frames = period};
 
     if (ioctl(pcm, SNDRV_PCM_IOCTL_WRITEI_FRAMES, &x) < 0) {
-        if (errno == EPIPE) {
+        if (errno == ENODEV)
+            update_outputs(false);
+        else if (errno == EPIPE) {
             printf("audiod: the card ran out\n");
             fflush(stdout);
             running = false;
@@ -523,6 +704,37 @@ static bool serve(struct client *c) {
     case AUDIOD_WATCH:
         c->watching = true;
         return reply(c, AUDIOD_WATCH, volume, mixer_flags());
+    case AUDIOD_OUTPUTS:
+        if (!reply(c, AUDIOD_OUTPUTS, output_count, current))
+            return false;
+        for (int i = 0; i < output_count; i++) {
+            struct audiod_output o;
+
+            snprintf(o.key, sizeof(o.key), "%s", outputs[i].key);
+            snprintf(o.name, sizeof(o.name), "%s", outputs[i].name);
+            if (send(c->fd, &o, sizeof(o), MSG_NOSIGNAL) != sizeof(o))
+                return false;
+        }
+        return true;
+    case AUDIOD_OUTPUT: {
+        char key[64] = "";
+        int which = -1;
+
+        read_seat();
+        memcpy(key, packet + sizeof(m), (size_t)n - sizeof(m) < sizeof(key) - 1 ? (size_t)n - sizeof(m) : sizeof(key) - 1);
+        for (int i = 0; i < output_count; i++) {
+            if (!strcmp(outputs[i].key, key))
+                which = i;
+        }
+        if (!heard(c) || which < 0)
+            return reply(c, AUDIOD_OUTPUT, -1, 0);
+        snprintf(chosen, sizeof(chosen), "%s", key);
+        if (which != current)
+            play_through(which);
+        save_conf();
+        tell_watchers();
+        return reply(c, AUDIOD_OUTPUT, 0, 0);
+    }
     case AUDIOD_VOLUME:
     case AUDIOD_MUTE:
     case AUDIOD_LATENCY:
@@ -581,25 +793,32 @@ int main(int argc, char **argv) {
         perror("audiod");
         return 1;
     }
-    if (!open_card()) {
-        puts("audiod: there's no sound card yet");
-        fflush(stdout);
-    }
-    for (int64_t seat_read = 0, card_tried = now_ms();;) {
-        struct pollfd fds[MAX_CLIENTS + 2];
-        int slot[MAX_CLIENTS + 2], n = 0, waiting = running ? -1 : 1000;
+    // Cards come and go as their files in /dev/snd do, and are looked at again a moment
+    // after, once the kernel's made the rest of them.
+    int notify = inotify_init1(IN_NONBLOCK | IN_CLOEXEC), watched = -1;
+
+    update_outputs(true);
+    for (int64_t seat_read = 0, scanned = now_ms(), scan_due = -1;;) {
+        struct pollfd fds[MAX_CLIENTS + 3];
+        int slot[MAX_CLIENTS + 3], n = 0, waiting = 1000;
 
         if (now_ms() - seat_read >= 1000) {
             read_seat();
             seat_read = now_ms();
         }
-        if (pcm < 0 && now_ms() - card_tried >= 2000) { // as its driver may still be starting
-            if (open_card())
-                tell_watchers();
-            card_tried = now_ms();
+        if (watched < 0)
+            watched = inotify_add_watch(notify, "/dev/snd", IN_CREATE | IN_DELETE);
+        if ((scan_due >= 0 && now_ms() >= scan_due) || now_ms() - scanned >= SCAN_MS) {
+            update_outputs(false);
+            scanned = now_ms();
+            scan_due = -1;
         }
+        if (scan_due >= 0)
+            waiting = (int)(scan_due - now_ms() > 0 ? scan_due - now_ms() : 0);
         fds[n] = (struct pollfd){listener, POLLIN, 0};
         slot[n++] = -1;
+        fds[n] = (struct pollfd){notify, POLLIN, 0};
+        slot[n++] = -3;
         for (int i = 0; i < MAX_CLIENTS; i++) {
             struct client *c = clients[i];
 
@@ -612,7 +831,6 @@ int main(int argc, char **argv) {
         if (running) {
             fds[n] = (struct pollfd){pcm, POLLOUT, 0};
             slot[n++] = -2;
-            waiting = 1000;
         }
         if (poll(fds, n, waiting) < 0 && errno != EINTR)
             return 1;
@@ -621,8 +839,15 @@ int main(int argc, char **argv) {
                 continue;
             if (slot[k] == -1)
                 accept_client(listener);
+            else if (slot[k] == -3) {
+                char events[4096];
+
+                while (read(notify, events, sizeof(events)) > 0)
+                    ;
+                scan_due = now_ms() + 300;
+            }
             else if (slot[k] == -2)
-                while (mix())
+                while (pcm >= 0 && mix())
                     ;
             else if (!serve(clients[slot[k]]))
                 clients[slot[k]]->closed = true; // what it wrote still plays

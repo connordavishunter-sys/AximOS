@@ -88,8 +88,21 @@ bool audio_set_volume(int volume);
 bool audio_set_muted(bool muted);
 bool audio_set_low_latency(bool low);
 
-// A connection audiod tells of each change to the mixer, filling in mixer as it is
-// now, or -1 without audiod. It's readable, for poll, when there's been a change,
+// What can be played through: the computer's own speakers and headphones, USB cards
+// by their names, and HDMI with a monitor on it. Each keeps its own volume.
+struct audio_output {
+    char key[64], name[80]; // what stays the same each time it's plugged in, and what to show
+    bool current;           // whether it's what's playing
+};
+
+// Fills in up to max, returning how many there are, or -1 without audiod.
+int audio_outputs(struct audio_output *outputs, int max);
+
+// Plays through the output with that key from now on. Only those audiod hears can.
+bool audio_set_output(const char *key);
+
+// A connection audiod tells of each change to the mixer and the outputs, filling in
+// mixer as it is now, or -1 without audiod. It's readable, for poll, when there's been a change,
 // which audio_mixer_changed reads, returning false once audiod's gone.
 int audio_mixer_watch(struct audio_mixer *mixer);
 bool audio_mixer_changed(int fd, struct audio_mixer *mixer);

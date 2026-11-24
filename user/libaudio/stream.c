@@ -2,6 +2,7 @@
 #include <audio.h>
 #include <audio_codec.h>
 #include <errno.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -108,6 +109,46 @@ static bool mixer_ask(uint32_t type, int32_t a, int32_t *answer, int32_t *flags)
         mixer_fd = -1;
     }
     return false;
+}
+
+int audio_outputs(struct audio_output *outputs, int max) {
+    for (int tries = 0; tries < 2; tries++) {
+        int32_t count, playing;
+
+        if (mixer_fd < 0 && (mixer_fd = connect_audiod()) < 0)
+            return -1;
+        if (ask(mixer_fd, AUDIOD_OUTPUTS, 0, 0, &count, &playing)) {
+            for (int i = 0; i < count; i++) {
+                struct audiod_output o;
+
+                if (recv(mixer_fd, &o, sizeof(o), 0) != sizeof(o))
+                    return -1;
+                if (i < max) {
+                    o.key[sizeof(o.key) - 1] = o.name[sizeof(o.name) - 1] = '\0';
+                    snprintf(outputs[i].key, sizeof(outputs[i].key), "%s", o.key);
+                    snprintf(outputs[i].name, sizeof(outputs[i].name), "%s", o.name);
+                    outputs[i].current = i == playing;
+                }
+            }
+            return count;
+        }
+        close(mixer_fd);
+        mixer_fd = -1;
+    }
+    return -1;
+}
+
+bool audio_set_output(const char *key) {
+    unsigned char packet[sizeof(struct audiod_message) + 64];
+    struct audiod_message m = {AUDIOD_OUTPUT, 0, 0}, answer;
+    size_t len = strnlen(key, 63);
+
+    if (mixer_fd < 0 && (mixer_fd = connect_audiod()) < 0)
+        return false;
+    memcpy(packet, &m, sizeof(m));
+    memcpy(packet + sizeof(m), key, len);
+    return send(mixer_fd, packet, sizeof(m) + len, MSG_NOSIGNAL) > 0
+           && recv(mixer_fd, &answer, sizeof(answer), 0) == sizeof(answer) && answer.type == AUDIOD_OUTPUT && answer.a == 0;
 }
 
 static struct audio_mixer mixer_of(int32_t volume, int32_t flags) {

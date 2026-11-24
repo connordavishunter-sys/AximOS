@@ -21,6 +21,14 @@ enum audiod_type {
     AUDIOD_MUTE,      // a is 1 to mute
     AUDIOD_LATENCY,   // a is 1 for low latency
     AUDIOD_WATCH,     // answered, then sent again with each change, as for AUDIOD_MIXER
+    AUDIOD_OUTPUTS,   // answered with a as how many there are and b as which plays, then each's packet
+    AUDIOD_OUTPUT,    // followed by an output's key: plays through it
+};
+
+// What can be played through: a card's playback device, by its card's name and number,
+// which stay the same each time it's plugged in.
+struct audiod_output {
+    char key[64], name[80];
 };
 
 #define AUDIOD_MUTED 1
