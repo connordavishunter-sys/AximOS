@@ -1,8 +1,11 @@
 #include <aximos.h>
 #include <crypt.h>
 #include <ctype.h>
+#include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <grp.h>
+#include <limits.h>
 #include <pwd.h>
 #include <shadow.h>
 #include <stdio.h>
@@ -15,6 +18,7 @@
 #define PASSWD "/etc/passwd"
 #define GROUP "/etc/group"
 #define SHADOW_FILE "/etc/shadow"
+#define SKEL "/etc/skel" // what each new home starts with
 #define SHELL "/system/bin/bash" // people's; scripts asking for sh get dash
 #define USERS_GID 100
 #define LINE_MAX 1024
@@ -136,6 +140,48 @@ bool account_set_password(const char *name, const char *password) {
     return ok;
 }
 
+// Copies the folder at from into to, its files and folders owned by uid.
+static bool copy_tree(const char *from, const char *to, uid_t uid) {
+    DIR *d = opendir(from);
+    struct dirent *e;
+    bool ok = true;
+
+    if (!d)
+        return errno == ENOENT;
+    while (ok && (e = readdir(d))) {
+        char src[PATH_MAX], dst[PATH_MAX], buf[65536];
+        struct stat st;
+        ssize_t n;
+        int in, out;
+
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, ".."))
+            continue;
+        snprintf(src, sizeof(src), "%s/%s", from, e->d_name);
+        snprintf(dst, sizeof(dst), "%s/%s", to, e->d_name);
+        if (lstat(src, &st) < 0)
+            ok = false;
+        else if (S_ISDIR(st.st_mode))
+            ok = (mkdir(dst, st.st_mode & 07777) == 0 || errno == EEXIST) && lchown(dst, uid, USERS_GID) == 0
+                 && copy_tree(src, dst, uid);
+        else if (S_ISREG(st.st_mode)) {
+            if ((in = open(src, O_RDONLY)) < 0)
+                ok = false;
+            else if ((out = open(dst, O_WRONLY | O_CREAT | O_EXCL, st.st_mode & 0777)) < 0) {
+                ok = errno == EEXIST; // kept, as a home that's there has it already
+                close(in);
+            } else {
+                while ((n = read(in, buf, sizeof(buf))) > 0 && write(out, buf, n) == n)
+                    ;
+                ok = n == 0 && fchown(out, uid, USERS_GID) == 0;
+                close(in);
+                ok = close(out) == 0 && ok;
+            }
+        }
+    }
+    closedir(d);
+    return ok;
+}
+
 bool account_create(const char *name, const char *password, bool admin) {
     char hashed[256], home[300], line[LINE_MAX];
     uid_t uid = FIRST_UID;
@@ -158,7 +204,7 @@ bool account_create(const char *name, const char *password, bool admin) {
     ok = ok && (!admin || rewrite(GROUP, 0644, add_to_admin, name, NULL));
     ulckpwdf();
     if (ok && (mkdir(home, 0700) == 0 || errno == EEXIST))
-        ok = chown(home, uid, USERS_GID) == 0;
+        ok = chown(home, uid, USERS_GID) == 0 && copy_tree(SKEL, home, uid);
     return ok;
 }
 
