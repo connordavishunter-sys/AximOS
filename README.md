@@ -153,8 +153,9 @@ less. Its Limine menu offers the systems the firmware has entries for too, such 
 which it starts as they are, and waits for a choice. The firmware gets an entry for AximOS,
 first in its order, through `efiboot`. Nothing on other partitions is changed.
 
-The development tools, to build programs on AximOS, go on with it, from an archive on the
-stick beside the live system, which doesn't hold them in memory. `--no-dev`, or the
+The development tools, to build programs on AximOS, go on with it: GCC for C and C++,
+binutils, make, m4, patch, and gzip, xz and bzip2, with every library's headers. They come
+from an archive on the stick beside the live system, which doesn't hold them in memory. `--no-dev`, or the
 Installer's checkbox, leaves them out, and installing again later can add them.
 
 ### Making room beside CachyOS
@@ -337,7 +338,8 @@ libblkid and libuuid, [e2fsprogs](https://e2fsprogs.sourceforge.net), [eudev](ht
 [ncurses](https://invisible-island.net/ncurses/)'s terminfo, [OpenSSL](https://openssl-library.org), [libnl](https://github.com/thom311/libnl),
 [wpa_supplicant and hostapd](https://w1.fi/), [bash](https://www.gnu.org/software/bash/),
 [curl](https://curl.se), [git](https://git-scm.com), [OpenSSH](https://www.openssh.com), [zlib-ng](https://github.com/zlib-ng/zlib-ng), GNU
-[coreutils, sed, grep, gawk, findutils and diffutils](https://www.gnu.org/software/), [stb_truetype](https://github.com/nothings/stb), the [DejaVu](https://dejavu-fonts.github.io) fonts,
+[coreutils, sed, grep, gawk, findutils and diffutils](https://www.gnu.org/software/), [GCC](https://gcc.gnu.org)
+with GMP, MPFR and MPC, binutils, make, m4, patch, gzip, [xz](https://tukaani.org/xz/), [bzip2](https://sourceware.org/bzip2/), tar, [zstd](https://facebook.github.io/zstd/), [stb_truetype](https://github.com/nothings/stb), the [DejaVu](https://dejavu-fonts.github.io) fonts,
 [linux-firmware](https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git),
 [Intel's microcode](https://github.com/intel/Intel-Linux-Processor-Microcode-Data-Files) and
 [Arch Linux](https://gitlab.archlinux.org/archlinux/packaging/packages/linux)'s kernel config.

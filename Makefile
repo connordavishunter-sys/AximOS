@@ -94,6 +94,10 @@ $(STAMPS)/curl: $(STAMPS)/openssl $(STAMPS)/zlib-ng
 $(STAMPS)/git: $(STAMPS)/curl
 $(STAMPS)/openssh: $(STAMPS)/openssl $(STAMPS)/zlib-ng
 $(STAMPS)/zstd $(STAMPS)/tar: $(STAMPS)/glibc
+# The development tools, into DEV, which go only on installed systems
+DEV_PORTS := binutils make m4 gzip patch xz bzip2 gcc
+$(DEV_PORTS:%=$(STAMPS)/%): $(STAMPS)/glibc $(STAMPS)/zlib-ng
+$(STAMPS)/gcc: $(STAMPS)/binutils
 $(STAMPS)/coreutils $(STAMPS)/sed $(STAMPS)/grep $(STAMPS)/gawk $(STAMPS)/findutils $(STAMPS)/diffutils: $(STAMPS)/glibc
 $(STAMPS)/dejavu: $(STAMPS)/skeleton
 $(STAMPS)/firmware: $(STAMPS)/skeleton kernel/firmware.list kernel/regdb.sums
@@ -167,12 +171,12 @@ $(INITRAMFS): $(ROOT)/system/bin/init tools desktop $(PORTS:%=$(STAMPS)/%) $(KER
 # The development tools, for installed systems only, so the live one doesn't carry them
 # in memory: what's in DEV, and the headers, static libraries and C runtime's start files
 # the system's own build made, which IMAGE leaves out. aximos-install unpacks it.
-$(DEV_ARCHIVE): $(INITRAMFS)
+$(DEV_ARCHIVE): $(INITRAMFS) $(DEV_PORTS:%=$(STAMPS)/%)
 	rm -rf $(DEV_IMAGE)
 	mkdir -p $(DEV) $(DEV_IMAGE)
 	rsync -a --prune-empty-dirs --include '*/' --include '/system/include/***' --include '*.a' --include '*.o' \
 		--exclude '*' $(ROOT)/ $(DEV_IMAGE)/
-	rsync -a $(DEV)/ $(DEV_IMAGE)/
+	rsync -a --exclude /usr --exclude /system/lib64 $(DEV)/ $(DEV_IMAGE)/ # not its links, which the system has
 	tar --owner=0 --group=0 -C $(DEV_IMAGE) -cf - . | zstd -q -19 -T0 > $@
 
 $(ISO): $(KERNEL) $(INITRAMFS) $(DEV_ARCHIVE) limine.conf

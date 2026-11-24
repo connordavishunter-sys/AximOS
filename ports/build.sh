@@ -6,6 +6,7 @@
 set -e
 root=$(cd "$(dirname "$0")/.." && pwd)
 target=$root/build/root
+dev=$root/build/dev # the development tools, which go in /system on installed systems only
 jobs=$(nproc)
 target_cc="gcc --sysroot=$target"
 linux=linux-7.3.5
@@ -37,10 +38,25 @@ autotools() { # configure options...
 	make install DESTDIR="$target" >/dev/null
 }
 
+# The same for a development tool, into the development tree, finding libraries in it too.
+devtools() { # configure options...
+	if [ ! -e Makefile ]; then
+		CC="$target_cc" CXX="g++ --sysroot=$target" CFLAGS="-O2" CXXFLAGS="-O2" \
+			CPPFLAGS="-I$dev/system/include" LDFLAGS="-L$target/system/lib -L$dev/system/lib" \
+			./configure --host=x86_64-linux-gnu --prefix=/usr --libdir=/usr/lib --sbindir=/usr/bin --sysconfdir=/etc \
+			--disable-static --disable-nls "$@" >/dev/null
+	fi
+	make -j"$jobs" >/dev/null
+	make install DESTDIR="$dev" >/dev/null
+}
+
 # Packages find each other's libraries in the system, not on the host.
 export PKG_CONFIG_SYSROOT_DIR="$target" PKG_CONFIG_LIBDIR="$target/usr/lib/pkgconfig"
 
 mkdir -p "$root/build/ports" "$root/ports/dist"
+mkdir -p "$dev/system/lib" # and its /usr and lib64, as the system's, leading into it
+[ -e "$dev/usr" ] || ln -s system "$dev/usr"
+[ -e "$dev/system/lib64" ] || ln -s lib "$dev/system/lib64"
 cd "$root/build/ports"
 
 case $1 in
@@ -344,6 +360,88 @@ tar) # after glibc: GNU tar, which unpacks the development tools, with zstd
 	unpack tar-1.35.tar.xz tar-1.35
 	cd tar-1.35
 	autotools --without-selinux --disable-acl --without-posix-acls --without-xattrs
+	;;
+binutils) # after glibc: the assembler, the linker and the rest, for building on AximOS
+	fetch https://ftp.gnu.org/gnu/binutils binutils-2.47.tar.xz 154ab23b60070e8f27013c22977f1129425d67d1e8acd6e13010e617811e4cff
+	unpack binutils-2.47.tar.xz binutils-2.47
+	cd binutils-2.47
+	# Not flex's libfl, which configure would find on the host, and its scanners don't need
+	LEXLIB= devtools --disable-werror --disable-gprofng --disable-gdb --disable-gdbserver --disable-sim --disable-libdecnumber \
+		--disable-readline --enable-plugins --enable-default-hash-style=gnu --with-system-zlib
+	;;
+make) # after glibc: GNU make
+	fetch https://ftp.gnu.org/gnu/make make-4.4.1.tar.gz dd16fb1d67bfab79a72f5e8390735c49e3e8e70b4945a15ab1f81ddb78658fb3
+	unpack make-4.4.1.tar.gz make-4.4.1
+	cd make-4.4.1
+	devtools --without-guile
+	;;
+m4) # after glibc: the macro processor, which autoconf and flex need
+	fetch https://ftp.gnu.org/gnu/m4 m4-1.4.21.tar.xz f25c6ab51548a73a75558742fb031e0625d6485fe5f9155949d6486a2408ab66
+	unpack m4-1.4.21.tar.xz m4-1.4.21
+	cd m4-1.4.21
+	devtools
+	;;
+gzip) # after glibc
+	fetch https://ftp.gnu.org/gnu/gzip gzip-1.15.tar.xz 9aa0cc780dec156b8282844833b342ab7cb08c25d2cd9a1869cdd0df31deff48
+	unpack gzip-1.15.tar.xz gzip-1.15
+	cd gzip-1.15
+	devtools
+	;;
+patch) # after glibc
+	fetch https://ftp.gnu.org/gnu/patch patch-2.8.1.tar.xz 3240c7959c5347c8ed347e3c4201c0337bf4240d5cf09d68889e58eeaba30e17
+	unpack patch-2.8.1.tar.xz patch-2.8.1
+	cd patch-2.8.1
+	devtools --disable-xattr
+	;;
+xz) # after glibc: xz and liblzma, for .xz files, which most source comes as
+	fetch https://github.com/tukaani-project/xz/releases/download/v5.8.4 xz-5.8.4.tar.xz \
+		4ce24038fd4221e0d13bc1a2de7a4db56e90b92b3bf75321f6c14be73f65de4b
+	unpack xz-5.8.4.tar.xz xz-5.8.4
+	cd xz-5.8.4
+	devtools --disable-doc
+	;;
+bzip2) # after glibc: bzip2 and libbz2, built by its own makefile
+	fetch https://sourceware.org/pub/bzip2 bzip2-1.0.8.tar.gz ab5a03176ee106d3f0fa90e381da478ddae405918153cca248e682cd0c4a2269
+	unpack bzip2-1.0.8.tar.gz bzip2-1.0.8
+	cd bzip2-1.0.8
+	make -j"$jobs" -f Makefile-libbz2_so CC="$target_cc" CFLAGS="-O2 -fPIC -D_FILE_OFFSET_BITS=64" >/dev/null
+	make -j"$jobs" bzip2 bzip2recover CC="$target_cc" CFLAGS="-O2 -D_FILE_OFFSET_BITS=64" >/dev/null
+	install -D -m 755 bzip2 "$dev/system/bin/bzip2"
+	install -m 755 bzip2recover "$dev/system/bin/"
+	ln -sf bzip2 "$dev/system/bin/bunzip2"
+	ln -sf bzip2 "$dev/system/bin/bzcat"
+	install -D -m 755 libbz2.so.1.0.8 "$dev/system/lib/libbz2.so.1.0.8"
+	ln -sf libbz2.so.1.0.8 "$dev/system/lib/libbz2.so.1.0"
+	ln -sf libbz2.so.1.0.8 "$dev/system/lib/libbz2.so.1"
+	ln -sf libbz2.so.1.0.8 "$dev/system/lib/libbz2.so"
+	install -D -m 644 bzlib.h "$dev/system/include/bzlib.h"
+	;;
+gcc) # after binutils: GCC, for C and C++, with GMP, MPFR and MPC built with it. Built here, it uses the
+	# system's headers and libraries, and on AximOS, /usr's, which are the same, in /system.
+	fetch https://ftp.gnu.org/gnu/gcc/gcc-16.2.0 gcc-16.2.0.tar.xz e6738e29597f733270731aa90600f37ffdc045079dfc27ec7e8192cc81085c3e
+	fetch https://ftp.gnu.org/gnu/gmp gmp-6.3.0.tar.xz a3c2b80201b89e68616f4ad30bc66aee4927c3ce50e33929ca819d5c43538898
+	fetch https://ftp.gnu.org/gnu/mpfr mpfr-4.2.2.tar.xz b67ba0383ef7e8a8563734e2e889ef5ec3c3b898a01d00fa0a6869ad81c6ce01
+	fetch https://ftp.gnu.org/gnu/mpc mpc-1.3.1.tar.gz ab642492f5cf882b74aa0cb730cd410a81edcdbec895183ce930e706c1c759b8
+	if [ ! -d gcc-16.2.0 ]; then
+		unpack gcc-16.2.0.tar.xz gcc-16.2.0
+		for lib in gmp-6.3.0.tar.xz mpfr-4.2.2.tar.xz mpc-1.3.1.tar.gz; do
+			tar xf "$root/ports/dist/$lib" -C gcc-16.2.0
+			ln -sfn "${lib%%.tar*}" "gcc-16.2.0/${lib%%-*}"
+		done
+		sed -i '/m64=/s/lib64/lib/' gcc-16.2.0/gcc/config/i386/t-linux64 # its libraries in lib, as AximOS has them
+	fi
+	mkdir -p gcc-build
+	cd gcc-build
+	[ -e Makefile ] || CC="$target_cc" CXX="g++ --sysroot=$target" ../gcc-16.2.0/configure --build=x86_64-linux-gnu \
+		--host=x86_64-linux-gnu --target=x86_64-linux-gnu --prefix=/usr --libdir=/usr/lib \
+		--libexecdir=/usr/lib --with-build-sysroot="$target" --enable-languages=c,c++ --disable-multilib \
+		--disable-bootstrap --disable-nls --enable-shared --enable-threads=posix --enable-default-pie \
+		--enable-default-ssp --enable-__cxa_atexit --enable-linker-build-id --with-system-zlib --without-isl \
+		--disable-libsanitizer --disable-libgomp --disable-libquadmath --disable-libvtv --disable-werror >/dev/null
+	make -j"$jobs" >/dev/null
+	make install-strip DESTDIR="$dev" >/dev/null
+	ln -sf gcc "$dev/system/bin/cc"
+	rm -f "$dev"/system/lib/*.la "$dev"/system/lib/gcc/*/*/*.la
 	;;
 *)
 	echo "build.sh: no part called $1" >&2

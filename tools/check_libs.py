@@ -1,11 +1,13 @@
-"""Checks every program and library in build/root links only against the system's own
-libraries: each library it needs is there, and has each symbol version it asks for. A
-port that found the host's copy of a library when it was built fails this, as bash
-once did with ncurses. Run by make after the ports are built."""
+"""Checks every program and library in build/root, and in build/dev, the development
+tools, links only against the system's own libraries, or the tools' own: each library
+it needs is there, and has each symbol version it asks for. A port that found the
+host's copy of a library when it was built fails this, as bash once did with ncurses.
+Run by make after the ports are built."""
 import os, re, subprocess, sys
 
-ROOT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'build', 'root', 'system')
-LIBS = os.path.join(ROOT, 'lib')
+BUILD = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'build')
+TREES = [os.path.join(BUILD, tree, 'system') for tree in ('root', 'dev')]
+LIB_DIRS = [os.path.join(tree, 'lib') for tree in TREES]
 
 
 def readelf(*args):
@@ -25,15 +27,15 @@ defined = {}  # a library's file name, to the versions it defines
 
 def versions_defined(name):
     if name not in defined:
-        path = os.path.join(LIBS, name)
+        path = next((os.path.join(d, name) for d in LIB_DIRS if os.path.exists(os.path.join(d, name))), None)
         defined[name] = set(re.findall(r'Name: (\S+)', readelf('-V', '--wide', path).split('Version needs')[0])) \
-            if os.path.exists(path) else None
+            if path else None
     return defined[name]
 
 
 problems = []
-for folder in ('bin', 'lib', 'lib/git-core'):
-    base = os.path.join(ROOT, folder)
+for tree, folder in [(t, f) for t in TREES for f in ('bin', 'lib', 'lib/git-core')]:
+    base = os.path.join(tree, folder)
     for name in sorted(os.listdir(base)) if os.path.isdir(base) else []:
         path = os.path.join(base, name)
         if os.path.islink(path) or not os.path.isfile(path) or not is_elf(path):
@@ -53,9 +55,9 @@ for folder in ('bin', 'lib', 'lib/git-core'):
         for lib in re.findall(r'\(NEEDED\).*\[(.+)\]', readelf('-d', path)):
             have = versions_defined(lib)
             if have is None:
-                problems.append(f'{folder}/{name} needs {lib}, which the system hasn\'t')
+                problems.append(f'{os.path.basename(os.path.dirname(tree))}/{folder}/{name} needs {lib}, which the system hasn\'t')
             elif versions.get(lib, set()) - have:
-                problems.append(f'{folder}/{name} needs {", ".join(sorted(versions[lib] - have))} from {lib}, '
+                problems.append(f'{os.path.basename(os.path.dirname(tree))}/{folder}/{name} needs {", ".join(sorted(versions[lib] - have))} from {lib}, '
                                 'which its copy hasn\'t: it was linked against the host\'s')
 
 for p in problems:
