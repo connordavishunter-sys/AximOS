@@ -98,7 +98,8 @@ $(STAMPS)/zstd $(STAMPS)/tar: $(STAMPS)/glibc
 # The development tools, into DEV, which go only on installed systems, and are what
 # building AximOS needs there
 DEV_PORTS := binutils make m4 gzip patch xz bzip2 gcc perl libffi python bc flex bison gperf elfutils pkgconf \
-	autoconf automake rsync cpio xorriso mtools nasm limine ninja meson kmod
+	autoconf automake rsync cpio xorriso mtools nasm limine ninja meson kmod \
+	pcre2 glib pixman libslirp qemu
 $(DEV_PORTS:%=$(STAMPS)/%): $(STAMPS)/glibc $(STAMPS)/zlib-ng
 $(STAMPS)/gcc: $(STAMPS)/binutils
 $(STAMPS)/python: $(STAMPS)/libffi $(STAMPS)/xz $(STAMPS)/bzip2 $(STAMPS)/openssl $(STAMPS)/ncurses $(STAMPS)/util-linux
@@ -111,10 +112,14 @@ $(STAMPS)/limine: $(STAMPS)/nasm $(STAMPS)/mtools
 $(STAMPS)/ninja: $(STAMPS)/python
 $(STAMPS)/meson: $(STAMPS)/ninja
 $(STAMPS)/kmod: $(STAMPS)/zstd
-$(STAMPS)/coreutils $(STAMPS)/sed $(STAMPS)/grep $(STAMPS)/gawk $(STAMPS)/findutils $(STAMPS)/diffutils: $(STAMPS)/glibc
+$(STAMPS)/glib: $(STAMPS)/pcre2 $(STAMPS)/libffi $(STAMPS)/meson
+$(STAMPS)/pixman: $(STAMPS)/meson
+$(STAMPS)/libslirp: $(STAMPS)/glib
+$(STAMPS)/qemu: $(STAMPS)/glib $(STAMPS)/pixman $(STAMPS)/libslirp $(STAMPS)/bzip2
+$(STAMPS)/dosfstools $(STAMPS)/coreutils $(STAMPS)/sed $(STAMPS)/grep $(STAMPS)/gawk $(STAMPS)/findutils $(STAMPS)/diffutils: $(STAMPS)/glibc
 $(STAMPS)/dejavu $(STAMPS)/tzdata: $(STAMPS)/skeleton
 $(STAMPS)/firmware: $(STAMPS)/skeleton kernel/firmware.list kernel/regdb.sums
-PORTS := dash libxcrypt util-linux e2fsprogs eudev seatd dejavu firmware openssl libnl wpa_supplicant hostapd ncurses zlib-ng curl bash git coreutils sed grep gawk findutils diffutils openssh zstd tar tzdata
+PORTS := dash libxcrypt util-linux e2fsprogs eudev seatd dejavu firmware openssl libnl wpa_supplicant hostapd ncurses zlib-ng curl bash git coreutils sed grep gawk findutils diffutils openssh zstd tar tzdata dosfstools
 
 $(ROOT)/system/bin/init: user/init/init.c $(STAMPS)/glibc
 	$(TARGET_CC) $(TARGET_CFLAGS) $< -o $@

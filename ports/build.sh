@@ -51,6 +51,19 @@ devtools() { # configure options...
 	make install DESTDIR="$dev" >/dev/null
 }
 
+# The same for a meson package. Its libraries are found in both trees, without a sysroot, as
+# pkgconf works out each .pc file's prefix from where it is.
+# Meson and ninja are the development tree's own, on the host too.
+meson=$dev/system/bin/meson ninja=$dev/system/bin/ninja
+mesondev() { # meson options...
+	[ -e build/build.ninja ] || NINJA=$ninja env -u PKG_CONFIG_SYSROOT_DIR PKG_CONFIG_RELOCATE_PATHS=1 \
+		PKG_CONFIG_LIBDIR="$target/system/lib/pkgconfig:$dev/system/lib/pkgconfig" \
+		CC="$target_cc" CXX="g++ --sysroot=$target" LDFLAGS="-L$target/system/lib -L$dev/system/lib" \
+		"$meson" setup build --prefix=/usr --libdir=lib --buildtype=release -Ddefault_library=shared "$@" >/dev/null
+	"$ninja" -C build >/dev/null
+	NINJA=$ninja "$meson" install -C build --strip --destdir "$dev" >/dev/null
+}
+
 # Packages find each other's libraries in the system, not on the host.
 export PKG_CONFIG_SYSROOT_DIR="$target" PKG_CONFIG_LIBDIR="$target/usr/lib/pkgconfig"
 
@@ -622,6 +635,66 @@ tzdata) # the time zones, compiled from IANA's database by its own zic, built fo
 	rm -rf "$zones"
 	./zic -d "$zones" africa antarctica asia australasia europe northamerica southamerica etcetera backward factory
 	cp iso3166.tab zone.tab zone1970.tab zonenow.tab leapseconds leap-seconds.list tzdata.zi SECURITY "$zones/"
+	;;
+dosfstools) # after glibc: mkfs.fat and fsck.fat
+	fetch https://github.com/dosfstools/dosfstools/releases/download/v4.2 dosfstools-4.2.tar.gz \
+		64926eebf90092dca21b14259a5301b7b98e7b1943e8a201c7d726084809b527
+	unpack dosfstools-4.2.tar.gz dosfstools-4.2
+	cd dosfstools-4.2
+	autotools --enable-compat-symlinks
+	;;
+pcre2) # after glibc: the regular expressions glib uses
+	fetch https://github.com/PCRE2Project/pcre2/releases/download/pcre2-10.49 pcre2-10.49.tar.bz2 \
+		53c156e1ba416a20da8e65395daa132da0d80e76910424caca3fcdae7831d384
+	unpack pcre2-10.49.tar.bz2 pcre2-10.49
+	cd pcre2-10.49
+	devtools --enable-jit
+	;;
+glib) # after pcre2, libffi and zlib-ng: GLib, which QEMU is built on
+	fetch https://download.gnome.org/sources/glib/2.90 glib-2.90.1.tar.xz \
+		93c941aa17d5eb1d53fe838365f29a8b4e539c222a256d974ec8f30fc413e396
+	unpack glib-2.90.1.tar.xz glib-2.90.1
+	cd glib-2.90.1
+	mesondev -Dselinux=disabled -Dlibmount=disabled -Dlibelf=disabled -Dintrospection=disabled -Dnls=disabled \
+		-Dsysprof=disabled -Dman-pages=disabled -Ddocumentation=false -Dtests=false
+	;;
+pixman) # after glibc: the pixel drawing QEMU's displays use
+	fetch https://www.x.org/releases/individual/lib pixman-0.46.4.tar.xz \
+		a098c33924754ad43f981b740f6d576c70f9ed1006e12221b1845431ebce1239
+	unpack pixman-0.46.4.tar.xz pixman-0.46.4
+	cd pixman-0.46.4
+	mesondev -Dtests=disabled -Ddemos=disabled -Dgtk=disabled -Dlibpng=disabled
+	;;
+libslirp) # after glib: the network QEMU gives its machines, through the host's own connections
+	fetch https://gitlab.freedesktop.org/slirp/libslirp/-/archive/v4.9.7 libslirp-v4.9.7.tar.gz \
+		d2567fa06a6357c7755d61c67293b2c0bf069b3f2173bde6b76cf768529a1938
+	unpack libslirp-v4.9.7.tar.gz libslirp-v4.9.7
+	cd libslirp-v4.9.7
+	mesondev
+	;;
+qemu) # after glib, pixman, libslirp, meson and ninja: QEMU, for x86-64 machines with KVM, without a window,
+	# as make test runs them. Its own build of edk2's UEFI firmware goes where Arch keeps OVMF's, which is
+	# its variables, then its code.
+	fetch https://download.qemu.org qemu-11.1.3.tar.xz 5a8289c7940dc77d3873c81a6c29ba3afe1446fc9d36e77fa1658cdbecb84b22
+	unpack qemu-11.1.3.tar.xz qemu-11.1.3
+	cd qemu-11.1.3
+	[ -e build/build.ninja ] || env -u PKG_CONFIG_SYSROOT_DIR PKG_CONFIG_RELOCATE_PATHS=1 \
+		PKG_CONFIG_LIBDIR="$target/system/lib/pkgconfig:$dev/system/lib/pkgconfig" \
+		./configure --prefix=/usr --libexecdir=/usr/lib/qemu --cc="$target_cc" --cxx="g++ --sysroot=$target" \
+		--host-cc=gcc --ninja="$ninja" --extra-ldflags="-L$target/system/lib -L$dev/system/lib" --target-list=x86_64-softmmu \
+		--enable-kvm --enable-slirp --disable-sdl --disable-gtk --disable-vnc --disable-opengl --disable-docs \
+		--disable-werror --disable-download --disable-fdt >/dev/null
+	"$ninja" -C build >/dev/null
+	build/pyvenv/bin/meson install -C build --strip --destdir "$dev" >/dev/null # its own meson, which set it up
+	cd "$dev/system/share/qemu" # without the firmware of other machines than x86's
+	rm -rf edk2-arm-* edk2-aarch64-* edk2-riscv-* edk2-loongarch64-* openbios-* skiboot.lid slof.bin vof*.bin \
+		hppa-firmware* u-boot* opensbi-* s390-* qemu_vga.ndrv npcm* pnv-* canyonlands.dtb petalogix-* bamboo.dtb dtb \
+		ast27x0_bootrom.bin palcode-clipper QEMU,cgthree.bin QEMU,tcx.bin qemu-nsis.bmp
+	edk2=$dev/system/share/edk2/x64
+	mkdir -p "$edk2"
+	ln -sf ../../qemu/edk2-x86_64-code.fd "$edk2/OVMF_CODE.4m.fd"
+	ln -sf ../../qemu/edk2-i386-vars.fd "$edk2/OVMF_VARS.4m.fd"
+	cat edk2-i386-vars.fd edk2-x86_64-code.fd > "$edk2/OVMF.4m.fd"
 	;;
 *)
 	echo "build.sh: no part called $1" >&2

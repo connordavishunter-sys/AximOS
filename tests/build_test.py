@@ -69,6 +69,12 @@ try:
     v.run(r"printf 'mine: mine.c\n\tcc -O2 -Wall $< -laximos -o $@\n' > Makefile", 1)  # its tab, which typing would complete
     out = v.run('make && ./mine && ./mine --help', 10)
     check('and make builds against libaximos', 'mine, built with libaximos' in out and 'A program built on AximOS' in out, out)
+
+    # A machine of its own, which with no disk, tries to start from the network, through its card's firmware
+    out = v.run('timeout 20 qemu-system-x86_64 -accel kvm -cpu host -M q35 -m 256 -display none -nodefaults '
+                '-bios /usr/share/edk2/x64/OVMF.4m.fd -serial file:vm.log -netdev user,id=n -device e1000,netdev=n; '
+                "grep -ao 'PXEv4[^)]*' vm.log | head -1", 25)
+    check('and QEMU runs a machine, with KVM and UEFI', 'PXEv4' in out, out)
 finally:
     v.close()
 finish()
