@@ -27,6 +27,7 @@
 #define WM "/system/bin/wm"
 #define TZ "/system/bin/tz"
 #define RETRY_SECONDS 2 // before the log-in screen's started again, if it stops
+#define CONSOLE "tty1" // the desktop's, where seatd starts it
 #define PATH "/system/bin:/system/bin/gui:/system/bin/gui/Accessories:/system/bin/gui/Games:/system/bin/gui/System:" \
              "/system/bin/gui/Demos" // with the apps, in the start menu's folders
 
@@ -162,6 +163,8 @@ int main(int argc, char **argv) {
         }
         fcntl(pair[1], F_SETFD, 0); // for the greeter's wm, and the log-in screen it starts
 
+        account_seat(CONSOLE, GREETER);
+
         pid_t shown = start_wm(GREETER, pair[1], true);
         bool in;
 
@@ -176,7 +179,9 @@ int main(int argc, char **argv) {
         }
         printf("session: %s logged in\n", name);
         fflush(stdout);
+        account_seat(CONSOLE, name);
         waitpid(start_wm(name, -1, false), NULL, 0);
+        account_seat(CONSOLE, NULL);
         printf("session: %s logged out\n", name);
         fflush(stdout);
     }

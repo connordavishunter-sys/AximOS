@@ -1,4 +1,4 @@
 # The log-in screen, then the desktop as whoever logs in, on the first console.
 command session
-after udev seatd
+after udev seatd audiod
 restart

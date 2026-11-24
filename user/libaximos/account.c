@@ -21,7 +21,7 @@
 #define SKEL "/etc/skel" // what each new home starts with
 #define SHELL "/system/bin/bash" // people's; scripts asking for sh get dash
 #define USERS_GID 100
-#define LINE_MAX 1024
+#define LINE_SIZE 1024
 
 bool account_name_ok(const char *name) {
     if (!isalpha((unsigned char)name[0]) || strlen(name) > 31)
@@ -75,7 +75,7 @@ static bool hash(const char *password, char *out, size_t size) {
 // extra if it's not NULL. Others' changes can't interleave, as lckpwdf locks them out.
 static bool rewrite(const char *path, mode_t mode, bool (*change)(char *line, size_t size, const void *with),
                     const void *with, const char *extra) {
-    char temporary[64], line[LINE_MAX];
+    char temporary[64], line[LINE_SIZE];
     FILE *in = fopen(path, "r"), *out;
     bool ok;
 
@@ -111,7 +111,7 @@ static bool replace_password(char *line, size_t size, const void *with) {
 
     if (strncmp(line, n->name, length) || line[length] != ':' || !(rest = strchr(line + length + 1, ':')))
         return false;
-    char tail[LINE_MAX];
+    char tail[LINE_SIZE];
 
     snprintf(tail, sizeof(tail), "%s", rest);
     snprintf(line, size, "%s:%s%s", n->name, n->hash, tail);
@@ -183,7 +183,7 @@ static bool copy_tree(const char *from, const char *to, uid_t uid) {
 }
 
 bool account_create(const char *name, const char *password, bool admin) {
-    char hashed[256], home[300], line[LINE_MAX];
+    char hashed[256], home[300], line[LINE_SIZE];
     uid_t uid = FIRST_UID;
     struct passwd *p;
     bool ok;
@@ -228,4 +228,23 @@ bool account_become(const char *name) {
     setenv("LOGNAME", p->pw_name, 1);
     setenv("SHELL", p->pw_shell, 1);
     return chdir(p->pw_dir) == 0 || chdir("/") == 0;
+}
+
+void account_seat(const char *console, const char *name) {
+    struct passwd *p = name ? getpwnam(name) : NULL;
+    char path[64];
+    FILE *f;
+
+    if (!console || strchr(console, '/'))
+        return;
+    mkdir("/run/seat", 0755);
+    snprintf(path, sizeof(path), "/run/seat/%s", console);
+    if (!p) {
+        unlink(path);
+        return;
+    }
+    if ((f = fopen(path, "w"))) {
+        fprintf(f, "%u\n", (unsigned)p->pw_uid);
+        fclose(f);
+    }
 }

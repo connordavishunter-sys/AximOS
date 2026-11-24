@@ -39,12 +39,33 @@ TARGET_CFLAGS := -std=gnu23 -O2 -Wall -Wextra -Wno-format-truncation -D_GNU_SOUR
 # libaximos.so, which has what they share beyond glibc.
 TOOLS := free kill more ps reboot rename shutdown text top tz counter hello host nc ping mount umount \
 	dmesg hostname lsmod insmod rmmod modprobe ttylogin sudo passwd useradd disk efiboot aximos-install swapon suspend \
-	inputsim netd net wifi axfetch checkpass session
+	inputsim netd net wifi axfetch checkpass session convert audiod volume play
 LIBS_disk := -lblkid
 LIBS_mount := -lblkid
 LIBS_aximos-install := -lblkid
+LIBS_convert := -laudio
+LIBS_audiod := -laudio
+LIBS_volume := -laudio
+LIBS_play := -laudio
 SETUID := sudo passwd tz reboot shutdown suspend checkpass# which start as root, whoever runs them
 LIBAXIMOS := $(ROOT)/system/lib/libaximos.so
+
+# Sound: libaudio.so reads and writes sound files, through a library for each kind,
+# loaded when one's first opened, which wraps archives ports/build.sh codecs makes.
+LIBAUDIO := $(ROOT)/system/lib/libaudio.so
+CODECS := wav mp3 flac vorbis opus aac
+CODEC_LIBS := $(CODECS:%=$(ROOT)/system/lib/lib%.so)
+CODEC_DIR := $(BUILD)/ports/codecs
+CODEC_INCLUDES_mp3 := -I$(BUILD)/ports/minimp3-ea99364f61c14656440e8d77e9c233ccf3124633 -I$(BUILD)/ports/shine-3.1.1/src/lib
+CODEC_INCLUDES_flac := -I$(BUILD)/ports/flac-1.5.0/include -DFLAC__NO_DLL
+CODEC_INCLUDES_vorbis := -I$(BUILD)/ports/libvorbis-1.3.7/include -I$(BUILD)/ports/libogg-1.3.6/include
+CODEC_INCLUDES_opus := -I$(BUILD)/ports/opus-1.6.1/include -I$(BUILD)/ports/libogg-1.3.6/include
+CODEC_INCLUDES_aac := -I$(BUILD)/ports/faad2-2.11.2/include -I$(BUILD)/ports/faac-faac-2.2/include
+CODEC_ARCHIVES_mp3 := $(CODEC_DIR)/shine.a
+CODEC_ARCHIVES_flac := $(CODEC_DIR)/flac.a
+CODEC_ARCHIVES_vorbis := $(CODEC_DIR)/vorbis.a $(CODEC_DIR)/ogg.a
+CODEC_ARCHIVES_opus := $(CODEC_DIR)/opus.a $(CODEC_DIR)/ogg.a
+CODEC_ARCHIVES_aac := $(CODEC_DIR)/faad.a $(CODEC_DIR)/faac.a
 
 # The desktop: libgui.so, wm, and the apps in /system/bin/gui, in the folders the
 # start menu shows, or at the top for those in none. The programs that use libgui
@@ -52,7 +73,7 @@ LIBAXIMOS := $(ROOT)/system/lib/libaximos.so
 LIBGUI := $(ROOT)/system/lib/libgui.so
 GUI_CFLAGS := $(TARGET_CFLAGS) -Iuser/libgui/include -Iuser/libaximos/include -isystem ports/dist
 APP_FOLDERS := Accessories Games System Demos
-APPS_Accessories := calculator editor paint viewer
+APPS_Accessories := calculator editor paint viewer player
 APPS_Games := snake
 APPS_System := settings tasks installer
 APPS_Demos := guidemo widgets
@@ -60,6 +81,8 @@ APPS := term files $(foreach f,$(APP_FOLDERS),$(APPS_$(f)))
 app_dir = $(strip $(foreach f,$(APP_FOLDERS),$(if $(filter $(1),$(APPS_$(f))),$(f)/)))
 APP_PATHS := $(foreach a,$(APPS),$(ROOT)/system/bin/gui/$(call app_dir,$(a))$(a))
 GUI_TOOLS := run notify login
+LIBS_player := -laudio
+LIBS_settings := -laudio
 WM := $(ROOT)/system/bin/wm
 WM_SOURCES := user/wm/wm.c linux/wm_drm.c linux/wm_display.c linux/evdev.c
 
@@ -116,7 +139,7 @@ $(STAMPS)/glib: $(STAMPS)/pcre2 $(STAMPS)/libffi $(STAMPS)/meson
 $(STAMPS)/pixman: $(STAMPS)/meson
 $(STAMPS)/libslirp: $(STAMPS)/glib
 $(STAMPS)/qemu: $(STAMPS)/glib $(STAMPS)/pixman $(STAMPS)/libslirp $(STAMPS)/bzip2
-$(STAMPS)/dosfstools $(STAMPS)/coreutils $(STAMPS)/sed $(STAMPS)/grep $(STAMPS)/gawk $(STAMPS)/findutils $(STAMPS)/diffutils: $(STAMPS)/glibc
+$(STAMPS)/codecs $(STAMPS)/dosfstools $(STAMPS)/coreutils $(STAMPS)/sed $(STAMPS)/grep $(STAMPS)/gawk $(STAMPS)/findutils $(STAMPS)/diffutils: $(STAMPS)/glibc
 $(STAMPS)/dejavu $(STAMPS)/tzdata: $(STAMPS)/skeleton
 $(STAMPS)/firmware: $(STAMPS)/skeleton kernel/firmware.list kernel/regdb.sums
 PORTS := dash libxcrypt util-linux e2fsprogs eudev seatd dejavu firmware openssl libnl wpa_supplicant hostapd ncurses zlib-ng curl bash git coreutils sed grep gawk findutils diffutils openssh zstd tar tzdata dosfstools
@@ -134,22 +157,33 @@ $(TOOLS:%=$(ROOT)/system/bin/%): $(ROOT)/system/bin/%: $$(wildcard user/$$*/*.c)
 	$(if $(filter $*,$(SETUID)),chmod 4755 $@)
 
 $(ROOT)/system/bin/disk $(ROOT)/system/bin/mount $(ROOT)/system/bin/aximos-install: $(STAMPS)/util-linux # for libblkid
+$(ROOT)/system/bin/convert $(ROOT)/system/bin/audiod $(ROOT)/system/bin/volume $(ROOT)/system/bin/play: $(LIBAUDIO)
 
 tools: $(TOOLS:%=$(ROOT)/system/bin/%)
+
+$(LIBAUDIO): $(wildcard user/libaudio/*.c user/libaudio/*.h user/libaudio/include/*.h) $(STAMPS)/glibc
+	cp user/libaudio/include/*.h $(ROOT)/system/include/
+	$(TARGET_CC) $(TARGET_CFLAGS) -Iuser/libaudio/include -fPIC -shared -Wl,-soname,libaudio.so $(filter %.c,$^) -lm -o $@
+
+$(CODEC_LIBS): $(ROOT)/system/lib/lib%.so: user/codecs/%.c $(LIBAUDIO) $(STAMPS)/codecs
+	$(TARGET_CC) $(TARGET_CFLAGS) -Wno-unused-parameter $(CODEC_INCLUDES_$*) -fPIC -shared -Wl,-soname,lib$*.so \
+		$< $(CODEC_ARCHIVES_$*) -laudio -lm -o $@
+
+sound: $(LIBAUDIO) $(CODEC_LIBS)
 
 $(LIBGUI): $(wildcard user/libgui/*.c user/libgui/*.h user/libgui/include/*.h) $(LIBAXIMOS) $(STAMPS)/stb
 	cp user/libgui/include/*.h $(ROOT)/system/include/
 	$(TARGET_CC) $(GUI_CFLAGS) -fPIC -shared -Wl,-soname,libgui.so $(filter %.c,$^) -lm -o $@
 
-$(APP_PATHS): $(ROOT)/system/bin/gui/%: $$(wildcard user/$$(notdir $$*)/*.c) $(LIBGUI)
+$(APP_PATHS): $(ROOT)/system/bin/gui/%: $$(wildcard user/$$(notdir $$*)/*.c) $(LIBGUI) $(LIBAUDIO)
 	@mkdir -p $(@D)
-	$(TARGET_CC) $(GUI_CFLAGS) $(filter %.c,$^) -lgui -laximos -lm -o $@
+	$(TARGET_CC) $(GUI_CFLAGS) $(filter %.c,$^) -lgui -laximos $(LIBS_$(notdir $*)) -lm -o $@
 
 $(GUI_TOOLS:%=$(ROOT)/system/bin/%): $(ROOT)/system/bin/%: $$(wildcard user/$$*/*.c) $(LIBGUI)
 	$(TARGET_CC) $(GUI_CFLAGS) $(filter %.c,$^) -lgui -laximos -lm -o $@
 
-$(WM): $(WM_SOURCES) $(wildcard user/wm/*.h linux/*.h) $(LIBGUI) $(STAMPS)/seatd
-	$(TARGET_CC) $(GUI_CFLAGS) $(WM_SOURCES) -lgui -laximos -lseat -lm -o $@
+$(WM): $(WM_SOURCES) $(wildcard user/wm/*.h linux/*.h) $(LIBGUI) $(LIBAUDIO) $(STAMPS)/seatd
+	$(TARGET_CC) $(GUI_CFLAGS) $(WM_SOURCES) -lgui -laximos -laudio -lseat -lm -o $@
 
 desktop: $(WM) $(APP_PATHS) $(GUI_TOOLS:%=$(ROOT)/system/bin/%)
 
@@ -171,7 +205,7 @@ $(KERNEL): $(KERNEL_BUILD)/.config
 # Until the system has a disk of its own, all of it is the initramfs, with this kernel's
 # modules, after the CPU's microcode, which the kernel looks for in a plain cpio first.
 # It has what install puts on a drive's ESP too, and the accounts as they were built.
-$(INITRAMFS): $(ROOT)/system/bin/init tools desktop $(PORTS:%=$(STAMPS)/%) $(STAMPS)/limine $(KERNEL) kernel/initramfs.list FORCE
+$(INITRAMFS): $(ROOT)/system/bin/init tools desktop sound $(PORTS:%=$(STAMPS)/%) $(STAMPS)/limine $(KERNEL) kernel/initramfs.list FORCE
 	cp -r rootfs/. $(ROOT)/
 	python3 tools/check_libs.py # that nothing was linked against the host's libraries
 	rsync -a --delete --exclude /system/include --exclude /system/lib/modules --exclude '*.a' --exclude '*.o' \

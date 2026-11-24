@@ -1,0 +1,4 @@
+# Sound: every program's, mixed onto the sound card, for whoever's at the screen.
+command audiod
+after udev
+restart

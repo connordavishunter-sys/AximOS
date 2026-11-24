@@ -26,9 +26,11 @@ def key_for(c):
 
 
 class VM:
-    def __init__(self, timeout=300, extra=(), net='', smp=4, memory='2G', nvme=None, efivars=None, iso=BUILD + '/aximos.iso'):
+    def __init__(self, timeout=300, extra=(), net='', smp=4, memory='2G', nvme=None, efivars=None, iso=BUILD + '/aximos.iso',
+                 sound=False):
         """Boots the ISO, or with nvme, the disk image there as an NVMe drive. With efivars,
-        the firmware keeps its variables in that file, a copy of OVMF_VARS."""
+        the firmware keeps its variables in that file, a copy of OVMF_VARS. With sound, it has
+        an Intel HDA card, whose output record() keeps."""
         boot = ['-drive', f'file={nvme},format=raw,if=none,id=boot', '-device', 'nvme,serial=aximos,drive=boot'] \
             if nvme else ['-cdrom', iso]
         firmware = ['-drive', f'if=pflash,format=raw,readonly=on,file={OVMF_CODE}',
@@ -41,6 +43,8 @@ class VM:
              '-M', 'q35', '-display', 'none', *firmware, *boot,
              '-netdev', 'user,id=net0' + net, '-device', 'e1000,netdev=net0', '-device', 'qemu-xhci',
              '-device', 'usb-tablet',
+             *(['-audiodev', 'none,id=snd0,timer-period=1000', '-device', 'ich9-intel-hda', '-device', 'hda-output,audiodev=snd0']
+               if sound else []),
              '-chardev', f'socket,id=serial,path={serial},server=on,wait=off,logfile={self.log}', '-serial', 'chardev:serial',
              '-monitor', f'unix:{monitor},server=on,wait=off', '-qmp', f'unix:{qmp},server=on,wait=off', *extra],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -124,6 +128,15 @@ class VM:
                 pass
         except socket.timeout:
             pass
+
+    def record(self, path):
+        """Keeps what the sound card plays in a WAV file, 16-bit stereo at 48 kHz, until
+        stop_recording()."""
+        self.command(f'wavcapture {path} snd0 48000 16 2')
+
+    def stop_recording(self):
+        self.command('stopcapture 0')
+        time.sleep(0.5)
 
     def key(self, name):
         self.command(f'sendkey {name}')

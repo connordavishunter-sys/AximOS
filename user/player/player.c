@@ -1,6 +1,5 @@
 #include <aximos.h>
 #include <audio.h>
-#include <audio_types.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -9,7 +8,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/ioctl.h>
 #include <unistd.h>
 
 #define MAX_TRACKS 256
@@ -72,22 +70,19 @@ static void apply_volume(int16_t *samples, long count, int volume) {
 }
 
 // How much of what's been written is still to be heard, in the file's samples.
-static int64_t delay(int fd, int rate, int out_rate) {
-    int bytes = 0;
-
-    ioctl(fd, AUDIO_GET_DELAY, &bytes);
-    return (int64_t)bytes / AUDIO_FRAME_BYTES * rate / out_rate;
+static int64_t delay(struct audio_stream *out) {
+    return audio_stream_delay(out);
 }
 
 // Waits while paused, returning false if something else was asked for meanwhile.
 // Pausing forgets what's waiting to be mixed, and carries on after what was mixed
 // already, which is still heard.
-static bool wait_while_paused(unsigned ask, int fd, struct audio_file *f, int64_t *base, int64_t *written, int rate,
-                              int out_rate) {
-    int64_t waiting = delay(fd, rate, out_rate), at;
+static bool wait_while_paused(unsigned ask, struct audio_stream *out, struct audio_file *f, int64_t *base,
+                              int64_t *written) {
+    int64_t waiting = delay(out), at;
 
-    ioctl(fd, AUDIO_FLUSH, NULL);
-    at = *base + *written - waiting + delay(fd, rate, out_rate);
+    audio_stream_flush(out);
+    at = *base + *written - waiting + delay(out);
     shared.position = at;
     while (shared.paused && shared.asked == ask)
         pthread_cond_wait(&changed, &lock);
@@ -100,14 +95,13 @@ static bool wait_while_paused(unsigned ask, int fd, struct audio_file *f, int64_
 static void play(const char *path, unsigned ask) {
     struct audio_info info;
     struct audio_file *f = audio_open(path, &info);
-    int fd = f ? open("/dev/audio", O_WRONLY) : -1, out_rate;
-    struct audio_resampler *resampler = NULL;
+    struct audio_stream *out = f ? audio_play(info.rate, 2) : NULL;
     int64_t base = 0, written = 0;
-    static int16_t in[CHUNK * 2], stereo[CHUNK * 2], out[(CHUNK * 48000 / 8000 + 2) * 2];
+    static int16_t in[CHUNK * 2], stereo[CHUNK * 2];
 
     pthread_mutex_lock(&lock);
-    if (!f || fd < 0) {
-        snprintf(shared.error, sizeof(shared.error), "Can't play it: %s", f ? "there's no sound card" : audio_error());
+    if (!out) {
+        snprintf(shared.error, sizeof(shared.error), "Can't play it: %s", audio_error());
         printf("player: %s\n", shared.error);
         fflush(stdout);
         shared.finished = true;
@@ -122,30 +116,24 @@ static void play(const char *path, unsigned ask) {
     shared.bitrate = info.bitrate;
     pthread_mutex_unlock(&lock);
 
-    // The sound card plays most rates, and anything else is changed to one it does.
-    out_rate = info.rate;
-    if (ioctl(fd, AUDIO_SET_RATE, &out_rate) < 0) {
-        out_rate = AUDIO_RATE_DEFAULT;
-        resampler = audio_resampler_new(info.rate, out_rate, 2);
-    }
     for (;;) {
         pthread_mutex_lock(&lock);
         bool going = shared.asked == ask
-                     && (!shared.paused || wait_while_paused(ask, fd, f, &base, &written, info.rate, out_rate));
+                     && (!shared.paused || wait_while_paused(ask, out, f, &base, &written));
 
         if (!going) {
             pthread_mutex_unlock(&lock);
-            ioctl(fd, AUDIO_FLUSH, NULL); // it's stopped, or something else is to play
+            audio_stream_flush(out); // it's stopped, or something else is to play
             break;
         }
         if (shared.seek >= 0) {
-            ioctl(fd, AUDIO_FLUSH, NULL);
+            audio_stream_flush(out);
             audio_seek(f, shared.seek);
             base = shared.seek;
             written = 0;
             shared.seek = -1;
         }
-        shared.position = base + written - delay(fd, info.rate, out_rate);
+        shared.position = base + written - delay(out);
 
         int volume = shared.volume;
 
@@ -155,7 +143,7 @@ static void play(const char *path, unsigned ask) {
 
         if (n <= 0) {
             // The end: once what's waiting has been heard, it's finished.
-            if (delay(fd, info.rate, out_rate) > 0) {
+            if (delay(out) > 0) {
                 usleep(20000);
                 continue;
             }
@@ -175,18 +163,10 @@ static void play(const char *path, unsigned ask) {
             memcpy(stereo, in, n * 4);
         }
         apply_volume(stereo, n * 2, volume);
-
-        const int16_t *samples = stereo;
-
-        if (resampler) {
-            n = audio_resample(resampler, stereo, n, out, sizeof(out) / 4);
-            samples = out;
-        }
-        write(fd, samples, n * AUDIO_FRAME_BYTES);
+        audio_stream_write(out, stereo, n);
     }
-    audio_resampler_free(resampler);
     audio_close(f);
-    close(fd); // waits for what's been written, unless it was flushed
+    audio_stream_close(out); // what's been written still plays, unless it was flushed
 }
 
 // Plays whatever it's asked to, one at a time.

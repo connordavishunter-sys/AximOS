@@ -71,6 +71,10 @@ bool account_is_admin(const char *name);
 // in does. Only root can.
 bool account_become(const char *name);
 
+// Says who's logged in on a console, such as tty1, in /run/seat, for audiod to know
+// whose sound to play: the account, or with NULL, no one. Only root can.
+void account_seat(const char *console, const char *name);
+
 // Asks a question at the terminal, reading the answer without its newline, and
 // without showing it if it's secret. False at the end of the input.
 bool ask(const char *prompt, char *out, int size, bool secret);

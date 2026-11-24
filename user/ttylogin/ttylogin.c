@@ -43,6 +43,10 @@ int main(int argc, char **argv) {
         fprintf(stderr, "ttylogin: only root can log anyone in\n");
         return 1;
     }
+
+    const char *tty = ttyname(STDIN_FILENO), *console = tty && strrchr(tty, '/') ? strrchr(tty, '/') + 1 : NULL;
+
+    account_seat(console, NULL); // whoever was here's gone
     bool named = !account_any() && !make_first_account(name, sizeof(name));
 
     if (!named)
@@ -57,8 +61,12 @@ int main(int argc, char **argv) {
         bool right = account_check(name, password);
 
         memset(password, 0, sizeof(password));
-        if (right && account_become(name))
-            break;
+        if (right) {
+            account_seat(console, name);
+            if (account_become(name))
+                break;
+            account_seat(console, NULL);
+        }
         puts("Wrong name or password.\n");
         sleep(2);
     }

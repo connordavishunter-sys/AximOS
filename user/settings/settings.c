@@ -1,5 +1,5 @@
 #include <aximos.h>
-#include <audio_types.h>
+#include <audio.h>
 #include <dirent.h>
 #include <fcntl.h>
 #include <gui.h>
@@ -20,7 +20,6 @@
 #define THUMBS_ACROSS 3
 #define MAX_RESOLUTIONS 16
 #define MAX_APPS 32
-#define VOLUME_FILE "/system/etc/volume" // as wm keeps it
 #define TEST_SOUND "/system/share/example_music/1.wav"
 
 enum { APPEARANCE, DISPLAY, KEYBOARD, TIME, SOUND, APPS, TASKBAR, TABS };
@@ -428,39 +427,29 @@ static void keyboard(struct gui_ui *ui) {
     report(ui, 15, "mouse");
 }
 
-// The volume of everything, set on the mixer and kept as wm keeps it, which wm
-// takes up when told the settings changed.
+// The volume of everything, which audiod keeps, and wm shows.
 static void sound(struct gui_ui *ui) {
-    int mixer = open("/dev/mixer", O_RDONLY), volume = 100, muted = 0;
-    bool mute;
-    FILE *f;
+    struct audio_mixer m;
 
-    if (mixer < 0) {
+    if (!audio_mixer_get(&m) || !m.card) {
         gui_label(ui, "There's no sound card.");
         return;
     }
-    ioctl(mixer, MIXER_GET_VOLUME, &volume);
-    ioctl(mixer, MIXER_GET_MUTE, &muted);
-    mute = muted;
     gui_label(ui, "How loud everything plays:");
 
-    bool changed = gui_slider(ui, "##volume", &volume, 0, 100);
+    bool changed = gui_slider(ui, "##volume", &m.volume, 0, 100);
 
     report(ui, 16, "volume");
-    changed |= gui_checkbox(ui, "Mute", &mute);
+    changed |= gui_checkbox(ui, "Mute", &m.muted);
     report(ui, 17, "mute");
-    if (changed) {
-        muted = mute;
-        ioctl(mixer, MIXER_SET_VOLUME, &volume);
-        ioctl(mixer, MIXER_SET_MUTE, &muted);
-        if ((f = fopen(VOLUME_FILE, "w"))) {
-            fprintf(f, "%d%s\n", volume, muted ? " muted" : "");
-            fclose(f);
-        }
-        printf("settings: volume %d%s\n", volume, muted ? ", muted" : "");
+    if (changed && audio_set_volume(m.volume) && audio_set_muted(m.muted)) {
+        printf("settings: volume %d%s\n", m.volume, m.muted ? ", muted" : "");
         gui_settings_changed();
     }
-    close(mixer);
+    if (gui_checkbox(ui, "Low latency", &m.low_latency) && audio_set_low_latency(m.low_latency))
+        printf("settings: low latency %s\n", m.low_latency ? "on" : "off");
+    report(ui, 32, "low latency");
+    gui_label(ui, "Plays sound in about 5 ms rather than 20, but it can crackle while the computer's busy.");
     if (gui_checkbox(ui, "System sounds", &settings.sounds))
         save(settings.sounds ? "sounds on" : "sounds off");
     report(ui, 31, "sounds");

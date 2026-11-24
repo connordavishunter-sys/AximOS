@@ -266,9 +266,14 @@ static struct service *of(pid_t pid) {
 // to start and the computer's asked to stop.
 static void run(void) {
     while (!stop) {
-        for (int i = 0; i < count; i++) {
-            if (!services[i].started && ready(&services[i]))
-                start(&services[i]);
+        for (bool started = true; started;) { // again, for those after one started later in the list
+            started = false;
+            for (int i = 0; i < count; i++) {
+                if (!services[i].started && ready(&services[i])) {
+                    start(&services[i]);
+                    started = true;
+                }
+            }
         }
 
         int status;

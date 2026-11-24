@@ -54,3 +54,36 @@ struct audio_resampler;
 struct audio_resampler *audio_resampler_new(int from, int to, int channels);
 long audio_resample(struct audio_resampler *r, const int16_t *in, long in_frames, int16_t *out, long out_frames);
 void audio_resampler_free(struct audio_resampler *r);
+
+// Playing, through audiod, which mixes everything that's playing. Only root and the
+// account whose console is showing are heard. A stream takes interleaved 16-bit
+// samples, one or two channels, at any rate from 8000 to 192000 a second.
+struct audio_stream;
+
+// Opens a stream, or returns NULL without audiod or a sound card, saying why in audio_error.
+struct audio_stream *audio_play(int rate, int channels);
+
+// Queues samples, waiting while audiod has plenty to play already.
+bool audio_stream_write(struct audio_stream *stream, const int16_t *samples, long frames);
+
+// How many frames written haven't been heard yet.
+long audio_stream_delay(struct audio_stream *stream);
+
+// Forgets what hasn't been heard.
+void audio_stream_flush(struct audio_stream *stream);
+
+// Closes it. What's written still plays to its end.
+void audio_stream_close(struct audio_stream *stream);
+
+// The volume of everything, 0 to 100, which audiod keeps across restarts, and whether
+// it's muted, plays with low latency, and has a sound card. Only those audiod hears
+// can change them.
+struct audio_mixer {
+    int volume;
+    bool muted, low_latency, card;
+};
+
+bool audio_mixer_get(struct audio_mixer *mixer);
+bool audio_set_volume(int volume);
+bool audio_set_muted(bool muted);
+bool audio_set_low_latency(bool low);

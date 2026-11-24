@@ -1,7 +1,7 @@
 #include <aximos.h>
 #include "display.h"
 #include <arpa/inet.h>
-#include <audio_types.h>
+#include <audio.h>
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
@@ -1187,7 +1187,6 @@ enum { TILE_AIRPLANE, TILE_NIGHT, TILE_DARK, TILE_QUIET, TILES };
 #define CLIP_ROW 24
 #define QUICK_WIDTH 400
 #define TILE_HEIGHT 52
-#define VOLUME_FILE GUI_ROOT "/system/etc/volume"
 #define VOLUME_STEP 5
 #define NET_CHECK_MS 5000 // how often the network's looked at, for its icon
 static int panel = -1; // the one open
@@ -1197,7 +1196,7 @@ static void autohide(void);
 // What the player's playing, which it keeps in NOW_PLAYING, shown under the volume.
 #define NOW_PLAYING "/tmp/now-playing"
 static char now_playing[GUI_TITLE_MAX];
-static int mixer = -1, volume = 100;
+static int mixer = -1, volume = 100; // mixer's 0 with a sound card
 static bool muted, setting_volume;
 static struct net_info net;
 static int calendar_month; // shown, from this one
@@ -1373,7 +1372,7 @@ static void play_sound(enum sound which) {
         [SOUND_SNAP] = {{784, 0, 70}, {1046.5f, 35, 110}},
     };
     long frames = 0;
-    int rate = SOUND_RATE, fd;
+    struct audio_stream *stream;
     float *mixed;
     int16_t *out;
 
@@ -1386,7 +1385,7 @@ static void play_sound(enum sound which) {
     }
     mixed = calloc(frames, sizeof(*mixed));
     out = malloc(frames * 2 * sizeof(*out));
-    if (!mixed || !out || (fd = open("/dev/audio", O_WRONLY)) < 0)
+    if (!mixed || !out || !(stream = audio_play(SOUND_RATE, 2)))
         _exit(1);
     for (int i = 0; i < SOUND_NOTES && notes[which][i].length; i++) {
         float hz = notes[which][i].hz, step = 2 * (float)M_PI * hz / SOUND_RATE;
@@ -1404,9 +1403,8 @@ static void play_sound(enum sound which) {
 
         out[2 * f] = out[2 * f + 1] = (int16_t)(v * 32767);
     }
-    ioctl(fd, AUDIO_SET_RATE, &rate);
-    write(fd, out, frames * 2 * sizeof(*out));
-    close(fd); // which waits for it to play
+    audio_stream_write(stream, out, frames);
+    audio_stream_close(stream); // and it plays to its end
     _exit(0);
 }
 
@@ -1471,38 +1469,26 @@ static void clear_history(void) {
 }
 
 static void set_volume(int to, bool mute) {
-    FILE *f;
-
     to = to < 0 ? 0 : to > 100 ? 100 : to;
     if (to == volume && mute == muted)
         return;
     volume = to;
     muted = mute;
-    ioctl(mixer, MIXER_SET_VOLUME, &volume);
-    ioctl(mixer, MIXER_SET_MUTE, &(int){muted});
-    if ((f = fopen(VOLUME_FILE, "w"))) {
-        fprintf(f, "%d%s\n", volume, muted ? " muted" : "");
-        fclose(f);
-    }
+    audio_set_volume(volume);
+    audio_set_muted(muted);
     printf("wm: volume %d%s\n", volume, muted ? ", muted" : "");
     damage_tray();
 }
 
-// What was set last time, which the sound card starts without.
+// What audiod has, which it keeps across restarts.
 static void load_volume(void) {
-    FILE *f = fopen(VOLUME_FILE, "r");
-    char word[16] = "";
-    int was = 100;
+    struct audio_mixer m;
 
-    mixer = open("/dev/mixer", O_RDONLY | O_CLOEXEC);
-    if (f) {
-        if (fscanf(f, "%d %15s", &was, word) < 1)
-            was = 100;
-        fclose(f);
+    mixer = audio_mixer_get(&m) && m.card ? 0 : -1;
+    if (mixer >= 0) {
+        volume = m.volume;
+        muted = m.muted;
     }
-    volume = -1; // so it's set whatever it is
-    if (mixer >= 0)
-        set_volume(was, !strcmp(word, "muted"));
 }
 
 static void set_volume_at(int x) {
@@ -5658,12 +5644,11 @@ static void load_settings(void) {
     display->set_repeat(settings.repeat_delay, settings.repeat_rate);
 
     // The volume may have been set elsewhere, as Settings does.
-    int now_volume = volume, now_muted = muted;
+    struct audio_mixer m;
 
-    if (mixer >= 0 && ioctl(mixer, MIXER_GET_VOLUME, &now_volume) == 0 && ioctl(mixer, MIXER_GET_MUTE, &now_muted) == 0
-        && (now_volume != volume || now_muted != muted)) {
-        volume = now_volume;
-        muted = now_muted;
+    if (mixer >= 0 && audio_mixer_get(&m) && (m.volume != volume || m.muted != muted)) {
+        volume = m.volume;
+        muted = m.muted;
         damage_tray();
     }
     if (output.can_set_mode && settings.width && (settings.width != output.width || settings.height != output.height))
@@ -5805,6 +5790,11 @@ int main(int argc, char **argv) {
             check_network();
             check_battery();
             load_desktop(false);
+            if (mixer < 0) { // as audiod may have found its card since
+                load_volume();
+                if (mixer >= 0)
+                    damage_tray();
+            }
             net_checked = now_ms();
         }
 
