@@ -34,7 +34,7 @@ static char name[64], password[128], again[128], own[128], message[160];
 static int percent;
 static pid_t child;
 static int to_child = -1, from_child = -1;
-static bool gave_password, gave_again;
+static bool gave_password, gave_again, dev_tools = true;
 
 static void find_drives(void) {
     FILE *f = popen("aximos-install list", "r");
@@ -116,13 +116,15 @@ static void start(struct gui_ui *ui) {
         dup2(out[1], 2);
         close(in[1]);
         close(out[0]);
-        char *argv[8] = {"sudo", "aximos-install", drives[chosen].name, (char *)how[ways[way]], "-y"};
+        char *argv[10] = {"sudo", "aximos-install", drives[chosen].name, (char *)how[ways[way]], "-y"};
         int n = 5;
 
         if (fresh())
             argv[n++] = name;
         if (ways[way] == AGAIN_ERASE)
             argv[n++] = "--erase";
+        if (!dev_tools)
+            argv[n++] = "--no-dev";
         execvp("sudo", argv);
         _exit(127);
     }
@@ -212,6 +214,7 @@ static void choose(struct gui_ui *ui) {
         find_ways();
     gui_label(ui, "How");
     gui_dropdown(ui, "##how", way_items, way_count, &way);
+    gui_checkbox(ui, "Development tools, to build programs", &dev_tools);
     if (gui_button(ui, "Next") || next)
         go_to(ui, fresh() ? ACCOUNT : CONFIRM);
 }

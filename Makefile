@@ -4,6 +4,9 @@ OVMF := /usr/share/edk2/x64/OVMF.4m.fd
 BUILD := build
 ROOT := $(BUILD)/root# the system's files, as they go on its disk
 IMAGE := $(BUILD)/image# the same without what's only for building, such as headers
+DEV := $(BUILD)/dev# the development tools, installed there, which go in /system too
+DEV_IMAGE := $(BUILD)/dev-image# those, with what the system's build left out of IMAGE for them
+DEV_ARCHIVE := $(BUILD)/aximos-dev.tar.zst
 STAMPS := $(BUILD)/stamps
 ISO := $(BUILD)/aximos.iso
 ISO_ROOT := $(BUILD)/iso_root
@@ -90,10 +93,11 @@ $(STAMPS)/ncurses: $(STAMPS)/glibc
 $(STAMPS)/curl: $(STAMPS)/openssl $(STAMPS)/zlib-ng
 $(STAMPS)/git: $(STAMPS)/curl
 $(STAMPS)/openssh: $(STAMPS)/openssl $(STAMPS)/zlib-ng
+$(STAMPS)/zstd $(STAMPS)/tar: $(STAMPS)/glibc
 $(STAMPS)/coreutils $(STAMPS)/sed $(STAMPS)/grep $(STAMPS)/gawk $(STAMPS)/findutils $(STAMPS)/diffutils: $(STAMPS)/glibc
 $(STAMPS)/dejavu: $(STAMPS)/skeleton
 $(STAMPS)/firmware: $(STAMPS)/skeleton kernel/firmware.list kernel/regdb.sums
-PORTS := dash libxcrypt util-linux e2fsprogs eudev seatd dejavu firmware openssl libnl wpa_supplicant hostapd ncurses zlib-ng curl bash git coreutils sed grep gawk findutils diffutils openssh
+PORTS := dash libxcrypt util-linux e2fsprogs eudev seatd dejavu firmware openssl libnl wpa_supplicant hostapd ncurses zlib-ng curl bash git coreutils sed grep gawk findutils diffutils openssh zstd tar
 
 $(ROOT)/system/bin/init: user/init/init.c $(STAMPS)/glibc
 	$(TARGET_CC) $(TARGET_CFLAGS) $< -o $@
@@ -160,14 +164,26 @@ $(INITRAMFS): $(ROOT)/system/bin/init tools desktop $(PORTS:%=$(STAMPS)/%) $(KER
 	zstd -q -f -T0 --rm $(BUILD)/initramfs.cpio -o $(BUILD)/initramfs.zst
 	cat $(BUILD)/microcode.cpio $(BUILD)/initramfs.zst > $@
 
-$(ISO): $(KERNEL) $(INITRAMFS) limine.conf
+# The development tools, for installed systems only, so the live one doesn't carry them
+# in memory: what's in DEV, and the headers, static libraries and C runtime's start files
+# the system's own build made, which IMAGE leaves out. aximos-install unpacks it.
+$(DEV_ARCHIVE): $(INITRAMFS)
+	rm -rf $(DEV_IMAGE)
+	mkdir -p $(DEV) $(DEV_IMAGE)
+	rsync -a --prune-empty-dirs --include '*/' --include '/system/include/***' --include '*.a' --include '*.o' \
+		--exclude '*' $(ROOT)/ $(DEV_IMAGE)/
+	rsync -a $(DEV)/ $(DEV_IMAGE)/
+	tar --owner=0 --group=0 -C $(DEV_IMAGE) -cf - . | zstd -q -19 -T0 > $@
+
+$(ISO): $(KERNEL) $(INITRAMFS) $(DEV_ARCHIVE) limine.conf
 	rm -rf $(ISO_ROOT)
 	mkdir -p $(ISO_ROOT)/boot/limine $(ISO_ROOT)/EFI/BOOT
 	cp $(KERNEL) $(ISO_ROOT)/boot/vmlinuz
 	cp $(INITRAMFS) $(ISO_ROOT)/boot/initramfs.cpio.zst
+	cp $(DEV_ARCHIVE) $(ISO_ROOT)/
 	cp limine.conf $(LIMINE_DIR)/limine-uefi-cd.bin $(ISO_ROOT)/boot/limine/
 	cp $(LIMINE_DIR)/BOOTX64.EFI $(ISO_ROOT)/EFI/BOOT/
-	xorriso -as mkisofs -R -r -J --efi-boot boot/limine/limine-uefi-cd.bin -efi-boot-part --efi-boot-image \
+	xorriso -as mkisofs -V AXIMOS_LIVE -R -r -J --efi-boot boot/limine/limine-uefi-cd.bin -efi-boot-part --efi-boot-image \
 		--protective-msdos-label $(ISO_ROOT) -o $@ 2>/dev/null
 
 # The system as it's installed, on a disk image: an EFI system partition with Limine,

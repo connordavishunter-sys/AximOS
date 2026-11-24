@@ -153,6 +153,10 @@ less. Its Limine menu offers the systems the firmware has entries for too, such 
 which it starts as they are, and waits for a choice. The firmware gets an entry for AximOS,
 first in its order, through `efiboot`. Nothing on other partitions is changed.
 
+The development tools, to build programs on AximOS, go on with it, from an archive on the
+stick beside the live system, which doesn't hold them in memory. `--no-dev`, or the
+Installer's checkbox, leaves them out, and installing again later can add them.
+
 ### Making room beside CachyOS
 
 AximOS goes in free space on a drive, and never resizes what's there. Where a system fills

@@ -25,6 +25,9 @@
 #define SWAP_MIB (16 * 1024) // the laptop's RAM, though never more than a quarter of the drive's space
 #define SYSTEM "/run/install/system"
 #define ESP "/run/install/esp"
+#define MEDIUM "/run/install/medium" // the stick it's running from, for what's on it besides the live system
+#define MEDIUM_LABEL "AXIMOS_LIVE"
+#define DEV_ARCHIVE MEDIUM "/aximos-dev.tar.zst"
 #define PAYLOAD "/system/boot"        // what goes on the ESP, which the build puts there
 #define ACCOUNTS "/system/share/install" // the account files as they were built, without the live ones
 #define MAX_DRIVES 16
@@ -42,7 +45,7 @@ struct drive {
     bool gpt;
 };
 
-static bool yes;
+static bool yes, no_dev;
 static uint64_t total, done;
 static int shown = -1;
 
@@ -282,7 +285,7 @@ static bool mount_at(const char *partition, const char *at, const char *type) {
     snprintf(path, sizeof(path), "/dev/%s", partition);
     mkdir("/run/install", 0755);
     mkdir(at, 0755);
-    return mount(path, at, type, 0, NULL) == 0 || failed(path);
+    return mount(path, at, type, strcmp(type, "iso9660") ? 0 : MS_RDONLY, NULL) == 0 || failed(path);
 }
 
 static void progress(uint64_t bytes) {
@@ -534,6 +537,40 @@ static bool write_menu(const char *system, const char *esp) {
     return fclose(out) == 0 || failed("limine.conf");
 }
 
+// The stick or disc it's running from, found by its label, mounted where it can be read.
+static bool mount_medium(void) {
+    DIR *dir = opendir("/sys/block");
+    struct dirent *e;
+    bool found = false;
+
+    while (dir && !found && (e = readdir(dir))) {
+        if (e->d_name[0] != '.' && is(e->d_name, "TYPE", "iso9660") && is(e->d_name, "LABEL", MEDIUM_LABEL)) {
+            umount(MEDIUM);
+            found = mount_at(e->d_name, MEDIUM, "iso9660");
+        }
+    }
+    if (dir)
+        closedir(dir);
+    return found;
+}
+
+// The development tools, from their archive on the stick, which the live system doesn't
+// hold in memory, into /system with the rest.
+static bool add_dev_tools(void) {
+    if (no_dev)
+        return true;
+    if (!mount_medium() || access(DEV_ARCHIVE, R_OK)) {
+        say("the development tools aren't on what it's running from, so they're left out");
+        return true;
+    }
+    say("adding the development tools");
+
+    bool ok = run((char *const[]){"tar", "--zstd", "-xpf", DEV_ARCHIVE, "-C", SYSTEM, NULL}, NULL, NULL, 0);
+
+    umount(MEDIUM);
+    return ok;
+}
+
 // The first account, made as useradd would, in the installed system.
 static bool make_account(const char *name, const char *password) {
     pid_t pid = fork();
@@ -658,7 +695,7 @@ static int install(const char *name, const char *how, bool erase, const char *ac
     copy_tree("/", SYSTEM, root.st_dev, true);
     ok = ok && copy_tree("/", SYSTEM, root.st_dev, false) && put_accounts();
     mkdir(SYSTEM "/home", 0755);
-    ok = ok && make_swap(sys_number("/sys/class/block/%s/size", system));
+    ok = ok && add_dev_tools() && make_swap(sys_number("/sys/class/block/%s/size", system));
     ok = ok && mkdir(ESP "/EFI", 0755) == 0 && mkdir(ESP "/EFI/BOOT", 0755) == 0 && mkdir(ESP "/boot", 0755) == 0
         && mkdir(ESP "/boot/limine", 0755) == 0 && copy_one(PAYLOAD "/BOOTX64.EFI", ESP "/EFI/BOOT/BOOTX64.EFI")
         && copy_one(PAYLOAD "/vmlinuz", ESP "/boot/vmlinuz") && copy_one(PAYLOAD "/microcode.cpio", ESP "/boot/microcode.cpio")
@@ -678,13 +715,14 @@ static int install(const char *name, const char *how, bool erase, const char *ac
 
 int main(int argc, char **argv) {
     help_option(argc, argv, "usage: aximos-install [list]\n"
-                            "       aximos-install DRIVE free|whole|again [NAME] [--erase] [-y]\n"
+                            "       aximos-install DRIVE free|whole|again [NAME] [--erase] [--no-dev] [-y]\n"
                             "Installs AximOS from the live system onto a drive: in its largest free space,\n"
                             "over the whole drive, or again over the AximOS on it, which keeps its /home\n"
                             "and accounts, unless --erase. It asks for the first account's name, unless\n"
                             "given, and password. list gives each drive it can go on, its size, its free\n"
                             "space, and which of those it allows. It asks before changing a drive, unless\n"
-                            "-y. Only root can.\n");
+                            "-y. The development tools, to build programs, go too, unless --no-dev. Only root\n"
+                            "can.\n");
 
     char *args[4] = {0};
     int n = 0;
@@ -695,6 +733,8 @@ int main(int argc, char **argv) {
             yes = true;
         else if (!strcmp(argv[i], "--erase"))
             erase = true;
+        else if (!strcmp(argv[i], "--no-dev"))
+            no_dev = true;
         else if (n < 4)
             args[n++] = argv[i];
     }

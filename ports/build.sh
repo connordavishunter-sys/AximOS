@@ -328,6 +328,23 @@ openssh) # after openssl and zlib-ng: ssh, ssh-keygen and ssh-agent, for git and
 	make install-nokeys DESTDIR="$target" >/dev/null # its host keys are made where it runs, the first time
 	install -d -m 755 "$target/var/empty"
 	;;
+zstd) # after glibc: zstd's compression, which the development tools' archive is in
+	fetch https://github.com/facebook/zstd/releases/download/v1.5.7 zstd-1.5.7.tar.gz \
+		eb33e51f49a15e023950cd7825ca74a4a2b43db8354825ac24fc1b7ee09e6fa3
+	unpack zstd-1.5.7.tar.gz zstd-1.5.7
+	cd zstd-1.5.7
+	# Its own flags, which it adds to, and the system's libraries first in the compiler's command
+	make -j"$jobs" CC="$target_cc -L$target/system/lib" HAVE_ZLIB=0 HAVE_LZMA=0 HAVE_LZ4=0 PREFIX=/usr >/dev/null
+	make install CC="$target_cc -L$target/system/lib" HAVE_ZLIB=0 HAVE_LZMA=0 HAVE_LZ4=0 PREFIX=/usr DESTDIR="$target" \
+		>/dev/null
+	rm -f "$target/system/lib/libzstd.a"
+	;;
+tar) # after glibc: GNU tar, which unpacks the development tools, with zstd
+	fetch https://ftp.gnu.org/gnu/tar tar-1.35.tar.xz 4d62ff37342ec7aed748535323930c7cf94acf71c3591882b26a7ea50f3edc16
+	unpack tar-1.35.tar.xz tar-1.35
+	cd tar-1.35
+	autotools --without-selinux --disable-acl --without-posix-acls --without-xattrs
+	;;
 *)
 	echo "build.sh: no part called $1" >&2
 	exit 1
